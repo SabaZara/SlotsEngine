@@ -9,6 +9,59 @@ oversight.
 
 ---
 
+## ⚠️ Read this first: the reference repo
+
+This project is a response to a review of a larger existing codebase. That
+codebase and the review documents are on disk, and **both should be
+consulted before starting any piece of work** — not after, and not only
+when stuck.
+
+| What | Where |
+|---|---|
+| Reference codebase (~28k lines, 7 apps, 11 packages) | `~/Desktop/irakli/slot-engine` — [backdoor-ge/slot-engine](https://github.com/backdoor-ge/slot-engine) @ `c3b93d3` |
+| Full repository review | `~/Desktop/irakli/review-docs/full-repo-review.md` |
+| Review brief (findings + suggested sequence) | `~/Desktop/irakli/review-docs/slot-engine-review-brief.md` |
+| Paytable audit | `~/Desktop/irakli/slot-engine-paytable-audit.txt` |
+| Study guide | `~/Desktop/irakli/slot-engine-study-guide.txt` |
+
+**Every "the review" reference in this file and in the README points at
+those documents.** F5, and the framing of the whole project, come from
+them.
+
+### The routine, before touching a module
+
+1. **Look for the counterpart there first.**
+   `find ~/Desktop/irakli/slot-engine -path '*<name>*' -not -path '*/node_modules/*' -not -path '*/dist/*'`
+2. **If it has tests, read them before writing your own.** Ask what they
+   cover that a fresh attempt would miss — not to copy, but because the
+   gaps are the expensive ones to rediscover.
+3. **Check the review for a finding on it.** Several are already closed
+   here; do not "fix" what is fixed, and do not re-derive a finding that is
+   written up in detail.
+4. **Adapt, never transplant.** The two codebases differ in real ways —
+   different payline win rule, different collection names, different module
+   layout. Ported code that compiles is not the same as ported code that is
+   correct here.
+
+### What ignoring this already cost
+
+Recorded because the cost was concrete, not hypothetical:
+
+- **F14.** The ledger's concurrency tests were written from scratch against
+  the in-memory fake, covering only *sequential* replay. The reference had
+  real-replica-set concurrency tests for exactly this, and the guarantee
+  they prove — two callers at the same instant, resting on the unique index
+  plus the driver's write-conflict retry — is the one that actually matters
+  on a money path. Found only after being asked about it directly.
+- **The independent model cross-check** (a second, hand-derived probability
+  model, checked against the real evaluator) existed there as an idea and
+  was absent here. It is now the strongest test in `math-engine`.
+
+Both were found by reading, not by reasoning harder. The lesson is cheap to
+apply and was expensive to skip.
+
+---
+
 ## Fixed (recorded so the reasoning survives)
 
 These are done. They are listed because in each case the *reason* the bug
