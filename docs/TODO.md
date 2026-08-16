@@ -520,13 +520,38 @@ testing was extracted into `paylineGrid.ts`, `reelStrip.ts` and the two
   Mongo's actual rule for subdocument equality. Deep equality would have been
   *more* permissive than the database, which is the direction that hides
   bugs.
+- ~~**`findOneAndUpdate` defaulted to the wrong document.**~~ **Fixed.**
+  Mongo returns the document as it was *before* the update unless told
+  otherwise; the fake returned the updated one. Latent, because both real
+  callers (the ledger's debit and the bonus-step claim) pass
+  `returnDocument: "after"` explicitly — they need the post-update state to
+  know what happened. A future caller omitting it would have read the new
+  document in tests and the **old one in production**, which on the money
+  path is a balance read from the wrong side of a write.
+- ~~**Dotted paths in update operators did nothing.**~~ **Fixed.**
+  `$set: { "grid.rows": 3 }` created a literal `"grid.rows"` property
+  instead of nesting, so the update reported success and changed nothing a
+  reader would find. Asymmetric, which made it worse: `matches()` already
+  resolved dotted paths on the *query* side, so a test could filter on a
+  nested field and then silently fail to update it. `$set`, `$inc` and
+  `$unset` now share one path-writing helper that copies each level on the
+  way down — writing in place would edit the document `findOneAndUpdate`
+  returns as "before", which would then show the update it is meant to
+  predate.
 - **Both of the above were latent, and that is the point.** Neither operator
   nor subdocument query appears anywhere in this codebase today, so no test
   could have failed. They were found by *asking what the fake does with input
   it has never seen*, which is now the third distinct way this stand-in has
-  disagreed with Mongo (F16/F21 permissive, F22 restrictive, these two
-  silent). The lesson is that auditing a stand-in against its own callers
-  finds nothing — it has to be audited against the thing it stands in for.
+  disagreed with Mongo (F16/F21 permissive, F22 restrictive, these silent).
+  The lesson is that auditing a stand-in against its own callers finds
+  nothing — it has to be audited against the thing it stands in for.
+
+  **The audit that found them is worth repeating rather than describing.**
+  Nine behaviours were run against both engines in one script and their
+  results diffed: four divergences surfaced in a couple of minutes, where
+  reading the file had found none. The conformance suite is now 30 cases,
+  and the cheapest way to extend it is to write the probe first and keep
+  only the rows that differ.
 - **A fixture that is already minimal cannot test an allowlist.**
   `toPublicView` maps each bonus module down to `moduleId` and `params`.
   Both shipped fixtures happen to have exactly those two fields, so

@@ -174,13 +174,56 @@ function applyUpdate(doc: Doc, update: Record<string, unknown>): Doc {
   }
 
   const next: Doc = { ...doc };
-  for (const [key, value] of Object.entries((update.$set as Record<string, unknown>) ?? {})) next[key] = value;
+  for (const [key, value] of Object.entries((update.$set as Record<string, unknown>) ?? {})) setPath(next, key, value);
   for (const [key, value] of Object.entries((update.$inc as Record<string, number>) ?? {})) {
-    next[key] = ((next[key] as number | undefined) ?? 0) + value;
+    setPath(next, key, ((get(next, key) as number | undefined) ?? 0) + value);
   }
   // Mongo ignores the value entirely; only the key matters.
-  for (const key of Object.keys((update.$unset as Record<string, unknown>) ?? {})) delete next[key];
+  for (const key of Object.keys((update.$unset as Record<string, unknown>) ?? {})) unsetPath(next, key);
   return next;
+}
+
+/**
+ * Writes `value` at a possibly-dotted path, the way Mongo's update
+ * operators address nested fields.
+ *
+ * A plain `doc[key] = value` created a literal `"grid.rows"` property
+ * instead of nesting, so `$set: { "grid.rows": 3 }` left the real
+ * `grid.rows` untouched — the fake reporting success while changing nothing
+ * the reader would find. `matches()` already resolved dotted paths on the
+ * *query* side, which made the asymmetry worse: a test could filter on a
+ * nested field and then fail to update it.
+ *
+ * Copies each level on the way down rather than mutating in place. The
+ * caller has spread only the TOP level of the document, so writing straight
+ * into a nested object would edit the original — and `findOneAndUpdate`
+ * returns the "before" document, which would then show the update it is
+ * supposed to predate.
+ */
+function setPath(doc: Doc, path: string, value: unknown): void {
+  const parts = path.split(".");
+  let cursor: Record<string, unknown> = doc;
+  for (let i = 0; i < parts.length - 1; i++) {
+    const part = parts[i];
+    const existing = cursor[part];
+    cursor[part] = existing && typeof existing === "object" && !Array.isArray(existing) ? { ...(existing as Record<string, unknown>) } : {};
+    cursor = cursor[part] as Record<string, unknown>;
+  }
+  cursor[parts[parts.length - 1]] = value;
+}
+
+/** The `$unset` counterpart. A path whose parent does not exist is a no-op,
+ * as it is in Mongo — not an error. */
+function unsetPath(doc: Doc, path: string): void {
+  const parts = path.split(".");
+  let cursor: Record<string, unknown> = doc;
+  for (let i = 0; i < parts.length - 1; i++) {
+    const existing = cursor[parts[i]];
+    if (!existing || typeof existing !== "object") return;
+    cursor[parts[i]] = { ...(existing as Record<string, unknown>) };
+    cursor = cursor[parts[i]] as Record<string, unknown>;
+  }
+  delete cursor[parts[parts.length - 1]];
 }
 
 class FakeCollection {
@@ -273,18 +316,29 @@ class FakeCollection {
     update: Record<string, unknown>,
     options: { returnDocument?: "before" | "after"; upsert?: boolean } = {},
   ): Promise<Doc | null> {
+    // Mongo's default is "before", not "after" — the fake used to default
+    // the other way. Latent rather than live, because every caller in this
+    // codebase passes `returnDocument: "after"` explicitly (the ledger's
+    // debit and the bonus-step claim both need the post-update state to
+    // decide what happened). But a future caller omitting it would get the
+    // updated document in tests and the ORIGINAL one in production — and on
+    // the money path that is a balance read from the wrong side of a write.
+    const returnAfter = options.returnDocument === "after";
+
     const index = this.docs.findIndex((doc) => matches(doc, query));
     if (index < 0) {
       if (!options.upsert) return null;
       const created = applyUpdate({ ...query } as Doc, update);
       await this.insertOne(created);
-      return options.returnDocument === "before" ? null : created;
+      // An upsert that created the document has no "before" state, and
+      // Mongo returns null for it rather than the new document.
+      return returnAfter ? created : null;
     }
     const before = this.docs[index];
     const after = applyUpdate(before, update);
     this.assertUnique(after, before);
     this.docs[index] = after;
-    return options.returnDocument === "before" ? before : after;
+    return returnAfter ? after : before;
   }
 
   /**

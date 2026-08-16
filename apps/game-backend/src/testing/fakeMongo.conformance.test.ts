@@ -632,6 +632,106 @@ describe("fakeMongo conformance with real MongoDB", () => {
     assert.deepEqual(fake, real, "a subdocument equality match must behave identically");
   });
 
+  /**
+   * `findOneAndUpdate`'s default return.
+   *
+   * Mongo returns the document as it was BEFORE the update unless told
+   * otherwise; the fake returned the updated one. Latent, because every
+   * caller here passes `returnDocument: "after"` explicitly — the ledger's
+   * debit and the bonus-step claim both need the post-update state to know
+   * what happened. But a future caller omitting it would read the new
+   * document in tests and the old one in production, which on the money
+   * path is a balance read from the wrong side of a write.
+   */
+  it("agrees that findOneAndUpdate returns the pre-update document by default", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ id: "p", n: 1 });
+      const returned = await d.collection(collection).findOneAndUpdate({ id: "p" }, { $inc: { n: 1 } });
+      const stored = await d.collection(collection).findOne({ id: "p" });
+      return { returned: (returned as { n?: number } | null)?.n ?? null, stored: stored?.n };
+    });
+
+    assert.deepEqual(real, { returned: 1, stored: 2 }, "Mongo returns the old value and stores the new");
+    assert.deepEqual(fake, real, "the fake must default to 'before' exactly as Mongo does");
+  });
+
+  it("agrees that returnDocument: after returns the updated document", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // The other direction, so the fix cannot overshoot into always
+    // returning the previous document — which every real caller relies on.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ id: "p", n: 1 });
+      const returned = await d
+        .collection(collection)
+        .findOneAndUpdate({ id: "p" }, { $inc: { n: 1 } }, { returnDocument: "after" });
+      return (returned as { n?: number } | null)?.n ?? null;
+    });
+
+    assert.equal(real, 2);
+    assert.equal(fake, real);
+  });
+
+  /**
+   * Dotted paths in update operators.
+   *
+   * `$set: { "grid.rows": 3 }` created a literal `"grid.rows"` property in
+   * the fake instead of nesting, so the update reported success and changed
+   * nothing a reader would find. Worse for being asymmetric: `matches()`
+   * already resolved dotted paths on the QUERY side, so a test could filter
+   * on a nested field and then silently fail to update it.
+   */
+  it("agrees that a dotted $set writes into the nested field", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ id: "p", grid: { reels: 5 } });
+      await d.collection(collection).updateOne({ id: "p" }, { $set: { "grid.rows": 3 } });
+      const doc = await d.collection(collection).findOne({ id: "p" });
+      return { grid: doc?.grid, literalKey: "grid.rows" in (doc ?? {}) };
+    });
+
+    assert.deepEqual(real, { grid: { reels: 5, rows: 3 }, literalKey: false });
+    assert.deepEqual(fake, real, "the fake must nest rather than create a dotted property");
+  });
+
+  it("agrees that a dotted $set creates the parent objects it needs", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ id: "p" });
+      await d.collection(collection).updateOne({ id: "p" }, { $set: { "a.b.c": 7 } });
+      return (await d.collection(collection).findOne({ id: "p" }))?.a;
+    });
+
+    assert.deepEqual(real, { b: { c: 7 } });
+    assert.deepEqual(fake, real);
+  });
+
+  it("agrees that $inc and $unset also resolve dotted paths", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // The other two operators take the same path-writing helper, so they
+    // are pinned together — otherwise only `$set` would be protected and
+    // the other two could regress unnoticed.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ id: "p", s: { n: 4, gone: true } });
+      await d.collection(collection).updateOne({ id: "p" }, { $inc: { "s.n": 3 } });
+      await d.collection(collection).updateOne({ id: "p" }, { $unset: { "s.gone": "" } });
+      return (await d.collection(collection).findOne({ id: "p" }))?.s;
+    });
+
+    assert.deepEqual(real, { n: 7 });
+    assert.deepEqual(fake, real);
+  });
+
   it("agrees that countDocuments honours a limit", async function () {
     if (!realDb) return this.skip(skipReason);
 
