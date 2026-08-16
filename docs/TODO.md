@@ -308,7 +308,7 @@ These have no direct test AND no meaningful indirect coverage.
 | ~~`backoffice-api/src/auth/middleware.ts`~~ | 69 | **Done.** 23 tests on a bare Fastify instance with probe routes, so a failure names the rule rather than a route. All 12 mutations caught — including the revocation lookup in all four of its states (version behind, version ahead, deactivated, user gone). The twelfth mutation is what surfaced F17. Still cannot establish that `buildApp` mounts the hook at all; that is `app.test.ts`'s territory. |
 | ~~`backoffice-api/src/games/simulateClient.ts`~~ | 66 | **Done.** 10 tests, all seven mutations caught — including the one that matters most, the adapter silently ceasing to pass `ASSUMED_BONUS_RETURN_MULTIPLIER` (`runSimulation` defaults it to 0, so every bonus would score nothing and a tuned game would be refused for a reason no report explains). The constant's leverage is now measured by a test rather than asserted from memory, and writing it turned up the sampling-noise figures added to item G. |
 | ~~`game-socket/src/index.ts`~~ | 118 | **Done**, by splitting it. The assembly moved to `server.ts` as `createSocketServer`, following `backoffice-api`'s existing `app.ts`/`index.ts` convention, leaving `index.ts` as config-plus-listen. 17 tests drive a real server on an ephemeral port with a real `ws` client. Two gaps are stated in the file header rather than left silent: the `maxPayload` ceiling and the `readyState` guard both survive mutation, and both were judged not worth a fragile test. Verified end to end — `e2e:spin` passes in full against the rebuilt container. |
-| `game-backend/src/index.ts` | 175 | Same shape: composition, the CORS delegator, the rate-limit key generator, the error handler, and the bonus-sweep interval. Every piece is tested individually; the assembly is not. Note F6 and F7 were both *assembly* bugs. |
+| ~~`game-backend/src/index.ts`~~ | 175 | **Done**, split the same way: composition moved to `app.ts` as `buildApp`, leaving `index.ts` with connections, the sweep interval and shutdown. 14 tests, 10 of 11 mutations caught — **including regression tests for F6 and F7 themselves**, the two bugs that actually happened in this file. Verified live: rebuilt, `e2e:spin` and all four sections of `e2e:load` pass under real concurrency. |
 
 ### B. Covered indirectly, worth direct tests
 
@@ -391,6 +391,35 @@ Items 1, 2, 3b and 4 above. Ordered by what actually blocks going live:
    the moment there are two.
 4. **Branch protection (item 2).** Needs a paid plan; the pre-push hook
    covers the realistic case.
+
+### I. The internal routes' rate limit is unreachable in practice
+
+**Severity: low (defence-in-depth only) · Effort: low**
+
+Found while testing the rate-limit key generator, by trying to observe the
+per-caller bucket on an internal route and failing.
+
+`service-auth` runs as a `preHandler` and rejects an unsigned internal call
+with 401. The limiter runs earlier, at `onRequest`, and does consume its
+counter — but the *response* is a 401 either way, so an unsigned flood never
+sees a 429. Measured: eight requests against a configured limit of three
+returned 401 every time.
+
+That is the correct outcome for an unsigned flood, and cheap: the 401 costs
+no database work. The consequence worth stating is narrower — **the
+per-caller keying that the long comment in `app.ts` justifies is only ever
+exercised by correctly signed traffic**, i.e. by game-socket itself. Its
+protective value is against a legitimate caller looping, not against an
+attacker, who is stopped one hook later regardless.
+
+Nothing here is wrong, and the keying decision is still right (an IP-keyed
+limit on internal routes would throttle the whole platform — see the comment
+in `app.ts`). It is recorded because the comment reads as though the limiter
+is the internal API's front-line defence, and it is not; service-auth is.
+
+The tests reflect this: the keying test runs against `/public/*`, where the
+difference between the two strategies is observable, with a note explaining
+why the internal route cannot show it.
 
 ### H. The production balance guard covers the set case, not the unset one
 
