@@ -534,6 +534,24 @@ testing was extracted into `paylineGrid.ts`, `reelStrip.ts` and the two
   the suite still green. Fixtures now carry a valid salt and a full 64-byte
   digest so the named field is the only thing wrong. Worth checking wherever
   a suite tests refusals by handing over obviously-junk input.
+- **Asserting on a verdict cannot pin arithmetic.** The runs test's first
+  suite caught 6 of 11 mutations, and every survivor was an off-by-one that
+  a pass/fail assertion is structurally blind to: in a 1000-draw stream a
+  run count wrong by one moves z by 0.06 standard deviations, so the verdict
+  is unchanged at *any* sample size. Raising the sample size makes this
+  worse, not better — the statistic concentrates. The fix was a fixture
+  small enough to work out **by hand** (n=8: 4 runs, expected 5, z² = 7/12
+  exactly), asserted to full double precision, where every mutation lands on
+  a visibly different number. Applies to anything computing a statistic and
+  then thresholding it: test the number, not the side of the line it fell on.
+- **An export diff is a scope diff until proven otherwise.** Comparing the
+  two repos' exported functions gave 231 names present there and absent
+  here, which reads alarming and is almost entirely product surface this
+  project deliberately does not have. Exactly one — `runsTest` — was a real
+  gap, and even that closed a *completeness* concern rather than a
+  detection one, which took three constructed counter-examples to establish
+  rather than assert. The useful form of the question is not "what is
+  missing" but "what is missing that I cannot already do".
 - **A stand-in can hide a bug by being *stricter*, not just looser.** F16,
   F17 and F21 were all the fake being more permissive than Mongo. F22 is the
   mirror image: `limit(NaN)` returns `[]` from the fake and the **entire
@@ -614,6 +632,97 @@ is the internal API's front-line defence, and it is not; service-auth is.
 The tests reflect this: the keying test runs against `/public/*`, where the
 difference between the two strategies is observable, with a note explaining
 why the internal route cannot show it.
+
+### ~~K. The certification report has no runs test~~ — added
+
+**Severity: low (certification completeness) · Effort: low**
+
+Found by diffing the reference repo's exported surface against this one:
+331 exports there, 183 here, and after discarding everything that is scope
+rather than gap (`game-renderer`, `game-shell`, operator/currency/reporting
+surfaces, `asset-storage`, `secrets`) exactly one statistical test remained
+that this suite did not have.
+
+`runsAboveBelowMedian` is now the fourth test in the report. It counts
+median crossings and compares them to the null distribution — an **ordering**
+test, where the other three are all distributional.
+
+**Stated honestly, because the measurement did not support the obvious
+claim.** Three streams were built specifically to evade the existing suite —
+a sorted sweep, a block-ordered stream, and strict alternation — and
+`serialCorrelation` caught all three. Its 16×16 contingency grid detects any
+structure in consecutive pairs, not merely linear correlation, which makes it
+strictly stronger than the scalar lag-1 coefficient the reference pairs its
+runs test with. **No detection hole was demonstrated.** This was added
+because a certification reviewer expects a runs test by name and its absence
+invites a question the other three cannot answer, not because the suite was
+missing coverage.
+
+What it does add is a *diagnosis*. The blocked stream fails
+`chiSquaredUniformity` too — but on `p = 1`, the too-even direction, which
+says "these counts are suspiciously perfect" rather than "these draws are in
+sorted order". Two tests failing for unrelated reasons is not redundancy; the
+runs row is the one that names the fault. Pinned by a test asserting both
+directions.
+
+Adapted rather than transplanted, in three ways that matter:
+
+- **Reports z² instead of z**, which is exactly chi-squared with one degree
+  of freedom. That reuses the existing `evaluate` path, so there is no second
+  numerical method to keep correct and the tail precision won by item J comes
+  along free. Verified against published two-sided normal values: z=1.96 →
+  0.0499958, z=3.29 → 0.0010019.
+- **Two-sided band**, where the reference's `pass` is one-sided. Too *many*
+  runs is alternation and too *few* is blocking; a one-sided test waves one
+  of them through.
+- **Splits at 0.5, not at the sample median.** The theoretical median of a
+  uniform generator *is* 0.5, and splitting at the sample median would make
+  the test partly self-referential — a generator emitting only values in
+  [0.90, 0.91) would split its own output evenly and score a healthy run
+  count on a stream with no spread at all.
+
+The degenerate case (every draw on one side) has zero variance and is
+returned as an explicit failure rather than a division by zero, since a `NaN`
+p-value compared against the band yields `false` for the wrong reason and
+prints as `null`.
+
+**A weak first suite, worth recording.** The initial tests caught only 6 of
+11 mutations. Every failure case was so extreme that any arithmetic error
+still failed it — a run count off by one in a 1000-draw stream moves z by
+0.06 standard deviations, so *no* pass/fail assertion at any sample size can
+detect an off-by-one. The fix was a fixture worked out **by hand** (n=8,
+alternating in blocks of two: 4 runs, expected 5, variance 512/448, z² = 7/12
+exactly) where each mutation lands on a different number — 7/12 correct,
+2.3̄ for a dropped initial run, exactly 0 for a dropped `+1`, 0.35 for a
+flipped variance sign. All 11 mutations caught after that. **Asserting on a
+verdict cannot pin arithmetic; only asserting on the statistic can.**
+
+### ~~L. `connectMongo` does not wait for PRIMARY~~ — not needed here, and why
+
+The reference's `client.ts` self-heals replica-set initiation and polls
+`replSetGetStatus` until `myState === 1`. Its docstring records a real bug:
+on container restart with a pre-existing replica-set data directory, mongod
+completes its startup election *after* `replSetGetStatus` starts succeeding,
+and three services racing to connect all hit "node is not in primary or
+recovering state".
+
+**This architecture solves it one layer down instead.** `infra/docker-compose.yml`
+initiates the set in mongo's own healthcheck and gates every dependent
+service on `condition: service_healthy`, so nothing connects until the node
+answers. Porting `waitUntilPrimary` would be scaffolding against a race that
+cannot occur here.
+
+Tested rather than assumed, since the claim is about startup ordering and
+that is exactly the kind of thing reasoning gets wrong: the stack was fully
+stopped and cold-started with a pre-existing volume — the precise scenario
+the reference's comment names — and both `game-backend` and `backoffice-api`
+came up clean, zero election errors in either log, both health endpoints 200.
+
+Recorded as a **deliberate non-decision** rather than left silent, because
+the next person to diff the two repos will find the same missing function and
+should not have to re-derive why it is absent. The one thing worth watching:
+if the healthcheck's `rs.initiate` gate is ever weakened, or a service is
+added without `depends_on: service_healthy`, this reasoning expires with it.
 
 ### ~~J. The RNG report cannot express a p-value below ~1e-16~~ — fixed
 

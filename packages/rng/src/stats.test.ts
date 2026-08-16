@@ -7,6 +7,7 @@ import {
   evaluate,
   rollIntUniformity,
   runRngTestSuite,
+  runsAboveBelowMedian,
   serialCorrelation,
   type TestResult,
 } from "./stats.js";
@@ -237,9 +238,9 @@ describe("the report", () => {
     assert.ok(report.algorithm, "an unnamed algorithm makes the report unreplayable later");
   });
 
-  it("runs all three tests", () => {
+  it("runs all four tests", () => {
     const report = runRngTestSuite(20_000, seedFrom("all"));
-    assert.equal(report.results.length, 3);
+    assert.equal(report.results.length, 4);
 
     // Named rather than counted, so dropping one and adding another does
     // not silently keep this passing.
@@ -247,6 +248,7 @@ describe("the report", () => {
     assert.match(names, /chi-squared uniformity/);
     assert.match(names, /rollInt uniformity/);
     assert.match(names, /serial correlation/);
+    assert.match(names, /runs about the median/);
   });
 
   it("only reports passed when EVERY test passed, not merely one", () => {
@@ -409,5 +411,202 @@ describe("rollIntUniformity specifically", () => {
 
     assert.equal(result.degreesOfFreedom, 15);
     assert.ok(result.passed, `uniformity over 0-15 should hold: p=${result.pValue}`);
+  });
+});
+
+/**
+ * The runs test, added for certification completeness.
+ *
+ * These tests are written against **injected streams with known run
+ * counts**, not against the real generator, because a healthy generator
+ * only ever exercises the passing direction. The three failure shapes below
+ * — blocked, alternating, and one-sided — are the whole reason the test
+ * exists, and none of them is reachable through `createRng`'s real
+ * algorithm.
+ */
+describe("runsAboveBelowMedian", () => {
+  /** Registers a generator emitting `values` on repeat, and returns the
+   * cleanup so the registry does not leak between cases. */
+  function withStream(id: string, values: number[], run: (algorithm: RngAlgorithmId) => void): void {
+    const restore = registerTestAlgorithm(id, () => {
+      let i = 0;
+      return () => values[i++ % values.length];
+    });
+    try {
+      run(id as RngAlgorithmId);
+    } finally {
+      restore();
+    }
+  }
+
+  /**
+   * The arithmetic, against a fixture derived entirely by hand.
+   *
+   * The pass/fail cases below cannot pin this. A runs count off by one in a
+   * 1000-draw stream shifts z by 0.06 standard deviations, so *every*
+   * off-by-one mutation still lands inside the band and the verdict is
+   * unchanged — measured, and it is why an earlier version of this suite let
+   * five mutations survive. Asserting on the computed statistic is the only
+   * thing that distinguishes them.
+   *
+   * Worked by hand for n = 8, alternating in blocks of two:
+   *
+   *   below below above above below below above above
+   *   runs        = 4      (four maximal same-side blocks)
+   *   above=4, below=4
+   *   expectedRuns = (2·4·4)/8 + 1 = 5
+   *   variance     = (2·4·4·(2·4·4 − 8)) / (8²·7) = 512/448 = 1.714285…
+   *   z            = (4 − 5)/√1.714285… = −0.763763…
+   *   z²           = 0.583333…  (exactly 7/12)
+   *
+   * Each mutation lands on a different number: dropping the initial run
+   * gives 2.3̄, dropping the `+1` gives exactly 0, and flipping the sign in
+   * the variance numerator gives 0.35.
+   */
+  it("computes the statistic exactly, on a fixture worked out by hand", () => {
+    withStream("runs-arithmetic", [0.25, 0.25, 0.75, 0.75], (algorithm) => {
+      const result = runsAboveBelowMedian(seedFrom("hand"), 8, algorithm);
+
+      // 7/12, to full double precision rather than to a tolerance that would
+      // let a nearby wrong answer through.
+      assert.ok(
+        Math.abs(result.statistic - 7 / 12) < 1e-12,
+        `z² should be exactly 7/12 = 0.5833…, got ${result.statistic}`,
+      );
+    });
+  });
+
+  it("counts the first draw as opening a run, not as a transition", () => {
+    // A stream that never crosses the median at all has exactly ONE run, not
+    // zero. Starting the count at zero is invisible in every large-sample
+    // test — it moves z by a fraction of a standard deviation — so it is
+    // pinned here on a stream small enough for the count to be exact.
+    //
+    // Uses the degenerate path deliberately: all-above is the one case where
+    // the run count is knowable without any arithmetic.
+    withStream("runs-first-draw", [0.75], (algorithm) => {
+      const result = runsAboveBelowMedian(seedFrom("first"), 8, algorithm);
+      assert.equal(result.statistic, Number.POSITIVE_INFINITY, "one run, zero variance, no z to compute");
+    });
+  });
+
+  it("expects one more run than the number of median crossings", () => {
+    // The `+ 1` in expectedRuns. On the hand fixture it is the difference
+    // between z² = 7/12 and z² = 0 — i.e. between a slightly-low run count
+    // and a perfectly average one, which is a claim about the null
+    // distribution rather than a rounding detail.
+    withStream("runs-plus-one", [0.25, 0.25, 0.75, 0.75], (algorithm) => {
+      const result = runsAboveBelowMedian(seedFrom("plusone"), 8, algorithm);
+      assert.notEqual(result.statistic, 0, "dropping the +1 would make this exactly average");
+    });
+  });
+
+  it("passes a healthy generator, whose run count sits near expectation", () => {
+    const result = runsAboveBelowMedian(seedFrom("runs-healthy"), 100_000);
+
+    assert.ok(result.passed, `xoshiro256** should produce a plausible run count: p=${result.pValue}`);
+    assert.equal(result.degreesOfFreedom, 1, "z-squared is chi-squared with one degree of freedom");
+  });
+
+  it("catches a stream sorted into two blocks — the failure shape it was added for", () => {
+    // 500 draws below the median followed by 500 above: a genuinely uniform
+    // histogram (values spread across the range within each block), and
+    // exactly 2 runs where ~501 are expected.
+    const lower: number[] = [];
+    const upper: number[] = [];
+    for (let i = 0; i < 500; i++) {
+      lower.push(i / 1000);
+      upper.push(0.5 + i / 1000);
+    }
+
+    withStream("runs-blocked", [...lower, ...upper], (algorithm) => {
+      const result = runsAboveBelowMedian(seedFrom("blocked"), 1_000, algorithm);
+
+      assert.equal(result.passed, false, "two runs in a thousand draws must fail");
+      assert.ok(result.pValue < 1e-100, `an ordering this extreme should be emphatic: p=${result.pValue}`);
+    });
+  });
+
+  it("names the ordering defect that the frequency test can only call 'too even'", () => {
+    // Worth pinning precisely, because it is the honest scope of this test.
+    // The blocked stream above ALSO fails `chiSquaredUniformity` — but on
+    // p = 1, the too-even direction, which says "these counts are suspiciously
+    // perfect" and not "these draws are in sorted order". Two tests failing
+    // for unrelated reasons is not redundancy; a reviewer reading the report
+    // gets the actual diagnosis from this row and a puzzle from the other.
+    const lower: number[] = [];
+    const upper: number[] = [];
+    for (let i = 0; i < 500; i++) {
+      lower.push(i / 1000);
+      upper.push(0.5 + i / 1000);
+    }
+
+    withStream("runs-diagnosis", [...lower, ...upper], (algorithm) => {
+      const uniformity = chiSquaredUniformity(seedFrom("blocked"), 1_000, 100, algorithm);
+      const runs = runsAboveBelowMedian(seedFrom("blocked"), 1_000, algorithm);
+
+      // The frequency test fails from the TOO-EVEN side...
+      assert.equal(uniformity.passed, false);
+      assert.ok(uniformity.pValue > 0.995, "chi-squared rejects this as suspiciously even, not as clustered");
+
+      // ...while the runs test fails from the side that describes the fault.
+      assert.equal(runs.passed, false);
+      assert.ok(runs.pValue < 0.005, "runs rejects it as ordered, which is the real defect");
+    });
+  });
+
+  it("catches strict alternation, which is too MANY runs rather than too few", () => {
+    // The opposite defect, and the reason the band is two-sided. A
+    // one-sided test — the shape the reference uses — waves this through.
+    const alternating = [0.25, 0.75];
+
+    withStream("runs-alternating", alternating, (algorithm) => {
+      const result = runsAboveBelowMedian(seedFrom("alt"), 1_000, algorithm);
+      assert.equal(result.passed, false, "a run count far ABOVE expectation is also a defect");
+    });
+  });
+
+  it("refuses a one-sided stream rather than dividing by zero", () => {
+    // Every draw above the median: one run, and the variance term is zero.
+    // Must report a failure, not NaN — a NaN p-value compared against the
+    // band yields `false` for the wrong reason, and prints as null.
+    withStream("runs-onesided", [0.75], (algorithm) => {
+      const result = runsAboveBelowMedian(seedFrom("one"), 1_000, algorithm);
+
+      assert.equal(result.passed, false);
+      assert.equal(result.pValue, 0, "a degenerate split must read as a certainty, not as NaN");
+      assert.ok(!Number.isNaN(result.statistic), "the statistic must not be NaN");
+    });
+  });
+
+  it("splits at 0.5 rather than at the sample median, so a no-spread stream still fails", () => {
+    // Every value in [0.90, 0.91): a stream with essentially no spread.
+    // Splitting at the SAMPLE median would divide this evenly and score a
+    // healthy run count, quietly passing a generator with no range at all.
+    // Splitting at the theoretical median puts every draw on one side.
+    const narrow = [0.900, 0.902, 0.904, 0.906, 0.908];
+
+    withStream("runs-narrow", narrow, (algorithm) => {
+      const result = runsAboveBelowMedian(seedFrom("narrow"), 1_000, algorithm);
+      assert.equal(result.passed, false, "a stream with no spread must not pass the runs test");
+    });
+  });
+
+  it("reports z-squared, so the statistic is comparable with the other three tests", () => {
+    // Every result in the report shares one scale and one band. A z-score
+    // reported raw would be read against the wrong thresholds by anyone
+    // scanning the table.
+    const result = runsAboveBelowMedian(seedFrom("runs-scale"), 50_000);
+
+    assert.ok(result.statistic >= 0, "z-squared is never negative");
+    assert.equal(result.degreesOfFreedom, 1);
+  });
+
+  it("is included in the report and counts toward its verdict", () => {
+    const report = runRngTestSuite(20_000, seedFrom("runs-in-report"));
+    const runs = report.results.find((r) => r.name.includes("runs about the median"));
+
+    assert.ok(runs, "the runs test must appear in the report");
+    assert.equal(report.passed, report.results.every((r) => r.passed));
   });
 });

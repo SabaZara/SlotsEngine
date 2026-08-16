@@ -105,6 +105,92 @@ export function serialCorrelation(seed: string, draws: number, bins = 16, algori
   return evaluate(`serial correlation (${pairs} pairs, ${bins}x${bins} grid)`, statistic, bins * bins - 1);
 }
 
+/**
+ * Wald–Wolfowitz runs test: count how many times the sequence crosses its
+ * own median, and compare that to how many crossings a random sequence of
+ * the same composition would make.
+ *
+ * **What it adds that the three tests above do not.** They are all
+ * *distributional* — they ask whether values, integers or consecutive pairs
+ * land where they should. This one asks about **order**, over the whole
+ * stream rather than at lag 1. A sequence can have a perfect histogram and
+ * a clean pair grid while still being sorted into long blocks, and runs is
+ * the standard test that names that failure.
+ *
+ * Honest scope, measured rather than assumed: three streams built
+ * specifically to evade the existing suite (a sorted sweep, a block-ordered
+ * stream, and strict alternation) were all caught by `serialCorrelation`
+ * anyway — its 16×16 contingency grid detects *any* structure in
+ * consecutive pairs, not merely linear correlation, which makes it stronger
+ * than the scalar lag-1 coefficient this test is usually paired with. So
+ * this is added for **certification completeness** — a reviewer expects a
+ * runs test by name, and its absence invites a question the other three
+ * cannot answer — not because a detection hole was demonstrated. That
+ * distinction is recorded in docs/TODO.md rather than overstated here.
+ *
+ * The statistic is reported as z², which is chi-squared with one degree of
+ * freedom, so this returns the same `TestResult` shape as its siblings and
+ * inherits the two-sided band. That is deliberate: a runs count far *below*
+ * expectation means blocking, and far *above* means alternation, and both
+ * are defects. A one-sided pass — what the reference uses — would wave one
+ * of them through.
+ */
+export function runsAboveBelowMedian(seed: string, draws: number, algorithm?: RngAlgorithmId): TestResult {
+  const rng = createRng(seed, algorithm);
+
+  // Split at 0.5 rather than at the sample median. For a generator claiming
+  // uniformity on [0,1) the theoretical median IS 0.5, and using the sample
+  // median would make the test partly self-referential: a generator that
+  // emitted only values in [0.9, 0.91) would split its own output evenly and
+  // score a perfect runs count on a stream with no spread at all. The
+  // frequency test owns "are the values in the right place"; this one owns
+  // "are they in a plausible order", and it should not quietly re-check the
+  // former with a weaker instrument.
+  let above = 0;
+  let runs = 1;
+  let previous = rng.next() >= 0.5;
+  if (previous) above++;
+
+  for (let i = 1; i < draws; i++) {
+    const isAbove = rng.next() >= 0.5;
+    if (isAbove !== previous) runs++;
+    if (isAbove) above++;
+    previous = isAbove;
+  }
+
+  const below = draws - above;
+
+  // Degenerate composition: every draw fell on one side, so there is exactly
+  // one run and the variance below is zero. This is a catastrophic failure,
+  // not a pass — but it must not be reported by dividing by zero. The
+  // frequency test will also fail on such a stream; this states it here too
+  // rather than returning NaN and letting the band decide by accident.
+  if (above === 0 || below === 0) {
+    return {
+      name: `runs about the median (${draws} draws)`,
+      statistic: Number.POSITIVE_INFINITY,
+      degreesOfFreedom: 1,
+      pValue: 0,
+      passed: false,
+    };
+  }
+
+  const expectedRuns = (2 * above * below) / draws + 1;
+  const variance = (2 * above * below * (2 * above * below - draws)) / (draws * draws * (draws - 1));
+  const zScore = (runs - expectedRuns) / Math.sqrt(variance);
+
+  // z² is exactly chi-squared with df=1, so the existing p-value path
+  // applies unchanged — no second numerical method to keep correct, and the
+  // tail precision won by F22/item J comes along for free.
+  //
+  // The *statistic* is what carries a catastrophic verdict, not the p-value:
+  // a genuinely broken generator reaches |z| ≈ 447 here, and exp(-z²/2)
+  // underflows the double range past |z| ≈ 38. That floor is IEEE's, not
+  // the arrangement defect item J fixed, and `passed` is decided by the band
+  // rather than by the printed zero either way.
+  return evaluate(`runs about the median (${draws} draws)`, zScore * zScore, 1);
+}
+
 export interface RngReport {
   seed: string;
   algorithm: RngAlgorithmId;
@@ -143,6 +229,7 @@ export function runRngTestSuite(draws = 1_000_000, seed: string = generateSeed()
     chiSquaredUniformity(seed, draws, 100, algorithm),
     rollIntUniformity(seed, draws, 64, algorithm),
     serialCorrelation(seed, draws, 16, algorithm),
+    runsAboveBelowMedian(seed, draws, algorithm),
   ];
   return {
     seed,
