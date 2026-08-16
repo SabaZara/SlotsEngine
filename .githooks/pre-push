@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+#
+# Runs the fast half of the CI gate before anything leaves the machine.
+#
+# Scope is deliberate. This runs build, typecheck and the 244 unit tests —
+# roughly 40 seconds. It does NOT run the Docker end-to-end suites, which
+# take around three minutes: a hook slow enough to be resented is a hook
+# that gets bypassed, and a bypassed hook protects nothing. CI owns the
+# e2e runs, and CI is not in a hurry.
+#
+# What this catches is the class of thing that actually broke here: a build
+# that only works against stale dist/ output, and a test suite that quietly
+# stops covering what it claims to.
+#
+# Escape hatch: git push --no-verify
+# That exists on purpose. A guard you cannot skip when you genuinely need
+# to (pushing a WIP branch for someone else to look at) is a guard people
+# disable permanently instead.
+
+set -uo pipefail
+
+# Pushing only deletions (git push origin :branch) compiles nothing worth
+# checking, so don't make the developer wait for it.
+only_deletes=true
+while read -r _local_ref local_sha _remote_ref _remote_sha; do
+  # An all-zero local sha means this ref is being deleted.
+  if [[ ! "$local_sha" =~ ^0+$ ]]; then
+    only_deletes=false
+  fi
+done
+
+if [ "$only_deletes" = true ]; then
+  exit 0
+fi
+
+echo "pre-push: build, typecheck and unit tests (~40s; --no-verify to skip)"
+echo
+
+start=$(date +%s)
+
+# npm test runs the typecheck itself first, then scripts/run-tests.mjs.
+# Output is shown rather than captured: when this fails, the reason should
+# already be on screen instead of behind a re-run.
+if ! npm test; then
+  echo
+  echo "pre-push: FAILED — not pushing."
+  echo "  Fix the above, or 'git push --no-verify' if you know it is fine."
+  exit 1
+fi
+
+echo
+echo "pre-push: passed in $(( $(date +%s) - start ))s. Pushing."
+exit 0

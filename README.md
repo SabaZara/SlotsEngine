@@ -246,6 +246,17 @@ Both run in CI on every push and pull request, along with the build and
 typecheck — a suite that is never consulted before code ships is
 documentation, not a safety net.
 
+A `pre-push` hook in `.githooks/` runs the fast half of that gate — build,
+typecheck and the 244 unit tests, about 23 seconds — before anything leaves
+the machine. It deliberately does **not** run the Docker end-to-end suites:
+those take around three minutes, and a hook slow enough to be resented is a
+hook that gets bypassed. CI owns the slow checks, and CI is not in a hurry.
+
+`npm install` points git at the directory, so a fresh clone is covered
+without anyone remembering. `git push --no-verify` skips it, which is
+intentional: a guard you cannot skip when you genuinely need to is one
+people disable permanently instead.
+
 The gate earned its place immediately by failing three times, on defects
 that every local run had reported as green:
 

@@ -15,6 +15,8 @@
     "typecheck": "npm run build:packages && npm run typecheck --workspaces --if-present",
     "// test": "Test discovery is done by scripts/run-tests.mjs rather than a glob, because glob behaviour varies by shell AND by Node version and fails quietly in both directions. See the comment in that file.",
     "test": "npm run typecheck && node scripts/run-tests.mjs",
+    "// prepare": "core.hooksPath is local git config, so it does not survive a clone. Running it on npm install means a new checkout gets the pre-push hook without anyone having to remember. `git rev-parse` guards the case where there is no repo at all — an npm install from a tarball must not fail here.",
+    "prepare": "git rev-parse --git-dir > /dev/null 2>&1 && git config core.hooksPath .githooks || exit 0",
     "dev:game-backend": "npm run dev -w apps/game-backend",
     "dev:game-socket": "npm run dev -w apps/game-socket",
     "e2e:spin": "node scripts/e2e/spin-flow-check.mjs",
