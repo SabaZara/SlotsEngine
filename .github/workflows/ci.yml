@@ -126,6 +126,16 @@ jobs:
           BOOTSTRAP_ADMIN_PASSWORD: ci-admin-password
         run: npm run e2e:backoffice
 
+      # Concurrency on the money path. The unit tests model the races
+      # against an in-memory stand-in; this runs them against real Mongo,
+      # where the indexes either exist as declared or do not. It found the
+      # sparse-vs-partial index bug that no unit test could see.
+      - name: Money-path load check
+        env:
+          GAME_BACKEND_URL: http://localhost:9102
+          SERVICE_AUTH_SECRET: ci-only-service-secret-not-a-real-credential-0001
+        run: npm run e2e:load
+
       # A failed e2e run is usually a service that refused to start, and the
       # assertion output alone does not say why. Logs make the failure
       # diagnosable from the run page without reproducing locally.

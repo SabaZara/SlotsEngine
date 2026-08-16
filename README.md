@@ -263,6 +263,10 @@ npm run e2e:spin
 npm run e2e:backoffice
 ```
 
+```bash
+npm run e2e:load
+```
+
 The honest tests. Unit tests cannot prove transactions roll back, that indexes
 are really declared, or that two services agree about what a published game
 is. These drive real services end to end.
@@ -310,6 +314,39 @@ detectable from a machine where the previous build's output was still lying
 around and a newer Node was installed. The last is the sharpest — a
 shell-dependent glob doesn't fail, it reports success for a fraction of the
 suite.
+
+### The load check, and the index bug it found
+
+`npm run e2e:load` drives genuinely parallel spins at one player and then
+reconciles the ledger against the balance independently. It exists because
+the unit tests model these races against an in-memory stand-in — a model of
+Mongo, not Mongo, which cannot show whether an index is actually declared
+the way it was meant to be.
+
+On its first run, **119 of 120 concurrent spins failed with a 500.** The
+idempotency index was declared `sparse`, and on a *compound* index sparse
+only skips a document when every indexed field is missing. `operatorId` and
+`playerId` are always present, so the index covered every round and treated
+an absent `clientRequestId` as null — making a player's second ordinary
+spin a duplicate-key collision with their first.
+
+It needed real Mongo to see. The stand-in implemented the index that was
+intended rather than the one the database builds, so all 244 unit tests
+passed against the bug. The fix is `partialFilterExpression`, which
+actually expresses "index only the rounds that carry a clientRequestId",
+plus index-conflict handling in `applySchemas` so a corrected index
+rebuilds instead of refusing to boot on an existing database.
+
+Removing the index afterwards, to confirm the check would catch it,
+produced the underlying failure directly: **twelve concurrent retries of
+one `clientRequestId` wrote twelve separate rounds and twelve separate
+charges.** The application-level check does not survive a real race; the
+unique index is the guarantee.
+
+What the check does not do is prove the absence of a race. It is written to
+make a real bug likely to surface under contention, and it says so when it
+passes. Its bonus-concurrency section skips against the bundled game, whose
+only module resolves in a single step — an honest gap, not a silent pass.
 
 **A note on the gap between them.** Every bug found late in this project was
 found by the end-to-end runs, never the unit tests:

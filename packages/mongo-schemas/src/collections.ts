@@ -78,12 +78,28 @@ export const COLLECTIONS: CollectionDefinition[] = [
     indexes: [
       { keys: { roundId: 1 }, options: { unique: true, name: "roundId_unique" } },
       { keys: { operatorId: 1, playerId: 1, createdAt: -1 }, options: { name: "operator_player_recent" } },
-      // Sparse: only rounds actually created from a client request carry a
+      // Only rounds actually created from a client request carry a
       // clientRequestId. This is what lets a retried spin short-circuit to
       // the original round instead of spinning — and charging — twice.
+      //
+      // partialFilterExpression, NOT sparse. On a COMPOUND index, sparse
+      // only skips a document when every indexed field is missing — and
+      // operatorId and playerId are always present. So a sparse index here
+      // indexes every round, treating an absent clientRequestId as null,
+      // and a player's second spin without one collides with their first:
+      // E11000, surfaced as a 500. Under load that is nearly every spin.
+      //
+      // The partial filter is what actually expresses "index only the
+      // rounds that carry a clientRequestId". Found by the load check —
+      // no unit test could see it, because the in-memory stand-in models
+      // the index we intended rather than the one Mongo builds.
       {
         keys: { operatorId: 1, playerId: 1, clientRequestId: 1 },
-        options: { unique: true, sparse: true, name: "operator_player_clientRequest_idempotency" },
+        options: {
+          unique: true,
+          partialFilterExpression: { clientRequestId: { $type: "string" } },
+          name: "operator_player_clientRequest_idempotency",
+        },
       },
     ],
   },
@@ -276,6 +292,14 @@ export const COLLECTIONS: CollectionDefinition[] = [
  * run on every boot: `collMod` on an already-conformant collection is a
  * no-op, and `createIndexes` ignores an index that already exists with the
  * same spec.
+ *
+ * An index whose *definition changed* is the case that needs care. Mongo
+ * does not update one in place — `createIndexes` fails with
+ * IndexOptionsConflict (85) when the name already exists with different
+ * options. Left unhandled that turns a corrected index into a service that
+ * will not boot on any database created before the correction, which is
+ * how a schema fix becomes an outage. So a conflict is resolved by
+ * dropping the old index and rebuilding it to the current definition.
  */
 export async function applySchemas(db: Db): Promise<void> {
   const existing = new Set((await db.listCollections({}, { nameOnly: true }).toArray()).map((c) => c.name));
@@ -287,8 +311,19 @@ export async function applySchemas(db: Db): Promise<void> {
       await db.command({ collMod: def.name, validator: def.validator, validationLevel: "moderate" });
     }
 
-    if (def.indexes.length > 0) {
-      await db.collection(def.name).createIndexes(def.indexes.map((ix) => ({ key: ix.keys, ...ix.options })));
+    for (const ix of def.indexes) {
+      const spec = { key: ix.keys, ...ix.options };
+      try {
+        await db.collection(def.name).createIndexes([spec]);
+      } catch (err) {
+        // 85 IndexOptionsConflict / 86 IndexKeySpecsConflict: same name,
+        // different definition. Rebuilding is safe here because every index
+        // in this file is derived from the documents themselves.
+        const code = (err as { code?: number }).code;
+        if ((code !== 85 && code !== 86) || !ix.options?.name) throw err;
+        await db.collection(def.name).dropIndex(ix.options.name);
+        await db.collection(def.name).createIndexes([spec]);
+      }
     }
   }
 }
