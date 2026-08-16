@@ -310,6 +310,45 @@ describe("fakeMongo conformance with real MongoDB", () => {
     assert.deepEqual(real, fake);
   });
 
+  it("agrees that a projection of { _id: 0 } strips the id", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // Found by a test failing against correct code. Several routes exclude
+    // `_id` so an internal id never reaches a client; the fake ignored
+    // projections entirely, so `_id` survived in tests while production
+    // stripped it properly. More permissive than Mongo is just as
+    // misleading as less — it fails a correct assertion.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ a: 1, b: 2 });
+      const viaFind = await d.collection(collection).find({}, { projection: { _id: 0 } }).toArray();
+      const viaFindOne = await d.collection(collection).findOne({ a: 1 }, { projection: { _id: 0 } });
+      return {
+        find: Object.keys(viaFind[0]).sort(),
+        findOne: Object.keys(viaFindOne ?? {}).sort(),
+      };
+    });
+
+    assert.deepEqual(fake, { find: ["a", "b"], findOne: ["a", "b"] });
+    assert.deepEqual(real, fake, "the fake must strip _id exactly as Mongo does");
+  });
+
+  it("agrees that _id survives when no projection is given", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // The other direction, so the fix cannot overshoot into always
+    // stripping — plenty of code legitimately reads `_id`.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ a: 1 });
+      const docs = await d.collection(collection).find({}).toArray();
+      return "_id" in docs[0];
+    });
+
+    assert.equal(fake, true);
+    assert.equal(real, true);
+  });
+
   it("agrees that countDocuments honours a limit", async function () {
     if (!realDb) return this.skip(skipReason);
 

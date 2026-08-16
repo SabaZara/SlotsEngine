@@ -487,4 +487,169 @@ describe("publishing", () => {
     await publish();
     assert.equal(ctx.raw.collection("rtpSimulationRuns").all().length, 1);
   });
+
+  describe("version history", () => {
+    it("lists every published version, newest first", async () => {
+      // A designer needs to see what shipped and when; ordering matters
+      // because the UI shows the current version at the top.
+      await ctx.app.inject({ method: "PUT", url: "/v1/games/g", headers: auth(token), payload: tunedDraft() });
+      await publish();
+      await ctx.app.inject({ method: "POST", url: "/v1/games/g/draft-from-published", headers: auth(token) });
+      await publish();
+
+      const response = await ctx.app.inject({ method: "GET", url: "/v1/games/g/versions", headers: auth(token) });
+      assert.equal(response.statusCode, 200);
+      const versions = response.json().versions as { version: number }[];
+      assert.deepEqual(versions.map((v) => v.version), [2, 1], "newest first");
+    });
+
+    it("returns an empty list for a game that has never published", async () => {
+      // Not a 404 — the game exists, it simply has no history yet, and a
+      // client rendering a version list should show "none" rather than an
+      // error.
+      const response = await ctx.app.inject({ method: "GET", url: "/v1/games/g/versions", headers: auth(token) });
+      assert.equal(response.statusCode, 200);
+      assert.deepEqual(response.json().versions, []);
+    });
+
+    it("never leaks Mongo's _id into the response", async () => {
+      await ctx.app.inject({ method: "PUT", url: "/v1/games/g", headers: auth(token), payload: tunedDraft() });
+      const published = await publish();
+      assert.equal(published.statusCode, 200, JSON.stringify(published.json()));
+
+      const versions = (await ctx.app.inject({ method: "GET", url: "/v1/games/g/versions", headers: auth(token) })).json()
+        .versions as Record<string, unknown>[];
+
+      assert.equal(versions.length, 1, "the publish above should have produced exactly one version");
+      assert.ok(!("_id" in versions[0]), "an internal id has no business reaching a client");
+      assert.equal(versions[0].version, 1);
+    });
+  });
+
+  describe("draft from published", () => {
+    it("reopens a published game once its draft has been cleared", async () => {
+      // Publishing does NOT delete the draft — verified against the real
+      // route rather than assumed — so this route only applies after the
+      // draft is gone, which is the state a fresh checkout of an existing
+      // game is in. My first version of this test published and
+      // immediately expected 200; it got a correct 409.
+      await ctx.app.inject({ method: "PUT", url: "/v1/games/g", headers: auth(token), payload: tunedDraft() });
+      await publish();
+      await ctx.raw.collection("gameDrafts").updateMany({ gameId: "g" }, { $set: { gameId: "archived" } });
+
+      const response = await ctx.app.inject({
+        method: "POST",
+        url: "/v1/games/g/draft-from-published",
+        headers: auth(token),
+      });
+      assert.equal(response.statusCode, 200, JSON.stringify(response.json()));
+      assert.equal(response.json().draft.gameId, "g");
+      // Carries the published definition's content forward, which is the
+      // point — a designer edits from what shipped, not from blank.
+      assert.deepEqual(response.json().draft.grid, tunedDraft().grid);
+    });
+
+    it("refuses when a draft is already open, rather than discarding it", async () => {
+      // The destructive case. Overwriting an in-progress draft with the
+      // published version would silently throw away unsaved design work.
+      await ctx.app.inject({ method: "PUT", url: "/v1/games/g", headers: auth(token), payload: tunedDraft() });
+      await publish();
+      await ctx.app.inject({ method: "POST", url: "/v1/games/g/draft-from-published", headers: auth(token) });
+
+      const second = await ctx.app.inject({
+        method: "POST",
+        url: "/v1/games/g/draft-from-published",
+        headers: auth(token),
+      });
+      assert.equal(second.statusCode, 409);
+      assert.equal(second.json().error, "draft_already_exists");
+    });
+
+    it("404s for a game that was never published", async () => {
+      const response = await ctx.app.inject({
+        method: "POST",
+        url: "/v1/games/nope/draft-from-published",
+        headers: auth(token),
+      });
+      assert.equal(response.statusCode, 404);
+      assert.equal(response.json().error, "game_not_found");
+    });
+
+    it("is refused to a viewer", async () => {
+      await ctx.app.inject({ method: "PUT", url: "/v1/games/g", headers: auth(token), payload: tunedDraft() });
+      await publish();
+
+      const response = await ctx.app.inject({
+        method: "POST",
+        url: "/v1/games/g/draft-from-published",
+        headers: auth(ctx.tokenFor(ctx.viewer)),
+      });
+      assert.equal(response.statusCode, 403);
+    });
+  });
+
+  describe("simulate preview", () => {
+    it("runs a preview simulation without publishing anything", async () => {
+      // The point of the route: a designer sees measured RTP before
+      // committing, and nothing goes live.
+      await ctx.app.inject({ method: "PUT", url: "/v1/games/g", headers: auth(token), payload: tunedDraft() });
+
+      const response = await ctx.app.inject({
+        method: "POST",
+        url: "/v1/games/g/simulate",
+        headers: auth(token),
+        payload: { simCount: 2000 },
+      });
+
+      assert.equal(response.statusCode, 200, JSON.stringify(response.json()));
+      assert.equal(typeof response.json().simulation.resultRtp, "number");
+      assert.equal(await ctx.raw.collection("games").findOne({ gameId: "g" }), null, "nothing may go live");
+    });
+
+    it("clamps simCount, so one request cannot cost unbounded work", async () => {
+      // Without the ceiling a designer could ask for a billion spins and
+      // occupy the service indefinitely. The floor matters too: a handful
+      // of spins would report a meaningless RTP as though it were real.
+      await ctx.app.inject({ method: "PUT", url: "/v1/games/g", headers: auth(token), payload: tunedDraft() });
+
+      const huge = await ctx.app.inject({
+        method: "POST",
+        url: "/v1/games/g/simulate",
+        headers: auth(token),
+        payload: { simCount: 100_000_000 },
+      });
+      assert.equal(huge.statusCode, 200);
+      assert.ok(huge.json().simulation.simCount <= 100_000, "an absurd request must be capped");
+
+      const tiny = await ctx.app.inject({
+        method: "POST",
+        url: "/v1/games/g/simulate",
+        headers: auth(token),
+        payload: { simCount: 1 },
+      });
+      assert.ok(tiny.json().simulation.simCount >= 1000, "a trivial request must be floored");
+    });
+
+    it("refuses to simulate an invalid draft, naming why", async () => {
+      // Simulating a broken definition would either throw deep in the
+      // engine or produce a number that means nothing.
+      await ctx.app.inject({
+        method: "PUT",
+        url: "/v1/games/g",
+        headers: auth(token),
+        payload: { ...tunedDraft(), rtpTarget: 95 },
+      });
+
+      const response = await ctx.app.inject({ method: "POST", url: "/v1/games/g/simulate", headers: auth(token) });
+      assert.equal(response.statusCode, 400);
+      assert.equal(response.json().error, "draft_invalid");
+      assert.match(response.json().message, /fraction like 0\.95/);
+    });
+
+    it("404s when there is no draft to simulate", async () => {
+      const response = await ctx.app.inject({ method: "POST", url: "/v1/games/nope/simulate", headers: auth(token) });
+      assert.equal(response.statusCode, 404);
+      assert.equal(response.json().error, "draft_not_found");
+    });
+  });
 });

@@ -99,8 +99,14 @@ class FakeCollection {
     return { insertedId: _id };
   }
 
-  async findOne(query: Record<string, unknown>): Promise<Doc | null> {
-    return this.docs.find((doc) => matches(doc, query)) ?? null;
+  async findOne(
+    query: Record<string, unknown>,
+    options: { projection?: Record<string, 0 | 1> } = {},
+  ): Promise<Doc | null> {
+    const doc = this.docs.find((d) => matches(d, query)) ?? null;
+    if (!doc || options.projection?._id !== 0) return doc;
+    const { _id, ...rest } = doc;
+    return rest as Doc;
   }
 
   /** `matchedCount` is reported alongside `modifiedCount` because callers
@@ -167,8 +173,25 @@ class FakeCollection {
     return options.returnDocument === "before" ? before : after;
   }
 
-  find(query: Record<string, unknown>) {
-    let results = this.docs.filter((doc) => matches(doc, query));
+  /**
+   * `projection` is honoured for the `_id: 0` case, which is the only form
+   * this codebase uses and the one that matters: several routes exclude
+   * `_id` so an internal id never reaches a client.
+   *
+   * Ignoring it made the fake *more permissive* than Mongo — `_id` survived
+   * in tests while production correctly stripped it. That is the inverse of
+   * the F1/F9 direction and just as misleading: a test asserting "no _id in
+   * the response" failed against correct code.
+   */
+  find(query: Record<string, unknown>, options: { projection?: Record<string, 0 | 1> } = {}) {
+    const stripId = options.projection?._id === 0;
+    let results = this.docs
+      .filter((doc) => matches(doc, query))
+      .map((doc) => {
+        if (!stripId) return doc;
+        const { _id, ...rest } = doc;
+        return rest as Doc;
+      });
     const cursor = {
       /** Multi-key, in declaration order — needed because the round
        * recovery query breaks a `createdAt` tie with `_id`, and a
