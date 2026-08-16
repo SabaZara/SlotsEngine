@@ -194,7 +194,7 @@ describe("the RTP gate", () => {
     // find.
     const db = setup();
 
-    await publishDraft(db, goodDraft(), "designer-1", { force: true });
+    await publishStable(db, goodDraft(), "designer-1", { force: true });
 
     const entry = await db.collection("auditLogs").findOne({ action: "game.publish" });
     assert.equal((entry?.diff as Record<string, unknown>)?.forcedPastRtpTolerance, undefined);
@@ -343,7 +343,7 @@ describe("the published definition", () => {
     const before = Date.now();
     const db = setup();
 
-    const { gameDef } = await publishDraft(db, goodDraft(), "designer-7");
+    const { gameDef } = await publishStable(db, goodDraft(), "designer-7");
 
     assert.equal(gameDef.status, "published");
     assert.equal(gameDef.publishedByUserId, "designer-7");
@@ -360,7 +360,7 @@ describe("the published definition", () => {
     delete (draft as Partial<GameDraft>).mathEngineId;
     delete (draft as Partial<GameDraft>).paylineWinRule;
 
-    const { gameDef } = await publishDraft(db, draft, "designer-1");
+    const { gameDef } = await publishStable(db, draft);
 
     assert.ok(gameDef.currency, "currency must be defaulted");
     assert.ok(gameDef.mathEngineId, "mathEngineId must be defaulted");
@@ -371,7 +371,7 @@ describe("the published definition", () => {
     const db = setup();
     const draft = goodDraft();
 
-    const { gameDef } = await publishDraft(db, draft, "designer-1");
+    const { gameDef } = await publishStable(db, draft);
 
     assert.deepEqual(gameDef.symbols, draft.symbols);
     assert.deepEqual(gameDef.paylines, draft.paylines);
@@ -385,7 +385,7 @@ describe("the audit trail", () => {
     const db = setup();
 
     await publishStable(db, goodDraft());
-    await publishDraft(db, goodDraft(), "designer-2");
+    await publishStable(db, goodDraft(), "designer-2");
 
     const entries = await db.collection("auditLogs").find({ action: "game.publish" }).toArray();
     assert.equal(entries.length, 2);

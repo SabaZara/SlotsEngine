@@ -686,6 +686,18 @@ testing was extracted into `paylineGrid.ts`, `reelStrip.ts` and the two
   inside tolerance — verified byte-identical across three runs against the
   exact draft the tests build.
 
+  **The first fix missed five call sites, and CI found them.** The
+  conversion matched only `publishDraft(db, goodDraft(), "designer-1")`
+  literally, so three calls using a different actor id (`"designer-2"`,
+  `"designer-7"`) and two passing a locally-modified `draft` variable stayed
+  unseeded. CI failed on one of them the next run — `measured RTP 0.8940
+  differs from target 0.95 by 0.0560`. The lesson is narrow and worth
+  keeping: **a mechanical find-and-replace over test call sites needs an
+  audit of what it did NOT match**, not just a check that the suite passes,
+  because an unconverted flaky call passes almost every time by definition.
+  The audit is now a grep that lists every remaining `publishDraft(db,` and
+  requires each one to be a refusal test.
+
   Worth recording that the seed passthrough is an **equivalent mutation**:
   deleting it leaves every test passing, because the seed changes only
   whether a decision repeats, not what it is. A mutation that reintroduces
