@@ -126,6 +126,23 @@ Dockerfiles still build from a clean checkout, which CI does not check. CI
 builds with `npm run build` on the runner, never through the multi-stage
 image.
 
+**The first run failed, and the reason is worth keeping.** GHCR requires a
+lowercase repository name; `github.repository_owner` is `SabaZara`, so all
+five build legs died on `invalid tag ... repository name must be lowercase`.
+The local-registry rehearsal below could not have caught it — it used
+`localhost:5555` as the namespace and never exercised the owner name at all.
+**A rehearsal that substitutes the value under test proves nothing about that
+value.** The owner is now lowercased once per job (twice, since a step output
+does not cross a job boundary) rather than at each of the four use sites, so
+the tag pushed and the tag deployed cannot drift; the failure was then
+reproduced locally with the raw owner and confirmed fixed with the lowercased
+one.
+
+That failure was also the pipeline's first real proof in the other direction:
+the CI run before it went red, and **Deploy skipped rather than shipping** —
+the `workflow_run` gate doing exactly what it exists for, on a failure nobody
+planned.
+
 **Verified against a real registry rather than by reading the YAML.** A local
 `registry:2` was stood up, all five images built with the exact build args
 and context the workflow uses, and pushed. Then the local stack was torn down

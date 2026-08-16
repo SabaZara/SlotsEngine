@@ -67,6 +67,10 @@ jobs:
             exit 1
           fi
 
+      - name: Resolve the registry namespace
+        id: registry
+        run: echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
       - name: Configure SSH
         run: |
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
@@ -86,7 +90,7 @@ jobs:
         run: |
           echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
           for service in game-backend game-socket backoffice-api game-frontend backoffice-frontend; do
-            image="ghcr.io/${{ github.repository_owner }}/$service:${{ inputs.tag }}"
+            image="ghcr.io/${{ steps.registry.outputs.owner }}/$service:${{ inputs.tag }}"
             if ! docker manifest inspect "$image" >/dev/null 2>&1; then
               echo "::error::$image does not exist — nothing was changed."
               exit 1

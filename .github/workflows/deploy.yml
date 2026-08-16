@@ -79,6 +79,18 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
 
+      # GHCR requires a lowercase repository name, and `repository_owner`
+      # is whatever case the GitHub account was registered with — here
+      # `SabaZara`, which buildx rejects outright with "repository name must
+      # be lowercase". Computed once per job rather than lowercased at each
+      # use, so the tag pushed and the tag deployed cannot drift apart.
+      #
+      # Found by running it: the local-registry rehearsal used
+      # `localhost:5555`, which never exercised the owner name at all.
+      - name: Resolve the registry namespace
+        id: registry
+        run: echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
       - uses: docker/setup-buildx-action@v3
 
       - name: Log in to the registry
@@ -112,8 +124,8 @@ jobs:
           # target and cannot be rolled back to; a SHA names exactly one
           # build forever, which is what makes `rollback.yml` possible.
           tags: |
-            ghcr.io/${{ github.repository_owner }}/${{ matrix.service }}:${{ github.event.workflow_run.head_sha || github.sha }}
-            ghcr.io/${{ github.repository_owner }}/${{ matrix.service }}:latest
+            ghcr.io/${{ steps.registry.outputs.owner }}/${{ matrix.service }}:${{ github.event.workflow_run.head_sha || github.sha }}
+            ghcr.io/${{ steps.registry.outputs.owner }}/${{ matrix.service }}:latest
           # Scoped per service AND per Dockerfile-arg set. The reference
           # repo hit a real bug here worth inheriting the fix for: a shared
           # cache scope let a build silently reuse a layer from before a
@@ -184,6 +196,16 @@ jobs:
             echo "configured=true" >> "$GITHUB_OUTPUT"
           fi
 
+      # Same lowercasing as the build job, and it has to be repeated because
+      # a step output does not cross a job boundary. The two must agree — a
+      # deploy pulling a differently-cased namespace than the build pushed to
+      # would fail at `compose pull`, after the .env has already been
+      # rewritten.
+      - name: Resolve the registry namespace
+        id: registry
+        if: steps.target.outputs.configured == 'true'
+        run: echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v4
         if: steps.target.outputs.configured == 'true'
         with:
@@ -236,7 +258,7 @@ jobs:
           ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
             "${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}" \
             "umask 077 && cat > $DEPLOY_PATH/infra/.env" <<EOF
-          REGISTRY=ghcr.io/${{ github.repository_owner }}
+          REGISTRY=ghcr.io/${{ steps.registry.outputs.owner }}
           TAG=${{ github.event.workflow_run.head_sha || github.sha }}
           NODE_ENV=production
           SERVICE_AUTH_SECRET=${{ secrets.SERVICE_AUTH_SECRET }}
