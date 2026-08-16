@@ -1,0 +1,329 @@
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import { after, before, describe, it } from "node:test";
+import { MongoClient, type Db } from "mongodb";
+import { fakeMongo } from "./fakeMongo.js";
+
+/**
+ * Does the in-memory stand-in actually behave like MongoDB?
+ *
+ * Every unit test in this repo that touches persistence trusts `fakeMongo`,
+ * so a place where it *disagrees* with the real database is a place where a
+ * green suite proves nothing. That is not hypothetical here — it is how two
+ * of the worst bugs in `docs/TODO.md` got in:
+ *
+ *   F1 — the fake modelled the index we *intended*, not the one Mongo
+ *        builds, so a broken sparse-compound index passed every test and
+ *        failed 119 of 120 concurrent spins in production.
+ *   F9 — the fake has no schema validator, so a validator that rejected
+ *        every write passed 333 unit tests and returned 500 on every
+ *        failed login.
+ *
+ * Both were found by running the real thing. This file closes part of that
+ * loop permanently: the same operations are run against BOTH, and the
+ * results compared. A divergence fails here rather than in production.
+ *
+ * **Scope, honestly stated.** This pins the behaviours the fake claims to
+ * model — duplicate-key errors, atomic findOneAndUpdate, update operators,
+ * query operators, sort/limit. It does NOT pin the two things the fake
+ * openly does not model — transaction rollback and schema validation — so
+ * those remain the reason money-path work must still be run against a live
+ * stack. Testing what a stand-in admits it cannot do would be theatre.
+ *
+ * Skips when Mongo is unreachable, so the unit CI job and a laptop without
+ * Docker still pass; the e2e job runs it for real.
+ */
+
+const MONGO_URI = process.env.MONGO_TEST_URI ?? process.env.MONGO_URI ?? "mongodb://localhost:27018/?directConnection=true";
+const MONGO_DB = process.env.MONGO_TEST_DB ?? "slots_engine_conformance_test";
+
+let client: MongoClient | undefined;
+let realDb: Db | undefined;
+let skipReason = "";
+
+before(async () => {
+  try {
+    client = new MongoClient(MONGO_URI, {
+      ignoreUndefined: true,
+      serverSelectionTimeoutMS: 2000,
+      connectTimeoutMS: 2000,
+    });
+    await client.connect();
+    realDb = client.db(MONGO_DB);
+    await realDb.command({ ping: 1 });
+  } catch (err) {
+    skipReason = `no usable MongoDB at ${MONGO_URI} (${(err as Error).message.split("\n")[0]})`;
+    await client?.close().catch(() => {});
+    client = undefined;
+    realDb = undefined;
+  }
+});
+
+after(async () => {
+  if (realDb) await realDb.dropDatabase().catch(() => {});
+  await client?.close().catch(() => {});
+});
+
+/**
+ * Runs `scenario` against the fake and against real Mongo, and returns both
+ * results for comparison. Each run gets a fresh, uniquely named collection
+ * so nothing leaks between cases.
+ */
+async function bothEngines<T>(scenario: (db: never, collection: string) => Promise<T>): Promise<{ fake: T; real: T }> {
+  const collection = `c_${randomUUID().slice(0, 8)}`;
+  const fake = fakeMongo();
+  return {
+    fake: await scenario(fake.db as never, collection),
+    real: await scenario(realDb as never, collection),
+  };
+}
+
+/**
+ * Declares a unique index on whichever engine is running.
+ *
+ * The one API the two genuinely do not share: Mongo takes a key spec via
+ * `createIndex`, the fake takes a field list via `addUniqueIndex`. Bridged
+ * here rather than papered over, because the *behaviour* under that index
+ * is exactly what these tests compare — how it is declared is incidental.
+ */
+async function declareUnique(db: unknown, collection: string, fields: string[]): Promise<void> {
+  const col = (db as Db).collection(collection) as unknown as {
+    createIndex?: (spec: Record<string, number>, opts: { unique: boolean }) => Promise<unknown>;
+    addUniqueIndex?: (keys: string[]) => void;
+  };
+  if (typeof col.addUniqueIndex === "function") {
+    col.addUniqueIndex(fields);
+    return;
+  }
+  await col.createIndex!(Object.fromEntries(fields.map((f) => [f, 1])), { unique: true });
+}
+
+/** Captures a thrown error as a comparable shape, since the two engines
+ * produce different Error subclasses for the same condition. */
+async function outcome<T>(fn: () => Promise<T>): Promise<{ ok: true; value: T } | { ok: false; code?: number }> {
+  try {
+    return { ok: true, value: await fn() };
+  } catch (err) {
+    return { ok: false, code: (err as { code?: number }).code };
+  }
+}
+
+describe("fakeMongo conformance with real MongoDB", () => {
+  it("reports the same duplicate-key error code on a unique index", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // The behaviour most of this system's exactly-once guarantees rest on.
+    // A fake that threw a *different* code, or none, would let a
+    // double-charge pass every test.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await declareUnique(d, collection, ["key"]);
+      await d.collection(collection).insertOne({ key: "same" });
+      return outcome(() => d.collection(collection).insertOne({ key: "same" }));
+    });
+
+    assert.equal(fake.ok, false, "the fake must refuse a duplicate");
+    assert.equal(real.ok, false, "and so must Mongo");
+    assert.equal(fake.ok === false && fake.code, 11000);
+    assert.equal(real.ok === false && real.code, 11000, "the fake's code must match Mongo's");
+  });
+
+  it("allows the same value on a non-unique index", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ key: "same" });
+      await d.collection(collection).insertOne({ key: "same" });
+      return d.collection(collection).countDocuments({ key: "same" });
+    });
+
+    assert.equal(fake, 2);
+    assert.equal(real, 2);
+  });
+
+  it("treats a compound unique index as unique on the PAIR", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // Exactly the shape of F1. One field repeating is fine; the pair
+    // repeating is not.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await declareUnique(d, collection, ["a", "b"]);
+      await d.collection(collection).insertOne({ a: "x", b: "1" });
+      const differentPair = await outcome(() => d.collection(collection).insertOne({ a: "x", b: "2" }));
+      const samePair = await outcome(() => d.collection(collection).insertOne({ a: "x", b: "1" }));
+      return { differentPair: differentPair.ok, samePair: samePair.ok };
+    });
+
+    assert.deepEqual(fake, { differentPair: true, samePair: false });
+    assert.deepEqual(real, fake, "the fake must agree with Mongo on compound uniqueness");
+  });
+
+  it("applies $inc and $set the same way", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ id: "p", balance: 100 });
+      await d.collection(collection).updateOne({ id: "p" }, { $inc: { balance: -30 }, $set: { note: "spent" } });
+      const doc = await d.collection(collection).findOne({ id: "p" });
+      return { balance: doc?.balance, note: doc?.note };
+    });
+
+    assert.deepEqual(fake, { balance: 70, note: "spent" });
+    assert.deepEqual(real, fake);
+  });
+
+  it("creates a document on upsert, and updates it on the second call", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // The login-throttle counter depends on this exact sequence.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).updateOne({ key: "k" }, { $inc: { hits: 1 } }, { upsert: true });
+      await d.collection(collection).updateOne({ key: "k" }, { $inc: { hits: 1 } }, { upsert: true });
+      const doc = await d.collection(collection).findOne({ key: "k" });
+      return { hits: doc?.hits, total: await d.collection(collection).countDocuments({}) };
+    });
+
+    assert.deepEqual(fake, { hits: 2, total: 1 });
+    assert.deepEqual(real, fake, "an upsert must not create a second document");
+  });
+
+  it("reports matchedCount and modifiedCount the same way", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // Routes distinguish these: "no such document" is a 404, "found it,
+    // nothing changed" is not.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ id: "p", v: 1 });
+      const hit = await d.collection(collection).updateOne({ id: "p" }, { $set: { v: 2 } });
+      const miss = await d.collection(collection).updateOne({ id: "nope" }, { $set: { v: 2 } });
+      return { hitMatched: hit.matchedCount, missMatched: miss.matchedCount };
+    });
+
+    assert.deepEqual(fake, { hitMatched: 1, missMatched: 0 });
+    assert.deepEqual(real, fake);
+  });
+
+  it("matches findOneAndUpdate's returnDocument semantics", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // The atomic claim the bonus-step race depends on. "before" vs "after"
+    // deciding the wrong way would break exactly one caller winning.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ id: "s", step: 0 });
+      const before = await d.collection(collection).findOneAndUpdate(
+        { id: "s", step: 0 },
+        { $inc: { step: 1 } },
+        { returnDocument: "before" },
+      );
+      const after = await d.collection(collection).findOneAndUpdate(
+        { id: "s", step: 1 },
+        { $inc: { step: 1 } },
+        { returnDocument: "after" },
+      );
+      return { before: before?.step, after: after?.step };
+    });
+
+    assert.deepEqual(fake, { before: 0, after: 2 });
+    assert.deepEqual(real, fake);
+  });
+
+  it("returns null from findOneAndUpdate when nothing matched", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // How a losing caller learns it lost the claim.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ id: "s", step: 5 });
+      const result = await d.collection(collection).findOneAndUpdate({ id: "s", step: 0 }, { $inc: { step: 1 } });
+      return result === null;
+    });
+
+    assert.equal(fake, true);
+    assert.equal(real, true, "a non-matching claim must return null, not throw");
+  });
+
+  it("agrees on the comparison query operators", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ n: 1, s: "a" });
+      await d.collection(collection).insertOne({ n: 5, s: "b" });
+      await d.collection(collection).insertOne({ n: 9, s: "c" });
+      return {
+        lt: await d.collection(collection).countDocuments({ n: { $lt: 5 } }),
+        gt: await d.collection(collection).countDocuments({ n: { $gt: 5 } }),
+        ne: await d.collection(collection).countDocuments({ s: { $ne: "a" } }),
+        exact: await d.collection(collection).countDocuments({ n: 5 }),
+      };
+    });
+
+    assert.deepEqual(fake, { lt: 1, gt: 1, ne: 2, exact: 1 });
+    assert.deepEqual(real, fake);
+  });
+
+  it("agrees on sort and limit", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // Round recovery reads "newest first, take one", so a disagreement
+    // here hands a player the wrong round.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ id: "a", at: "2026-01-01" });
+      await d.collection(collection).insertOne({ id: "b", at: "2026-03-01" });
+      await d.collection(collection).insertOne({ id: "c", at: "2026-02-01" });
+      const docs = await d.collection(collection).find({}).sort({ at: -1 }).limit(2).toArray();
+      return docs.map((doc) => doc.id);
+    });
+
+    assert.deepEqual(fake, ["b", "c"]);
+    assert.deepEqual(real, fake, "newest-first ordering must match");
+  });
+
+  it("agrees on updateMany's conditional sweep", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // The bonus-session sweep: only `active` rows older than a cutoff.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ id: "old", status: "active", at: "2026-01-01" });
+      await d.collection(collection).insertOne({ id: "new", status: "active", at: "2026-09-01" });
+      await d.collection(collection).insertOne({ id: "done", status: "resolved", at: "2026-01-01" });
+
+      const result = await d
+        .collection(collection)
+        .updateMany({ status: "active", at: { $lt: "2026-06-01" } }, { $set: { status: "abandoned" } });
+
+      return {
+        modified: result.modifiedCount,
+        resolvedUntouched: (await d.collection(collection).findOne({ id: "done" }))?.status,
+      };
+    });
+
+    assert.deepEqual(fake, { modified: 1, resolvedUntouched: "resolved" });
+    assert.deepEqual(real, fake);
+  });
+
+  it("agrees that countDocuments honours a limit", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // `seedInitialAdmin` uses `countDocuments({}, { limit: 1 })` as an
+    // existence check.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ n: 1 });
+      await d.collection(collection).insertOne({ n: 2 });
+      await d.collection(collection).insertOne({ n: 3 });
+      return d.collection(collection).countDocuments({}, { limit: 1 });
+    });
+
+    assert.equal(fake, 1);
+    assert.equal(real, 1);
+  });
+});
