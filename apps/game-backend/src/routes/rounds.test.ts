@@ -471,22 +471,38 @@ describe("POST /internal/players/balance", () => {
   });
 
   it("keeps balances separate per player and per operator", async () => {
-    const app = await setup();
-    const playerId = "shared-name";
+    // Balances are set directly rather than moved by spinning. Comparing
+    // two balances for inequality after a spin is a coin flip when the win
+    // happens to equal the bet — which made this test flaky in the full
+    // suite while passing in isolation. The wallets' independence is the
+    // subject; the random walk was incidental.
+    const { db, client } = fakeMongo();
+    await seedReferenceGame(db as never);
+    const app = await buildApp({
+      db: db as never,
+      client: client as never,
+      serviceSecret: SECRET,
+      logger: silentLogger,
+      corsOrigins: ["http://localhost:9104"],
+      rateLimitMax: 100_000,
+    });
+    await app.ready();
 
-    await spin(app, validSpin({ playerId, totalBet: 1000 }));
-    const spentSame = (await post(app, "/internal/players/balance", { operatorId: OPERATOR, playerId })).json()
+    const playerId = "shared-name";
+    const players = (
+      db as never as { collection: (n: string) => { insertOne: (d: unknown) => Promise<unknown> } }
+    ).collection("players");
+    await players.insertOne({ operatorId: OPERATOR, playerId, balance: 5_000, updatedAt: new Date() });
+    await players.insertOne({ operatorId: "op-2", playerId, balance: 9_900, updatedAt: new Date() });
+
+    const first = (await post(app, "/internal/players/balance", { operatorId: OPERATOR, playerId })).json()
       .balance as number;
-    const otherOperator = (
-      await post(app, "/internal/players/balance", { operatorId: "op-2", playerId })
-    ).json().balance as number;
+    const second = (await post(app, "/internal/players/balance", { operatorId: "op-2", playerId })).json()
+      .balance as number;
     await app.close();
 
-    assert.notEqual(
-      spentSame,
-      otherOperator,
-      "the same playerId under a different operator must be a different wallet",
-    );
+    assert.equal(first, 5_000);
+    assert.equal(second, 9_900, "the same playerId under a different operator is a different wallet");
   });
 
   it("refuses a request missing an identity", async () => {

@@ -184,10 +184,19 @@ describe("the assumed bonus multiplier's influence on the publish gate", () => {
     const baseDrift = Math.abs(high.baseRtp - low.baseRtp);
 
     assert.ok(bonusChange > 0.05, `bonusRtp should track the multiplier, moved ${bonusChange.toFixed(4)}`);
+
+    // Compared against an absolute bound rather than a ratio to
+    // `baseDrift`. The ratio form was flaky in the full suite: `baseDrift`
+    // is pure sampling noise between two independent unseeded runs, so it
+    // is occasionally near zero and occasionally spikes, and dividing by it
+    // makes the assertion depend on the draw. Measured run-to-run spread on
+    // `baseRtp` at 60k is ~0.015, so 0.05 is comfortably above the noise
+    // while still failing if the multiplier ever starts moving the measured
+    // half.
     assert.ok(
-      bonusChange > baseDrift * 3,
-      `the multiplier should move bonusRtp (${bonusChange.toFixed(4)}) far more than baseRtp drifts ` +
-        `between independent runs (${baseDrift.toFixed(4)})`,
+      baseDrift < 0.05,
+      `the assumption must not move the measured half: baseRtp drifted ${baseDrift.toFixed(4)} ` +
+        `between runs, which is beyond sampling noise`,
     );
   });
 });
