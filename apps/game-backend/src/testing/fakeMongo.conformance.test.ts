@@ -1015,4 +1015,179 @@ describe("fakeMongo conformance with real MongoDB", () => {
     assert.equal(fake, 1);
     assert.equal(real, 1);
   });
+
+  /**
+   * The fourth probing round. Same method as the first three — run a
+   * behaviour against both engines in a throwaway script and diff — and it
+   * found seven more divergences in fifteen probes, none reachable from any
+   * existing caller, so no amount of running the suite would have shown
+   * them.
+   */
+
+  it("agrees that a document MISSING the sort key sorts below one that has it", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // Mongo's BSON type ordering puts missing and null below every number.
+    // The fake compared with `>`, and `undefined > anything` is false in
+    // JavaScript — as is `undefined < anything` — so a missing field sorted
+    // as though it held the LARGEST value. Inverted, not merely arbitrary.
+    //
+    // Reachable: `recoverRound` sorts `{ createdAt: -1, _id: -1 }` to pick
+    // the round to replay, and `createdAt` is NOT in the rounds validator's
+    // required list, so a document without it is legal. The `_id` tie-break
+    // happens to mask it today, which is why nothing failed.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ id: "has", n: 5 });
+      await d.collection(collection).insertOne({ id: "missing" });
+      await d.collection(collection).insertOne({ id: "low", n: 1 });
+      const rows = await d.collection(collection).find({}).sort({ n: 1 }).toArray();
+      return rows.map((r) => r.id as string);
+    });
+
+    assert.deepEqual(fake, ["missing", "low", "has"]);
+    assert.deepEqual(fake, real);
+  });
+
+  it("agrees that a number sorts before a string on a mixed-type field", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // The other half of BSON type ordering. JavaScript's `>` between a
+    // number and a string is false in both directions, so the fake's
+    // comparator produced the reverse of Mongo's order.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ id: "str", v: "abc" });
+      await d.collection(collection).insertOne({ id: "num", v: 10 });
+      const rows = await d.collection(collection).find({}).sort({ v: 1 }).toArray();
+      return rows.map((r) => r.id as string);
+    });
+
+    assert.deepEqual(fake, ["num", "str"]);
+    assert.deepEqual(fake, real);
+  });
+
+  it("agrees that $inc refuses a non-numeric field rather than concatenating", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // The fake did `"not-a-number" + 1` and stored `"not-a-number1"`,
+    // reporting success. Mongo throws. This is the money path's operator —
+    // every balance and counter moves through $inc — and a stand-in that
+    // turns a type error into a corrupted value is the F9 shape: the fake
+    // models the schema we intended rather than the one Mongo enforces.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ id: "a", count: "not-a-number" });
+      const result = await outcome(() => d.collection(collection).updateOne({ id: "a" }, { $inc: { count: 1 } }));
+      const after = await d.collection(collection).findOne({ id: "a" }, { projection: { _id: 0 } });
+      return { threw: !result.ok, count: after?.count };
+    });
+
+    assert.equal(fake.threw, true, "the fake must refuse, not concatenate");
+    assert.equal(fake.count, "not-a-number", "the value must be left untouched");
+    assert.deepEqual(fake, real);
+  });
+
+  it("agrees that $inc on a missing field starts from zero", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // The boundary of the rule above: absent is still 0 in both engines,
+    // so the refusal must not have overshot into rejecting a new field.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ id: "a" });
+      await d.collection(collection).updateOne({ id: "a" }, { $inc: { count: 5 } });
+      const after = await d.collection(collection).findOne({ id: "a" }, { projection: { _id: 0 } });
+      return after?.count;
+    });
+
+    assert.equal(fake, 5);
+    assert.equal(fake, real);
+  });
+
+  it("agrees that a dotted query resolves through an array of subdocuments", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // `{ "items.n": 5 }` matches when ANY element has `n === 5`. Plain
+    // property access returns undefined for that, so the fake matched
+    // nothing where Mongo matched the document — F22's restrictive
+    // direction, which reads as data rather than as an error.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ id: "a", items: [{ n: 1 }, { n: 5 }] });
+      const found = await d.collection(collection).findOne({ "items.n": 5 }, { projection: { _id: 0 } });
+      return found ? (found.id as string) : null;
+    });
+
+    assert.equal(fake, "a");
+    assert.equal(fake, real);
+  });
+
+  it("agrees that a range operator on an array field matches by member", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // `$gt` on an array asks whether any member exceeds the bound. The fake
+    // compared the array object itself against a scalar, which is never
+    // true. Same family as the `$ne`-on-an-array fix, which had already
+    // established the membership rule for one operator and not the others.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ id: "a", ns: [1, 10] });
+      await d.collection(collection).insertOne({ id: "b", ns: [1, 2] });
+      const rows = await d.collection(collection).find({ ns: { $gt: 5 } }).toArray();
+      return rows.map((r) => r.id as string);
+    });
+
+    assert.deepEqual(fake, ["a"]);
+    assert.deepEqual(fake, real);
+  });
+
+  it("agrees that a caller-supplied _id is kept and enforced unique", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // `_id` carries an implicit unique index, so a second insert with the
+    // same one fails with 11000. The fake OVERWROTE the caller's _id with a
+    // generated one, so the second insert succeeded and left two documents
+    // sharing an id the database would never have allowed — permissive, in
+    // the direction that cost F1 119 of 120 concurrent spins.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ _id: "fixed" as never, v: 1 });
+      const second = await outcome(() => d.collection(collection).insertOne({ _id: "fixed" as never, v: 2 }));
+      const stored = await d.collection(collection).findOne({ _id: "fixed" as never });
+      return { code: second.ok ? undefined : second.code, kept: stored?._id, v: stored?.v };
+    });
+
+    assert.equal(fake.code, 11000);
+    assert.equal(fake.kept, "fixed", "the caller's _id must survive, not be replaced");
+    assert.equal(fake.v, 1, "the first document must win");
+    assert.deepEqual(fake, real);
+  });
+
+  it("refuses to write through an array rather than replacing it with an object", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // The one divergence deliberately left in place. Mongo treats a numeric
+    // segment as an array index and edits that element; the fake replaced
+    // the whole array with an object keyed "0" and silently lost every
+    // other element — MORE DESTRUCTIVE than the database.
+    //
+    // Refused rather than implemented, following F17's precedent: no caller
+    // writes through an array index, and a half-modelled array path is how
+    // the next silent divergence gets in. This test pins the refusal, so
+    // the day someone needs it they get an error naming the work.
+    const fake = fakeMongo();
+    await fake.db.collection("arrays").insertOne({ id: "a", items: [{ n: 1 }, { n: 2 }] });
+
+    await assert.rejects(
+      () => fake.db.collection("arrays").updateOne({ id: "a" }, { $set: { "items.0.n": 99 } }),
+      /does not implement writing through an array/,
+    );
+
+    // Real Mongo, for contrast: it applies the edit and keeps the rest.
+    const real = realDb.collection(`c_${randomUUID().slice(0, 8)}`);
+    await real.insertOne({ id: "a", items: [{ n: 1 }, { n: 2 }] });
+    await real.updateOne({ id: "a" }, { $set: { "items.0.n": 99 } });
+    assert.deepEqual((await real.findOne({ id: "a" }))?.items, [{ n: 99 }, { n: 2 }]);
+  });
 });

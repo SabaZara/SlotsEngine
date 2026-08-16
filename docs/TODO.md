@@ -41,7 +41,7 @@ needs a decision rather than code.**
   is not a criticism of them — a test that never fails is doing its job as a
   regression guard — but it does mean the suite's value here has been in the
   *writing*, and its value from here on is in the *guarding*.
-- **1121 tests**, of which 48 are conformance cases run against real MongoDB.
+- **1129 tests**, of which 50 are conformance cases run against real MongoDB.
 - **Sections A, B and C are closed** — no source module with meaningful
   logic is without a direct test. The React components are the deliberate
   exception, recorded in section C.
@@ -711,20 +711,65 @@ caught this either.
 
 ### D. Test-infrastructure debt
 
+- **A fourth probing round found seven more divergences in fifteen probes.**
+  Same method as the first three — run a behaviour against both engines in a
+  throwaway script and diff — and the same result: **none was reachable from
+  an existing caller**, so the suite could not have shown them. Five were
+  fixed, two are now loud refusals, and all seven are pinned. Every fix was
+  mutation-verified: reverting it fails exactly its own conformance case,
+  5 of 5.
+
+  | Divergence | Direction | Reachable? |
+  |---|---|---|
+  | A document **missing the sort key** sorted as though it held the largest value | **Inverted** | **Yes** — see below |
+  | A **number sorted after a string** on a mixed-type field | Inverted | No |
+  | **`$inc` on a string field concatenated** (`"abc"` + 1 = `"abc1"`) and reported success | **More destructive** | No |
+  | A **dotted query through an array** of subdocuments matched nothing | More restrictive | No |
+  | **`$gt`/`$lt` on an array field** matched nothing | More restrictive | No |
+  | A **caller-supplied `_id` was overwritten**, so a duplicate insert succeeded | More permissive | No |
+  | **`$set` through an array index** replaced the array with an object, losing every other element | **More destructive** | No |
+
+  **The sort one is reachable, and it is the find that matters.** Mongo's
+  BSON type ordering puts a missing field *below* every number; the fake
+  compared with `>`, and in JavaScript `undefined > anything` is false — as
+  is `undefined < anything` — so a document missing the key sorted as the
+  **largest**. Not arbitrary, inverted. `recoverRound` sorts
+  `{ createdAt: -1, _id: -1 }` to choose the round to replay, and `createdAt`
+  is **not** in the rounds validator's `required` list, so a document without
+  it is legal. The `_id` tie-break happens to mask it today — measured, both
+  engines pick the same round — which is precisely why nothing failed.
+
+  **Two are left as refusals rather than implementations**, following F17's
+  precedent. Writing through an array index and `$inc` on a non-numeric field
+  both now throw with a message naming the work. A half-modelled array path
+  is how the next silent divergence gets in, and no caller needs either.
+
+  The running total is **sixteen divergences across four probing rounds**,
+  and the split has not moved: permissive, restrictive, and silent, with only
+  the last unique to a stand-in. What has changed is the count of *directions*
+  — "more destructive than the database" now has three members, and it is the
+  worst of them, because a test can show a field correctly written while
+  production keeps or loses something else.
 - **`fakeMongo` is 562 lines and still has no test of its own.** It is
-  covered instead by **48 conformance cases run against real MongoDB**, which
+  covered instead by **50 conformance cases run against real MongoDB**, which
   is the more valuable half: a stand-in's only meaningful property is
   agreement with the thing it stands in for, and a unit test of the fake
   would pin its behaviour to itself. The file has roughly doubled in size
   under that suite, and every unit test in the repo trusts it — so the
   conformance count is the number to watch, not the line count.
 
-  **Nine divergences have been found and fixed** (see the bullets below).
-  They split three ways, and the split is the useful part: three where the
-  fake was *more permissive* than Mongo, three *more restrictive*, and three
-  *silent* — accepting an option or operator and ignoring it. Only the last
-  group is unique to a stand-in; the other six are ordinary bugs that happen
-  to live in test infrastructure.
+  **Sixteen divergences have been found across four probing rounds** — nine
+  in the first three (the bullets below) and seven in the fourth (the table
+  above). They split four ways, and the split is the useful part: *more
+  permissive* than Mongo, *more restrictive*, *silent* (accepting an option
+  or operator and ignoring it), and *more destructive* — changing or losing
+  data Mongo would have left alone. Only the silent group is unique to a
+  stand-in; the rest are ordinary bugs that happen to live in test
+  infrastructure.
+
+  The fourth round added the destructive column its third member and is the
+  one to watch: a test can show a field correctly written while production
+  keeps or loses something else entirely.
 
   **None was reachable from any existing caller**, so no amount of running
   the suite would have surfaced them. All nine came from probing: running the
@@ -738,8 +783,8 @@ caught this either.
 
   The rule that came out of them still holds and is worth keeping at the top
   of this section: **when a test fails against code that reads correctly,
-  suspect the fake before the code.** Its limit is now known, though — six of
-  the nine divergences never failed a test at all, so the rule catches the
+  suspect the fake before the code.** Its limit is now known, though — thirteen
+  of the sixteen divergences never failed a test at all, so the rule catches the
   ones that announce themselves and nothing else. Pinning each new
   `fakeMongo` behaviour with a conformance test at the moment it is added is
   the practice; **probing for divergences the callers do not exercise** is
@@ -920,18 +965,24 @@ caught this either.
 
   **The audit that found them is worth repeating rather than describing.**
   Behaviours were run against both engines in a throwaway script and the
-  results diffed. Three rounds of this found **nine** divergences in about
-  as many minutes, where reading the file had found none. The conformance
-  suite is now 36 cases, and the cheapest way to extend it is to write the
+  results diffed. Four rounds of this found **sixteen** divergences in about
+  as many minutes each, where reading the file had found none. The conformance
+  suite is now 50 cases, and the cheapest way to extend it is to write the
   probe first and keep only the rows that differ.
 
-  Worth noting how they split: three were the fake being *more permissive*
-  than Mongo (F16/F21's direction), three *more restrictive* (F22's), and
-  three *silent* — accepting an option or operator and ignoring it. Only the
-  last group is unique to a stand-in; the other two are ordinary bugs that
-  happen to live in test infrastructure. None of the nine was reachable from
-  any existing caller, so no amount of running the suite would have surfaced
-  them.
+  Worth noting how they split: *more permissive* than Mongo (F16/F21's
+  direction), *more restrictive* (F22's), *silent* — accepting an option or
+  operator and ignoring it — and, from the fourth round, *more destructive*,
+  changing or losing data Mongo would have left alone. Only the silent group
+  is unique to a stand-in; the rest are ordinary bugs that happen to live in
+  test infrastructure.
+
+  **Fifteen of the sixteen were unreachable from any existing caller**, so no
+  amount of running the suite would have surfaced them. The sixteenth is the
+  exception worth knowing about: the missing-field sort order **is** reachable
+  through `recoverRound`, and stayed hidden anyway because a second sort key
+  masked it. Unreachability is what the probe is for; a divergence that is
+  reachable and still silent is the stronger argument for probing.
 - **A fixture that is already minimal cannot test an allowlist.**
   `toPublicView` maps each bonus module down to `moduleId` and `params`.
   Both shipped fixtures happen to have exactly those two fields, so

@@ -62,21 +62,77 @@ function stripUndefined(value: unknown): unknown {
 }
 
 function get(doc: Doc, path: string): unknown {
-  return path.split(".").reduce<unknown>((acc, part) => (acc as Record<string, unknown> | undefined)?.[part], doc);
+  return path.split(".").reduce<unknown>((acc, part) => {
+    // Mongo resolves a dotted path THROUGH an array of subdocuments:
+    // `{ "items.n": 5 }` matches when any element has `n === 5`. Plain
+    // property access returns undefined for that, so the fake matched
+    // nothing where Mongo matched the document — the restrictive direction,
+    // which reads as "no such documents" rather than as an error.
+    //
+    // Collecting the members' values reproduces the rule, because the
+    // membership check in `matches()` then tests the resulting array.
+    // A numeric segment still indexes the array directly, as it does in
+    // Mongo, so `items.0.n` keeps working.
+    if (Array.isArray(acc) && !/^\d+$/.test(part)) {
+      return acc
+        .map((member) => (member as Record<string, unknown> | undefined)?.[part])
+        .filter((v) => v !== undefined);
+    }
+    return (acc as Record<string, unknown> | undefined)?.[part];
+  }, doc);
+}
+
+/**
+ * Mongo's BSON type ordering, which applies BEFORE any value comparison:
+ * a missing field and an explicit null sort together and below every
+ * number, numbers below strings, strings below objects, objects below
+ * arrays. Confirmed against real MongoDB rather than read from the docs —
+ * ascending by a mixed-type field returned exactly this order.
+ *
+ * Only the ranks this codebase can actually store are listed. Anything
+ * unrecognised sorts last, which is Mongo's position for the exotic types
+ * (BinData, ObjectId, Date and the rest) relative to these.
+ */
+function bsonTypeRank(value: unknown): number {
+  if (value === undefined || value === null) return 0;
+  if (typeof value === "number") return 1;
+  if (typeof value === "string") return 2;
+  if (value instanceof Date) return 3;
+  if (Array.isArray(value)) return 5;
+  if (typeof value === "object") return 4;
+  return 6;
 }
 
 /**
  * Multi-key sort, in declaration order — shared by `find().sort()` and
  * `findOne({ sort })` so the two cannot drift. `findOne` previously ignored
  * its `sort` option entirely and returned insertion order.
+ *
+ * Type rank is compared first, because `undefined > anything` is `false` in
+ * JavaScript and so is `undefined < anything`: a raw `>` comparison made a
+ * document MISSING the sort key sort as though it held the largest value,
+ * where Mongo sorts it as the smallest. Inverted, not merely arbitrary —
+ * and invisible to every existing test, because the one production caller
+ * that sorts on an optional field (`recoverRound`) carries an `_id`
+ * tie-break that happened to mask it.
  */
 function sortDocs(docs: Doc[], spec: Record<string, 1 | -1>): Doc[] {
   const keys = Object.entries(spec);
   return [...docs].sort((a, b) => {
     for (const [key, direction] of keys) {
-      const av = get(a, key) as string | number;
-      const bv = get(b, key) as string | number;
-      if (av !== bv) return (av > bv ? 1 : -1) * direction;
+      const av = get(a, key);
+      const bv = get(b, key);
+
+      const ar = bsonTypeRank(av);
+      const br = bsonTypeRank(bv);
+      if (ar !== br) return (ar > br ? 1 : -1) * direction;
+
+      // Same rank, so a direct comparison is meaningful. Dates compare by
+      // their millisecond value; `>` on two Date objects already does that,
+      // but going through valueOf keeps it explicit.
+      const a2 = av instanceof Date ? av.getTime() : (av as string | number);
+      const b2 = bv instanceof Date ? bv.getTime() : (bv as string | number);
+      if (a2 !== b2) return (a2 > b2 ? 1 : -1) * direction;
     }
     return 0;
   });
@@ -127,8 +183,26 @@ function matches(doc: Doc, query: Record<string, unknown>): boolean {
         );
       }
 
-      if ("$lt" in ops) return (actual as number | string) < (ops.$lt as number | string);
-      if ("$gt" in ops) return (actual as number | string) > (ops.$gt as number | string);
+      // On an ARRAY field a range operator matches if ANY member satisfies
+      // it — the same membership rule `$ne` and scalar equality already
+      // follow, and the rule Mongo applies to every comparison operator.
+      // The fake compared the array object itself against a scalar, which
+      // is never true, so `{ ns: { $gt: 5 } }` returned nothing where Mongo
+      // returned the document. Restrictive rather than permissive, so it
+      // reads as "no such documents" rather than as an error — F22's
+      // direction, which is the one that hides in a passing test.
+      if ("$lt" in ops) {
+        const bound = ops.$lt as number | string;
+        return Array.isArray(actual)
+          ? actual.some((m) => (m as number | string) < bound)
+          : (actual as number | string) < bound;
+      }
+      if ("$gt" in ops) {
+        const bound = ops.$gt as number | string;
+        return Array.isArray(actual)
+          ? actual.some((m) => (m as number | string) > bound)
+          : (actual as number | string) > bound;
+      }
       // Two rules, both load-bearing.
       //
       // On a scalar field, `$ne` matches documents where the field is
@@ -250,7 +324,23 @@ function applyUpdate(doc: Doc, update: Record<string, unknown>): Doc {
     setPath(next, key, stripUndefined(value));
   }
   for (const [key, value] of Object.entries((update.$inc as Record<string, number>) ?? {})) {
-    setPath(next, key, ((get(next, key) as number | undefined) ?? 0) + value);
+    const current = get(next, key);
+    // Mongo refuses to $inc a non-numeric field ("Cannot apply $inc to a
+    // value of non-numeric type") rather than coercing it. JavaScript's `+`
+    // does the opposite and does it silently: a string field becomes
+    // `"not-a-number" + 1` = `"not-a-number1"`, so the update reports
+    // success and leaves a corrupted value behind.
+    //
+    // That direction is the dangerous one on the money path. Every balance
+    // and every counter in this codebase moves through $inc, and a fake
+    // that turns a type error into a concatenated string would let a test
+    // show a working debit where production throws — the F9 shape, where
+    // the stand-in models the schema we intended rather than the one Mongo
+    // enforces. Missing is still 0, which is Mongo's behaviour too.
+    if (current !== undefined && typeof current !== "number") {
+      throw new Error(`Cannot apply $inc to a value of non-numeric type. Field '${key}' holds ${typeof current}.`);
+    }
+    setPath(next, key, ((current as number | undefined) ?? 0) + value);
   }
   // Mongo ignores the value entirely; only the key matters.
   for (const key of Object.keys((update.$unset as Record<string, unknown>) ?? {})) unsetPath(next, key);
@@ -280,7 +370,29 @@ function setPath(doc: Doc, path: string, value: unknown): void {
   for (let i = 0; i < parts.length - 1; i++) {
     const part = parts[i];
     const existing = cursor[part];
-    cursor[part] = existing && typeof existing === "object" && !Array.isArray(existing) ? { ...(existing as Record<string, unknown>) } : {};
+
+    // Mongo treats a numeric path segment as an ARRAY INDEX:
+    // `$set: { "items.0.n": 9 }` edits the first element and leaves the
+    // rest of the array alone. This function replaced the whole array with
+    // a plain object keyed "0", so the update reported success and silently
+    // destroyed every other element — the fake being more DESTRUCTIVE than
+    // the database, the direction the ignoreUndefined divergence had.
+    //
+    // Refused rather than implemented, following F17's precedent for
+    // unknown operators: no caller in this codebase writes through an array
+    // index, and a half-modelled array path is how the next silent
+    // divergence gets in. Implement it here with a conformance test on the
+    // day something needs it.
+    if (Array.isArray(existing)) {
+      throw new Error(
+        `fakeMongo does not implement writing through an array at '${path}'. ` +
+          `Mongo would treat the next segment as an array index and edit that element in place; ` +
+          `this stand-in would replace the array with an object and lose the other elements. ` +
+          `Implement it and pin it with a conformance test.`,
+      );
+    }
+
+    cursor[part] = existing && typeof existing === "object" ? { ...(existing as Record<string, unknown>) } : {};
     cursor = cursor[part] as Record<string, unknown>;
   }
   cursor[parts[parts.length - 1]] = value;
@@ -325,6 +437,28 @@ class FakeCollection {
   async insertOne(doc: Doc): Promise<{ insertedId: string }> {
     doc = stripUndefined(doc) as Doc;
     this.assertUnique(doc);
+
+    // A caller-supplied _id is KEPT and enforced unique, which is Mongo's
+    // behaviour: `_id` carries an implicit unique index, and a second
+    // insert with the same one fails with duplicate-key error 11000.
+    //
+    // This used to overwrite the caller's _id with a generated one, so the
+    // second insert succeeded and produced two documents sharing an id that
+    // the database would never have allowed. Permissive in the F1/F16
+    // direction — a uniqueness guarantee that held in tests and not in
+    // production is exactly the shape that cost 119 of 120 spins once.
+    if (doc._id !== undefined) {
+      if (this.docs.some((existing) => existing._id === doc._id)) {
+        const err = new Error(`E11000 duplicate key error collection: ${this.name} index: _id_`) as Error & {
+          code: number;
+        };
+        err.code = 11000;
+        throw err;
+      }
+      this.docs.push({ ...doc });
+      return { insertedId: doc._id as string };
+    }
+
     // Zero-padded so lexicographic ordering matches insertion order past
     // the tenth document — a real ObjectId is monotonic, and a fake that
     // sorted "10" before "9" would break the tie-break it exists to test.
