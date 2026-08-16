@@ -93,9 +93,10 @@ describe("requestSimulation", () => {
   });
 
   it("lands near the reference game's tuned RTP", async () => {
-    // A wide band on purpose. Run-to-run spread on this unseeded simulation
-    // was measured at ~0.05 at 20k spins and ~0.015 at 60k, so a tight
-    // assertion here would be a flaky test rather than a strict one. This
+    // A wide band on purpose. Run-to-run spread was measured at ~0.05 at
+    // 20k spins and ~0.015 at 60k, so a tight assertion here would be a
+    // flaky test rather than a strict one — this call passes no seed, so it
+    // is still an independent sample. This
     // catches an adapter that dropped the multiplier or halved the bet, not
     // a drift of a few points — the publish gate is what checks the latter,
     // at 100k.
@@ -138,9 +139,9 @@ describe("the assumed bonus multiplier's influence on the publish gate", () => {
     // Deliberately calls `runSimulation` directly: the adapter hardcodes
     // the constant, and the point is to vary it.
     //
-    // 60k spins, not 20k, and the reason is worth recording. Each call gets
-    // a fresh unseeded RNG, so two runs are independent samples rather than
-    // the same spins scored differently. At 20k the run-to-run spread on an
+    // 60k spins, not 20k, and the reason is worth recording. These calls
+    // pass no `runSeed`, so two runs are independent samples rather than the
+    // same spins scored differently. At 20k the run-to-run spread on an
     // UNCHANGED multiplier was measured at 0.0512 — larger than the ±0.05
     // tolerance this test is about, which would make any comparison here
     // noise. At 60k that spread is ~0.015 against a 5x..50x signal of
@@ -197,6 +198,109 @@ describe("the assumed bonus multiplier's influence on the publish gate", () => {
       baseDrift < 0.05,
       `the assumption must not move the measured half: baseRtp drifted ${baseDrift.toFixed(4)} ` +
         `between runs, which is beyond sampling noise`,
+    );
+  });
+});
+
+describe("a publish verdict is reproducible (docs/TODO.md item G)", () => {
+  /**
+   * Sampling noise used to sit at roughly 0.02 RTP at 100k spins against a
+   * tolerance of ±0.05 — about 40% of the budget spent before the paytable
+   * was considered. A game near the edge passed or failed on which sample it
+   * drew, and a designer refused at 6pm could re-run and ship at 6:01 having
+   * changed nothing.
+   *
+   * The run is now seeded, so the same seed gives the same verdict. Note
+   * this does not make the estimate *more accurate* — the noise is still
+   * there, it is simply no longer a coin flip on re-run, and the seed is
+   * recorded so a reviewer can repeat the exact run.
+   */
+  it("gives byte-identical results for the same seed", async () => {
+    const first = await requestSimulation(REFERENCE_GAME, 5_000, BET, "a-fixed-seed");
+    const second = await requestSimulation(REFERENCE_GAME, 5_000, BET, "a-fixed-seed");
+
+    assert.equal(first.resultRtp, second.resultRtp);
+    assert.equal(first.baseRtp, second.baseRtp);
+    assert.equal(first.hitFrequency, second.hitFrequency);
+    assert.equal(first.maxWinMultiplier, second.maxWinMultiplier);
+  });
+
+  it("gives different results for different seeds, so it is still sampling", async () => {
+    // The seed must actually drive the draw. A "reproducible" run that
+    // ignored its seed would be reproducible for the wrong reason.
+    const a = await requestSimulation(REFERENCE_GAME, 5_000, BET, "seed-a");
+    const b = await requestSimulation(REFERENCE_GAME, 5_000, BET, "seed-b");
+
+    assert.notEqual(a.resultRtp, b.resultRtp);
+  });
+
+  it("returns the seed it used, so a run can be repeated exactly", async () => {
+    const report = await requestSimulation(REFERENCE_GAME, 2_000, BET, "explicit-seed");
+    assert.equal(report.runSeed, "explicit-seed");
+  });
+
+  it("generates a seed when none is given, rather than running unseeded", async () => {
+    // The default path — what the publish gate uses. It must still be
+    // reproducible after the fact, which means the seed has to be recorded
+    // even when nobody chose it.
+    const report = await requestSimulation(REFERENCE_GAME, 2_000, BET);
+
+    assert.ok(report.runSeed.length > 0, "a run must always record its seed");
+    const repeat = await requestSimulation(REFERENCE_GAME, 2_000, BET, report.runSeed);
+    assert.equal(repeat.resultRtp, report.resultRtp, "replaying the recorded seed must reproduce the run");
+  });
+
+  it("draws a distinct seed per spin, not one shared stream", async () => {
+    // The property the unseeded version had and that seeding must not
+    // quietly give up: each spin takes its own 32-byte seed, so the
+    // simulation stays on the same seeding path a real round uses and a
+    // defect there cannot hide behind one long deterministic sequence.
+    //
+    // Observable as a distribution: one shared stream advanced across 5,000
+    // spins would not produce the same hit frequency as 5,000 independent
+    // seeds do.
+    const report = await requestSimulation(REFERENCE_GAME, 5_000, BET, "distribution-check");
+
+    assert.ok(
+      report.hitFrequency > 0.05 && report.hitFrequency < 0.95,
+      `hit frequency ${report.hitFrequency} suggests the seeds are not varying per spin`,
+    );
+  });
+});
+
+describe("the report says which half of the verdict is assumed", () => {
+  it("splits the RTP into what was measured and what was estimated", async () => {
+    // `resultRtp` is one number carrying two kinds of confidence: `baseRtp`
+    // was played spin by spin, while `bonusRtp` is a flat multiplier
+    // standing in for a module the simulation never ran. A designer
+    // comparing 0.95 against a target deserves to know which half is which.
+    const report = await requestSimulation(REFERENCE_GAME, 20_000, BET, "confidence");
+
+    assert.equal(report.confidence.measuredRtp, report.baseRtp);
+    assert.equal(report.confidence.estimatedRtp, report.bonusRtp);
+    assert.ok(
+      Math.abs(report.confidence.measuredRtp + report.confidence.estimatedRtp - report.resultRtp) < 1e-9,
+      "the two halves must account for the whole",
+    );
+  });
+
+  it("names the assumption that produced the estimated half", async () => {
+    // The constant is the thing a reviewer would question, so the report
+    // states it rather than making them read the source.
+    const report = await requestSimulation(REFERENCE_GAME, 2_000, BET, "assumption");
+    assert.equal(report.confidence.assumedBonusReturnMultiplier, 20);
+  });
+
+  it("reports the estimated share as a fraction of the whole verdict", async () => {
+    const report = await requestSimulation(REFERENCE_GAME, 20_000, BET, "share");
+
+    assert.ok(
+      report.confidence.estimatedShare > 0 && report.confidence.estimatedShare < 1,
+      `estimatedShare ${report.confidence.estimatedShare} should be a proper fraction`,
+    );
+    assert.ok(
+      Math.abs(report.confidence.estimatedShare - report.bonusRtp / report.resultRtp) < 1e-9,
+      "the share must match the numbers it is derived from",
     );
   });
 });

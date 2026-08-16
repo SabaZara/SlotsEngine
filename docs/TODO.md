@@ -483,6 +483,28 @@ testing was extracted into `paylineGrid.ts`, `reelStrip.ts` and the two
   gains a field — so the test now seeds a module carrying `segmentWeights`
   (the odds) and an internal note, and asserts neither ships. Applies to any
   allowlist tested against data that is already inside it.
+- **`docker compose up -d --build` can report success without rebuilding.**
+  Adding `@slots-engine/rng` to `apps/backoffice-api/package.json` without
+  regenerating `package-lock.json` left the two out of sync, and the image
+  build's `npm ci` could not install it — yet compose still printed
+  "Container ... Started" and the service came up healthy on the OLD code.
+  The change looked deployed and was not; the live audit records were the
+  only thing that showed it, and only because they were checked. Two
+  habits follow: run `npm install --package-lock-only` in the same commit as
+  any workspace-dependency change, and verify a deploy by asserting on
+  behaviour (or `docker exec ... grep` the built output) rather than by
+  reading compose's output.
+- **A cross-package mutation needs a rebuild to mean anything.** Packages
+  are imported through their built `dist/` (`"main": "./dist/index.js"`), so
+  editing `packages/math-engine/src/...` and re-running a test in
+  `apps/backoffice-api` tests the OLD code — the mutation "survives" while
+  never having been applied. Caught when the two most important mutations on
+  the simulation seeding both survived; with `npm run build:packages` between
+  the edit and the run, both were caught immediately. Audited the rest of
+  this session's mutation work: every other run used a same-package relative
+  import, which resolves to source, so only this one was affected. Worth
+  knowing because a false "survived" and a false "caught" look identical in
+  a pass/fail count.
 - **A test that waits on an event must time out.** The socket suite's first
   version used unbounded promises for "the server closes this" and "the
   server replies". Under mutation, a server that *fails* to close simply
@@ -634,12 +656,25 @@ tolerance budget** before the bonus assumption is considered at all. The two
 sources compound: a game near the edge of tolerance can pass or fail on
 which sample it drew, and re-running a refused publish may simply succeed.
 
-That makes a third option worth listing alongside the ones above:
+**Two of the four options are now done.**
 
-- **Seed the simulation** so a publish decision is reproducible. A designer
-  who is refused should be able to re-run and get the same answer, and a
-  stored report should be checkable later. This is independent of the bonus
-  assumption and probably cheaper than either fix for it.
+- ~~**Seed the simulation**~~ — shipped. `runSimulation` takes a `runSeed`,
+  and the publish gate always passes one, recording it on the report and in
+  the audit entry. The same seed reproduces a verdict exactly; a different
+  seed still samples independently, so this removes the coin-flip without
+  pretending the noise is gone. Per-spin seeds are *derived* from the run
+  seed rather than the run sharing one stream, preserving the property that
+  each spin takes its own 32-byte seed on the same path a real round uses.
+  Verified against the live stack: a publish decision made by the running
+  service replays from its audit record to the same RTP to twelve decimal
+  places.
+- ~~**Surface it in the publish response**~~ — shipped. The report carries a
+  `confidence` block naming what was measured (`baseRtp`), what was estimated
+  (`bonusRtp`), the multiplier that produced it, and the estimated share of
+  the whole verdict. Measured on `reference-5x3`: **about 8% of the number
+  the gate compares against is assumed rather than played.** The audit entry
+  records that share, so a later reader can tell how much of a decision
+  rested on a module the simulation never ran.
 
 Ranked below the section-A items because it is a known, documented
 approximation rather than a defect — but it is the most substantive thing

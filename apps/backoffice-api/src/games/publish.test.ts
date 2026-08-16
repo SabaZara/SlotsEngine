@@ -401,6 +401,37 @@ describe("the audit trail", () => {
     assert.ok(runs.every((r) => r.simCount === OFFICIAL_SIM_COUNT));
   });
 
+  it("records the run seed, so the verdict is reproducible from the audit trail", async () => {
+    // "Measured RTP 0.9580" is only checkable later if the run that produced
+    // it can be repeated exactly. Without the seed, an auditor reading this
+    // entry can re-run the simulation and legitimately get a different
+    // number — see docs/TODO.md item G.
+    const db = setup();
+
+    await publishDraft(db, goodDraft(), "designer-1");
+
+    const entry = await db.collection("auditLogs").findOne({ action: "game.publish" });
+    const diff = entry?.diff as Record<string, unknown>;
+    assert.equal(typeof diff.runSeed, "string");
+    assert.ok((diff.runSeed as string).length > 0, "a publish must record the seed it decided on");
+  });
+
+  it("records how much of the verdict was estimated rather than measured", async () => {
+    // The publish gate compares one number against a target, but that number
+    // is part measurement and part assumption. Recording the split means a
+    // later reader can tell how much of the decision rested on a module the
+    // simulation never played.
+    const db = setup();
+
+    await publishDraft(db, goodDraft(), "designer-1");
+
+    const entry = await db.collection("auditLogs").findOne({ action: "game.publish" });
+    const share = (entry?.diff as Record<string, unknown>).estimatedBonusShare as number;
+
+    assert.equal(typeof share, "number");
+    assert.ok(share >= 0 && share < 1, `estimatedBonusShare ${share} should be a proper fraction`);
+  });
+
   it("writes no audit entry and no simulation run for a refused publish", async () => {
     const db = setup();
 

@@ -1,3 +1,4 @@
+import { createHmac } from "node:crypto";
 import { generateSeed } from "@slots-engine/rng";
 import type { GameDefinition } from "@slots-engine/shared-types";
 import { evaluateSpin } from "./spin.js";
@@ -42,6 +43,41 @@ export interface SimulationOptions {
   /** Called with progress in [0,1] — a million spins is long enough that a
    * caller may want to report progress or abort. */
   onProgress?: (fraction: number) => void;
+  /**
+   * Makes a run reproducible: the same `runSeed`, game and spin count
+   * produce the same report, every time.
+   *
+   * Omitted, each spin draws a fresh cryptographic seed and the run is a
+   * genuine independent sample — which is what a fairness estimate wants,
+   * but it makes a publish verdict unrepeatable. Measured on
+   * `reference-5x3`, two runs of the SAME configuration at 100k spins differ
+   * by around 0.02 RTP against a publish tolerance of ±0.05, so sampling
+   * noise alone consumes roughly 40% of the tolerance budget: a game near
+   * the edge passes or fails on which sample it drew, and a designer who
+   * re-runs a refused publish may simply succeed. See docs/TODO.md item G.
+   *
+   * When set, per-spin seeds are DERIVED from it rather than the whole run
+   * sharing one stream. That distinction is deliberate — the comment on this
+   * function explains that each spin taking its own 32-byte seed is what
+   * keeps the simulation on the same seeding path a real round uses, so a
+   * defect in that path cannot hide behind one long deterministic sequence.
+   * Seeding the run must not quietly give that up.
+   */
+  runSeed?: string;
+}
+
+/**
+ * Per-spin seed for a reproducible run: HMAC of the spin index under the run
+ * seed, giving a 32-byte value with the same shape and distribution as
+ * `generateSeed()` produces.
+ *
+ * HMAC rather than a counter or a hash of the concatenation, so that
+ * per-spin seeds cannot be walked backwards to the run seed and adjacent
+ * spins share no structure — the simulation should exercise the evaluator
+ * the same way real, unrelated seeds do.
+ */
+function derivedSeed(runSeed: string, index: number): string {
+  return createHmac("sha256", runSeed).update(String(index)).digest("hex");
 }
 
 /**
@@ -50,9 +86,12 @@ export interface SimulationOptions {
  * measurement — and the two disagreeing is the single most common way a
  * misconfigured paytable gets caught.
  *
- * Each spin draws a fresh cryptographic seed, so the estimate reflects the
- * same seeding path a real round takes rather than one long deterministic
- * stream that could mask a seeding defect.
+ * Each spin takes its own 32-byte seed, so the estimate reflects the same
+ * seeding path a real round takes rather than one long deterministic stream
+ * that could mask a seeding defect. That holds in both modes: without a
+ * `runSeed` those seeds are freshly random, and with one they are derived
+ * per spin — reproducible, but still a distinct seed per spin rather than a
+ * shared generator.
  */
 export function runSimulation(gameDef: GameDefinition, options: SimulationOptions): SimulationReport {
   const { simCount } = options;
@@ -80,7 +119,8 @@ export function runSimulation(gameDef: GameDefinition, options: SimulationOption
   const progressEvery = Math.max(1, Math.floor(simCount / 100));
 
   for (let i = 0; i < simCount; i++) {
-    const spin = evaluateSpin(gameDef, generateSeed(), betPerSpin);
+    const seed = options.runSeed !== undefined ? derivedSeed(options.runSeed, i) : generateSeed();
+    const spin = evaluateSpin(gameDef, seed, betPerSpin);
     const base = spin.evaluation.totalWin;
     const bonus = spin.evaluation.bonusTriggered ? Math.floor(betPerSpin * bonusReturnMultiplier) : 0;
 

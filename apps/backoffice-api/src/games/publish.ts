@@ -123,6 +123,13 @@ export async function publishDraft(
       toVersion: nextVersion,
       resultRtp: simulation.resultRtp,
       rtpTarget: draft.rtpTarget,
+      // Recorded so the decision is reproducible from the audit trail alone.
+      // "Measured RTP 0.9580" is only checkable later if the run that
+      // produced it can be repeated exactly.
+      runSeed: simulation.runSeed,
+      // And how much of that figure was measured rather than assumed — see
+      // docs/TODO.md item G.
+      estimatedBonusShare: simulation.confidence.estimatedShare,
       ...(options.force && drift > RTP_TOLERANCE ? { forcedPastRtpTolerance: true } : {}),
     },
   });
