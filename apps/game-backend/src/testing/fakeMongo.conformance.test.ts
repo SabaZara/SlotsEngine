@@ -215,6 +215,77 @@ describe("fakeMongo conformance with real MongoDB", () => {
     );
   });
 
+  it("returns ONLY the named fields for an inclusion projection", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // The fake honoured `{ _id: 0 }` (the F16 fix) but ignored inclusion
+    // entirely, so a projected list query returned whole documents in tests
+    // and three fields in production. Found by a `listDrafts` test asserting
+    // the summary shape and failing against correct code — F16's family
+    // exactly, and the second time this same asymmetry has bitten.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({
+        gameId: "g1",
+        name: "N",
+        updatedAt: "2026-01-01",
+        symbols: [1, 2, 3],
+        rtpTarget: 0.95,
+      });
+      const docs = await d
+        .collection(collection)
+        .find({}, { projection: { _id: 0, gameId: 1, name: 1, updatedAt: 1 } })
+        .toArray();
+      return { keys: Object.keys(docs[0] ?? {}).sort() };
+    });
+
+    assert.deepEqual(fake, { keys: ["gameId", "name", "updatedAt"] });
+    assert.deepEqual(real, fake, "the fake must agree with Mongo on inclusion projections");
+  });
+
+  it("keeps _id on an inclusion projection that does not exclude it", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // Mongo's one asymmetry: `_id` rides along with an inclusion projection
+    // unless explicitly excluded. A fake that dropped it would make a route
+    // look like it was stripping an id it never received.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ gameId: "g1", name: "N", extra: "x" });
+      const doc = await d.collection(collection).findOne({}, { projection: { gameId: 1 } });
+      return { keys: Object.keys(doc ?? {}).sort() };
+    });
+
+    assert.deepEqual(fake, { keys: ["_id", "gameId"] });
+    assert.deepEqual(real, fake);
+  });
+
+  it("sorts before it projects, so a sort key need not be returned", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // A legal and useful query: order by a field the caller does not want
+    // back. Projecting first would silently turn the sort into a no-op —
+    // the fake agreeing on which documents come back but not on their
+    // order, which is the kind of divergence that makes a list look
+    // randomly ordered only in tests.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ name: "first", updatedAt: "2026-01-01" });
+      await d.collection(collection).insertOne({ name: "second", updatedAt: "2026-03-01" });
+      await d.collection(collection).insertOne({ name: "third", updatedAt: "2026-02-01" });
+
+      const docs = await d
+        .collection(collection)
+        .find({}, { projection: { _id: 0, name: 1 } })
+        .sort({ updatedAt: -1 })
+        .toArray();
+      return { order: docs.map((doc) => doc.name), keys: Object.keys(docs[0] ?? {}) };
+    });
+
+    assert.deepEqual(fake, { order: ["second", "third", "first"], keys: ["name"] });
+    assert.deepEqual(real, fake, "the fake must sort on a projected-away field the same way Mongo does");
+  });
+
   it("creates a document on upsert, and updates it on the second call", async function () {
     if (!realDb) return this.skip(skipReason);
 

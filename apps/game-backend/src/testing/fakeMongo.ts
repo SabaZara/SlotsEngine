@@ -64,6 +64,47 @@ function matches(doc: Doc, query: Record<string, unknown>): boolean {
  */
 const SUPPORTED_UPDATE_OPERATORS = new Set(["$set", "$inc", "$unset", "$setOnInsert"]);
 
+/**
+ * Mongo's projection semantics, to the extent this codebase uses them.
+ *
+ * Two shapes, and they are not symmetric — which is the whole reason this
+ * function exists rather than the `_id === 0` special case that used to be
+ * inlined:
+ *
+ *   **Exclusion** (`{ _id: 0 }`) — keep everything except the named fields.
+ *   **Inclusion** (`{ gameId: 1, name: 1 }`) — keep ONLY the named fields,
+ *   plus `_id` unless it is explicitly excluded.
+ *
+ * The fake previously honoured only the first and ignored the second, so a
+ * projected query returned whole documents in tests and three fields against
+ * real Mongo. That is F16's family again: the stand-in more permissive than
+ * the database, so a correct assertion fails against correct code.
+ */
+function applyProjection(doc: Doc, projection?: Record<string, 0 | 1>): Doc {
+  if (!projection) return doc;
+
+  const includes = Object.entries(projection).filter(([key, value]) => value === 1 && key !== "_id");
+
+  if (includes.length > 0) {
+    const projected: Doc = {};
+    for (const [key] of includes) {
+      if (key in doc) projected[key] = doc[key];
+    }
+    // `_id` rides along with an inclusion projection unless excluded.
+    if (projection._id !== 0 && "_id" in doc) projected._id = doc._id;
+    return projected;
+  }
+
+  const excluded = new Set(Object.entries(projection).filter(([, value]) => value === 0).map(([key]) => key));
+  if (excluded.size === 0) return doc;
+
+  const projected: Doc = {};
+  for (const [key, value] of Object.entries(doc)) {
+    if (!excluded.has(key)) projected[key] = value;
+  }
+  return projected;
+}
+
 function applyUpdate(doc: Doc, update: Record<string, unknown>): Doc {
   // An unrecognised operator used to be dropped in silence, which is the
   // F16 failure mode again: the fake being *more permissive* than Mongo, so
@@ -129,9 +170,7 @@ class FakeCollection {
     options: { projection?: Record<string, 0 | 1> } = {},
   ): Promise<Doc | null> {
     const doc = this.docs.find((d) => matches(d, query)) ?? null;
-    if (!doc || options.projection?._id !== 0) return doc;
-    const { _id, ...rest } = doc;
-    return rest as Doc;
+    return doc ? applyProjection(doc, options.projection) : null;
   }
 
   /** `matchedCount` is reported alongside `modifiedCount` because callers
@@ -209,14 +248,13 @@ class FakeCollection {
    * the response" failed against correct code.
    */
   find(query: Record<string, unknown>, options: { projection?: Record<string, 0 | 1> } = {}) {
-    const stripId = options.projection?._id === 0;
-    let results = this.docs
-      .filter((doc) => matches(doc, query))
-      .map((doc) => {
-        if (!stripId) return doc;
-        const { _id, ...rest } = doc;
-        return rest as Doc;
-      });
+    // Projection is applied at the END of the chain, not here, because
+    // Mongo sorts before it projects: `.find({}, { projection: { name: 1 } })
+    // .sort({ createdAt: -1 })` is a legal query that sorts on a field the
+    // caller never receives. Projecting up front would silently make that
+    // sort a no-op — the fake agreeing on the documents but not on their
+    // order.
+    let results = this.docs.filter((doc) => matches(doc, query));
     const cursor = {
       /** Multi-key, in declaration order — needed because the round
        * recovery query breaks a `createdAt` tie with `_id`, and a
@@ -238,10 +276,11 @@ class FakeCollection {
         return cursor;
       },
       async next(): Promise<Doc | null> {
-        return results[0] ?? null;
+        const doc = results[0] ?? null;
+        return doc ? applyProjection(doc, options.projection) : null;
       },
       async toArray(): Promise<Doc[]> {
-        return results;
+        return results.map((doc) => applyProjection(doc, options.projection));
       },
     };
     return cursor;
