@@ -83,6 +83,7 @@ existed matters more than the fix, and that reasoning is easy to lose.
 | F12 | Bonus session expiry depended on an in-process interval: if every instance was down for twenty minutes, or one tick was missed, a session that timed out long ago was still `active` and would be played on the next request — a money path deciding correctness from a timer. The deadline is now checked on every read. | Working down this list. Verified against the running stack by backdating a live session: HTTP 410, nothing paid, row intact, and its stored status still `active` — proving the sweep had not run. |
 | F13 | `verifySession` typed `JSON.parse`'s result as `SessionPayload` and read fields straight off it. A correctly signed token whose payload was the literal `null` threw a TypeError instead of returning null, and the auth middleware does not catch — so junk produced **500 instead of 401** on every admin route. Now refuses any non-object, and the parsed value is typed `unknown` so the compiler requires the check. | Writing the first tests for the file. Confirmed against the running service — 500 before, 401 after, for `null`, an array, a number and a string. |
 | F14 | The ledger's idempotency was only ever tested as a **sequential** replay — call, then call again — on a stand-in that models no transactions. Two callers arriving at the same instant is a different guarantee, resting on the unique index plus the driver's write-conflict retry, and nothing exercised it at this level. Now covered against a real replica set. | Reading the reference repo's own ledger suite (`~/Desktop/irakli/slot-engine`), which had exactly these tests and which I had not consulted. Both mutations caught: removing the in-flight check fails even with the index intact. |
+| F15 | `evaluateScatter` looks a count up **exactly** (`payout[count]`), so a table of `{3,4,5}` pays **nothing** at 6 — the biggest outcome in the game silently returning zero. Unreachable for `reference-5x3` (one scatter per strip caps it at 5), but one edit in the backoffice makes it live, and draft validation checked each entry's shape without ever checking the table covered the reachable range. `validateDraft` now refuses to publish an under-covered table. | Writing the first tests for `scatter.ts`, after the reference's suite flagged that its own engine uses N-or-more semantics where this one does not. Verified the shipped game still publishes and the dangerous edit is refused. |
 
 ---
 
@@ -104,7 +105,7 @@ This is deliberate for now — there is nowhere to deploy to — but it means
 
 GitHub requires Pro for branch protection on a private repo, so CI reports
 but cannot block a merge. A `pre-push` hook covers the realistic case
-locally (build, typecheck, 402 tests, ~30s), and is skippable with
+locally (build, typecheck, 485 tests, ~35s), and is skippable with
 `--no-verify` by design.
 
 Options: GitHub Pro at $4/month, make the repo public, or accept it. See
@@ -133,6 +134,28 @@ The standard mitigations, none of which are free:
 - **Not locking, but requiring a second factor** once the count is high.
 
 Worth doing before this is exposed to the public internet, not before.
+
+### 3c. `e2e:backoffice` can exhaust the login rate limit
+**Severity: low (test-only) · Effort: low**
+
+The suite signs in many times — the bootstrap admin, then each user it
+creates — against a per-IP limit of 10 logins per 5 minutes. A single clean
+run fits. Running it twice in quick succession, or running it after any
+manual login attempts, does not: the second run fails with
+`a deactivated user cannot sign back in — got 429`, which reads like a
+broken deactivation check rather than a throttled request.
+
+Same shape as F11, and found the same way — by running it. The recovery is
+simply to wait out the window, which is what makes it easy to misdiagnose:
+the suite passes on retry, so the failure looks flaky rather than
+explained.
+
+Two honest fixes, neither done yet: have the e2e client assert on a 429
+explicitly ("rate limited, not a real failure") instead of reporting the
+status mismatch, and give the e2e stack a raised `LOGIN_RATE_LIMIT` the way
+CI already raises `GAME_RATE_LIMIT` for the load check. The limiter itself
+is correct and has its own tests; it is the suite that assumes it can log
+in freely.
 
 ### 3b. Rate limits are per-instance, held in memory
 **Severity: medium before horizontal scaling · Effort: low**

@@ -215,6 +215,129 @@ describe("validateDraft", () => {
     });
   });
 
+  describe("scatter payout coverage", () => {
+    /** A 3x3 reel-strip draft with one scatter symbol and controllable
+     * strips, so "how many can land" is exact rather than probabilistic. */
+    function scatterDraft(stripSymbols: string[], payout: Record<number, number>): GameDraft {
+      return {
+        ...base(),
+        grid: { reels: 3, rows: 3 },
+        reelGenerationMode: "reel-strip",
+        paylines: [[1, 1, 1]],
+        reelStrips: [0, 1, 2].map((reelIndex) => ({ reelIndex, symbols: stripSymbols })),
+        symbols: [
+          { symbol: "A", allowedReels: [0, 1, 2], role: "regular", paytable: { 3: 5 } },
+          {
+            symbol: "S",
+            allowedReels: [0, 1, 2],
+            role: "scatter",
+            scatterConfig: { multiplierOf: "totalBet", payout },
+          },
+        ],
+      } as GameDraft;
+    }
+
+    it("rejects a payout table that stops below what the grid can produce", () => {
+      // `evaluateScatter` looks the count up EXACTLY, so a table ending at
+      // 3 pays nothing at 4, 5 or 6 — the bigger win silently pays zero.
+      //
+      // Two adjacent scatters on a strip means a 3-row window can show 2,
+      // and with three identical reels that is 6 reachable — NOT the "one
+      // per reel" intuition, which is exactly why this check computes it
+      // from the strips rather than assuming.
+      const draft = scatterDraft(["S", "S", "A", "A", "A"], { 2: 1, 3: 4 });
+      rejects(draft, /up to 6 can land .* only defines up to 3 .* pay nothing/);
+    });
+
+    it("accepts a table that covers the full reachable range", () => {
+      const draft = scatterDraft(["S", "S", "A", "A", "A"], { 2: 1, 3: 4, 4: 20, 5: 40, 6: 100 });
+      assert.doesNotThrow(() => validateDraft(draft));
+    });
+
+    it("accepts a table covering more than is reachable", () => {
+      // Over-covering is harmless — those entries are simply never hit.
+      // One isolated scatter per strip -> at most 3 on screen.
+      const draft = scatterDraft(["S", "A", "A", "A", "A"], { 2: 1, 3: 4, 4: 20, 5: 80 });
+      assert.doesNotThrow(() => validateDraft(draft));
+    });
+
+    it("counts consecutive scatters within one visible window", () => {
+      // The subtlety the check exists for: a strip carrying scatters on
+      // adjacent positions shows several at once in a 3-row window, so
+      // "one per reel" is not the maximum.
+      const draft = scatterDraft(["S", "S", "S", "A", "A"], { 3: 4 });
+      rejects(draft, /up to 9 can land/);
+    });
+
+    it("counts every cell of a weighted reel that can produce the scatter", () => {
+      const draft = {
+        ...base(),
+        grid: { reels: 2, rows: 2 },
+        reelGenerationMode: "weighted-symbol",
+        paylines: [[0, 0]],
+        reelStrips: [],
+        symbolWeights: [
+          [
+            { symbol: "A", weight: 1 },
+            { symbol: "S", weight: 1 },
+          ],
+          [
+            { symbol: "A", weight: 1 },
+            { symbol: "S", weight: 1 },
+          ],
+        ],
+        symbols: [
+          { symbol: "A", allowedReels: [0, 1], role: "regular", paytable: { 2: 5 } },
+          {
+            symbol: "S",
+            allowedReels: [0, 1],
+            role: "scatter",
+            scatterConfig: { multiplierOf: "totalBet", payout: { 2: 1 } },
+          },
+        ],
+      } as GameDraft;
+
+      // Both reels can produce S in both rows, so 4 is reachable.
+      rejects(draft, /up to 4 can land .* only defines up to 2/);
+    });
+
+    it("ignores a reel whose weighted pool cannot produce the scatter", () => {
+      const draft = {
+        ...base(),
+        grid: { reels: 2, rows: 2 },
+        reelGenerationMode: "weighted-symbol",
+        paylines: [[0, 0]],
+        reelStrips: [],
+        symbolWeights: [
+          [
+            { symbol: "A", weight: 1 },
+            { symbol: "S", weight: 1 },
+          ],
+          [{ symbol: "A", weight: 1 }],
+        ],
+        symbols: [
+          { symbol: "A", allowedReels: [0, 1], role: "regular", paytable: { 2: 5 } },
+          {
+            symbol: "S",
+            allowedReels: [0, 1],
+            role: "scatter",
+            scatterConfig: { multiplierOf: "totalBet", payout: { 1: 1, 2: 3 } },
+          },
+        ],
+      } as GameDraft;
+
+      // Only reel 0 can produce S, so at most 2 — which the table covers.
+      assert.doesNotThrow(() => validateDraft(draft));
+    });
+
+    it("says nothing about a scatter with no payout table", () => {
+      // A scatter that pays nothing is a legitimate design (it may exist
+      // only to trigger a bonus), so there is no coverage to check.
+      const draft = scatterDraft(["S", "S", "A", "A", "A"], {} as Record<number, number>);
+      assert.doesNotThrow(() => validateDraft(draft));
+    });
+  });
+
   describe("hand-crafted requests", () => {
     it("rejects an explicitly null currency without crashing", () => {
       // A null here would crash `.trim()` as an unhandled 500 rather than

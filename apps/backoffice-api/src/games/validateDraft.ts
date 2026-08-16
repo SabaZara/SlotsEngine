@@ -226,6 +226,32 @@ export function validateDraft(draft: GameDraft): void {
           );
         }
       }
+
+      // The payout table must cover every count the grid can actually
+      // produce, because `evaluateScatter` looks the count up EXACTLY —
+      // `payout[count]`, not "the highest entry at or below count".
+      //
+      // So a table of {3,4,5} on a game where six scatters can land pays
+      // 80x at five and *nothing at all* at six. The best outcome in the
+      // game silently pays zero: no error, no warning, and a player who
+      // hit the rarest screen possible is simply told they won nothing.
+      //
+      // Caught here rather than in the evaluator because this is a
+      // definition mistake, and publish time is where a human can still
+      // fix it. Making the evaluator fall back to the nearest lower tier
+      // would instead invent a payout the designer never wrote down.
+      const declared = Object.keys(symbol.scatterConfig.payout).map(Number);
+      if (declared.length > 0) {
+        const reachable = maxReachableCount(draft, symbol.symbol);
+        const highestDeclared = Math.max(...declared);
+        if (reachable > highestDeclared) {
+          throw new DraftValidationError(
+            `symbol '${symbol.symbol}': up to ${reachable} can land on this grid but scatterConfig.payout ` +
+              `only defines up to ${highestDeclared} — counts above that pay nothing. ` +
+              `Add an entry for every count up to ${reachable}.`,
+          );
+        }
+      }
     }
 
     if (symbol.role === "bonusTrigger") {
@@ -269,4 +295,52 @@ export function validateDraft(draft: GameDraft): void {
       );
     }
   }
+}
+
+/**
+ * The most copies of `symbol` that can appear on screen at once.
+ *
+ * Computed from the draft's own reels rather than assumed to be one per
+ * reel: a strip may carry the same symbol on adjacent positions, so a
+ * 3-row window can show several at once, and a weighted pool can produce
+ * the symbol in every visible cell.
+ *
+ * Deliberately an upper bound on what is POSSIBLE, not what is likely. A
+ * payout table that fails to cover a reachable count is a definition bug
+ * however rare the outcome — and the rarer it is, the worse the failure,
+ * because it is the biggest win that silently pays nothing.
+ */
+function maxReachableCount(draft: GameDraft, symbol: string): number {
+  const rows = draft.grid?.rows ?? 0;
+  const reels = draft.grid?.reels ?? 0;
+
+  if (draft.reelGenerationMode === "weighted-symbol") {
+    // Every cell on a reel whose pool contains the symbol could be it.
+    let total = 0;
+    for (let reel = 0; reel < reels; reel++) {
+      const pool = draft.symbolWeights?.[reel] ?? [];
+      if (pool.some((entry) => entry.symbol === symbol && entry.weight > 0)) total += rows;
+    }
+    return total;
+  }
+
+  // Reel-strip mode: slide the visible window over each strip and take the
+  // best it can show, since consecutive copies stack within one window.
+  let total = 0;
+  for (let reel = 0; reel < reels; reel++) {
+    const strip = draft.reelStrips?.find((s) => s.reelIndex === reel);
+    const symbols = strip?.symbols ?? [];
+    if (symbols.length === 0) continue;
+
+    let best = 0;
+    for (let stop = 0; stop < symbols.length; stop++) {
+      let visible = 0;
+      for (let row = 0; row < rows; row++) {
+        if (symbols[(stop + row) % symbols.length] === symbol) visible++;
+      }
+      best = Math.max(best, visible);
+    }
+    total += best;
+  }
+  return total;
 }
