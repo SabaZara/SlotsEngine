@@ -326,23 +326,51 @@ route rather than the rule that broke.
 | ~~`shared-types/src/money.ts`~~ | 84 | **Done.** 26 tests, all eight mutations caught. The "no minor unit created or lost" property is pinned exhaustively over totals 0–60 × parts 1–12, plus a spread check — summing correctly is not enough on its own, since `[total, 0, 0, …]` also sums correctly. Adapted from the reference's `money.test.ts` (near-identical module), extended with the cases it lacked: negative totals, `-0`, and the `70.07 * 100 = 7006.999…` float error that is the reason this module exists. |
 | ~~`shared-types/src/rbac.ts`~~ | 65 | **Done.** 14 tests, all six mutations caught. Note the file is types plus `ROLE_IDS` and `toPublicUser` — there are no "permission sets" here, so this row overstated it; authorisation lives in `requireRole`. Writing the tests found F18. |
 
-### C. Frontend — untouched this whole session
+### C. Frontend — the request layers are now covered
 
-`game-frontend` and `backoffice-frontend` have **12 source files and 2 test
-files** between them. Nothing in this session went near them. The review's
-assessment was that the frontend is sound (no client-side money
-calculation, `sessionStorage` rather than `localStorage`, a clean XSS
-surface), so this is a coverage gap rather than a known-defect list — but
-it is the largest single untested area remaining.
+`game-frontend/src/api.ts` (20 tests) and `backoffice-frontend/src/api.ts`
+(15 tests) are done. Between them they close all three of the specific
+concerns this section originally raised, and the review's frontend
+assessment — made against a *different* codebase — was checked here rather
+than assumed:
 
-Worth checking specifically, since the review looked at a *different*
-codebase's frontend and these findings may not transfer:
+- **The client never computes a win amount.** Confirmed: it assigns
+  server-sent balances and renders `round.evaluation.totalWin`. Pinned by a
+  test asserting a spin message carries exactly `betAmount`,
+  `clientRequestId` and `type` — no identity, no balance.
+- **A stored session token must never substitute for a missing launch
+  token.** Confirmed in both directions: a reconnect sends the *session*
+  token (a launch token is single-use, so resending it would bounce the
+  player to the lobby), and when the server issued no session token the
+  launch token is used rather than a token being invented.
+- **1013 (busy) and a refused handshake.** Both now exercised: a 1013 close
+  raises `onDisconnected`, a refused handshake raises
+  `onError("connection_failed")`, and a send on a closed socket reports
+  `not_connected` instead of throwing.
 
-- The client never computes a win amount, only renders what the server sent.
-- Token handling on reconnect: a stored session token must never substitute
-  for a missing launch token.
-- The socket client's behaviour when the server closes with 1013 (busy) or
-  refuses the handshake with 403 — both now reachable, neither exercised.
+**Better than the review credited:** neither frontend touches `localStorage`
+*or* `sessionStorage`. Both keep the token in memory only. Both suites pin
+the absence of any storage write, since a future "keep me signed in" is
+exactly how that regresses.
+
+The backoffice's 401 handling is the client half of `tokenVersion`
+revocation: the backend makes a demotion take effect on the next request,
+and this is what turns that 401 into a return to the login screen. Tested
+alongside the two cases that must NOT log a user out — a failed login (401
+with no session) and a 403 (signed in, not permitted).
+
+One real fix fell out: `import.meta.env` is injected by Vite and undefined
+anywhere else, so reading a property off it threw and made these modules
+unimportable from a test. Both now use `import.meta.env?.` — guarded in the
+source rather than worked around in the test, because a module only one
+toolchain can load is why these had no tests at all.
+
+**Still untested:** the React components (`screens/*.tsx`,
+`gameBuilder/*.tsx`), `renderer.ts` and `main.ts`. These need a DOM
+environment and a component testing library, neither of which this repo has
+— a deliberate stopping point rather than an oversight. The logic worth
+testing was extracted into `paylineGrid.ts`, `reelStrip.ts` and the two
+`api.ts` files, all of which are now covered.
 
 ### D. Test-infrastructure debt
 

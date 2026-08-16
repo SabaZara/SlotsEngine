@@ -3,8 +3,8 @@ import { GameClient, fetchGameView, type PublicGameView } from "./api.js";
 import { GameRenderer } from "./render/renderer.js";
 import { formatMoney } from "./ui/formatMoney.js";
 
-const BACKEND_URL = import.meta.env.VITE_GAME_BACKEND_URL ?? "http://localhost:9102";
-const SOCKET_URL = import.meta.env.VITE_GAME_SOCKET_URL ?? "ws://localhost:9103";
+const BACKEND_URL = import.meta.env?.VITE_GAME_BACKEND_URL ?? "http://localhost:9102";
+const SOCKET_URL = import.meta.env?.VITE_GAME_SOCKET_URL ?? "ws://localhost:9103";
 
 const el = <T extends HTMLElement>(id: string): T => {
   const node = document.getElementById(id);

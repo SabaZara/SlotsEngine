@@ -10,7 +10,14 @@ import type {
   SymbolWeight,
 } from "@slots-engine/shared-types";
 
-const BASE_URL = import.meta.env.VITE_BACKOFFICE_API_URL ?? "http://localhost:9105";
+/**
+ * `import.meta.env` is injected by Vite and is undefined anywhere else, so
+ * reading a property off it throws outside a bundle — which made this module
+ * unimportable from a test. Guarded rather than worked around in the test,
+ * because a module that can only be loaded by one toolchain is the reason
+ * this file had no tests at all.
+ */
+const BASE_URL = import.meta.env?.VITE_BACKOFFICE_API_URL ?? "http://localhost:9105";
 
 /** Mirrors the API's `GameDraft`. Deliberately has no `version` or `status`:
  * those are facts about a *publish*, not an edit, so the editor cannot
