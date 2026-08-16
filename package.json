@@ -9,8 +9,10 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build --workspaces --if-present",
-    "typecheck": "npm run typecheck --workspaces --if-present",
+    "// build": "Order is load-bearing, and npm does NOT provide it: `--workspaces` runs alphabetically, which puts apps/ before packages/. Apps resolve packages through their built dist/*.d.ts, so an uncompiled package reads to tsc as a missing module — the classic symptom being a build that fails once and succeeds on a second run against stale output. Packages therefore build first, dependencies before dependents (math-engine needs shared-types and rng), and apps last.",
+    "build": "npm run build:packages && npm run build --workspace apps --if-present",
+    "build:packages": "npm run build -w packages/shared-types -w packages/rng --if-present && npm run build --workspace packages --if-present",
+    "typecheck": "npm run build:packages && npm run typecheck --workspaces --if-present",
     "test": "npm run typecheck && tsx --test \"packages/*/src/**/*.test.ts\" \"apps/*/src/**/*.test.ts\"",
     "dev:game-backend": "npm run dev -w apps/game-backend",
     "dev:game-socket": "npm run dev -w apps/game-socket",

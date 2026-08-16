@@ -242,6 +242,15 @@ The honest tests. Unit tests cannot prove transactions roll back, that indexes
 are really declared, or that two services agree about what a published game
 is. These drive real services end to end.
 
+Both run in CI on every push and pull request, along with the build and
+typecheck — a suite that is never consulted before code ships is
+documentation, not a safety net. The first CI run earned its place
+immediately by failing: the workspace build ran alphabetically, so `apps/`
+compiled before the `packages/` they import, and 87 type errors appeared on
+a clean checkout that no local run had ever shown. Stale `dist/` output had
+been hiding it — the build failed once and passed on a second run. Build
+order is now explicit in `package.json`.
+
 **A note on the gap between them.** Every bug found late in this project was
 found by the end-to-end runs, never the unit tests:
 

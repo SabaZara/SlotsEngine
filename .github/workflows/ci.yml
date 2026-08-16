@@ -35,11 +35,11 @@ jobs:
 
       - run: npm ci
 
-      # Workspace packages must be compiled before anything that imports
-      # them by name can resolve. Running this first also means a genuine
-      # build break is reported as a build break, not as a confusing
-      # cascade of module-not-found failures in the test step.
-      - name: Build workspace packages
+      # Runs the full build first, so a genuine build break is reported as a
+      # build break rather than a cascade of module-not-found failures.
+      # A clean checkout is the only place the workspace build order is
+      # actually tested — locally, stale dist/ output hides an ordering bug.
+      - name: Build
         run: npm run build
 
       # `npm test` runs the typecheck itself before the suite. That order is
