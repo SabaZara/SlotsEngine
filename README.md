@@ -222,13 +222,38 @@ secrets match or `INITIAL_PLAYER_BALANCE` would hand out free money.
 npm test
 ```
 
-244 unit tests covering payout correctness, money invariants, the concurrency
-fixes, token verification, the disclosure boundary, draft validation, the RTP
-gate, role guards, user management, the spin-timing maths and payline-grid
-editing. `npm test` runs a full typecheck first — `tsx` strips types without
-checking them, so the suite alone once gave a clean pass on a real type error. They use an in-memory database
+273 unit tests covering payout correctness, money invariants, the concurrency
+fixes, token verification, the identity boundary, the disclosure boundary,
+draft validation, the RTP gate, role guards, user management, the spin-timing
+maths and payline-grid editing. `npm test` runs a full typecheck first —
+`tsx` strips types without checking them, so the suite alone once gave a clean
+pass on a real type error. They use an in-memory database
 stand-in that models the two behaviours correctness depends on — unique
 indexes that throw `11000`, and atomic `findOneAndUpdate`.
+
+### The identity boundary
+
+`game-socket` decides *who a player is*, so its 29 tests are worth calling
+out separately. The decision logic lives in `session.ts`, deliberately split
+from the server in `index.ts` and written against a two-line `Connection`
+interface rather than a `WebSocket` — the code protecting every service
+behind it should be testable without standing up the thing it protects.
+
+They stub game-backend at the `fetch` boundary rather than mocking the client
+module, so request signing and the mapping of a backend error onto a typed
+one still execute. Mocking the module would skip precisely the layer most
+likely to be wrong.
+
+The property they exist to defend: **a client can name a bet, never a
+player.** One test sends a hostile `SPIN_REQUEST` carrying its own
+`operatorId` and `playerId` alongside the bet, and asserts the values that
+reach the money path come from the verified token instead.
+
+Each test was checked by breaking the code on purpose and confirming it
+failed: trusting a client-supplied `playerId` fails 1, skipping the
+single-use token consume fails 2, and serving messages without a prior
+`JOIN` fails 3. A test that has never been seen to fail is a guess about
+coverage.
 
 ```bash
 npm run e2e:spin
