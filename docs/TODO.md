@@ -24,6 +24,8 @@ existed matters more than the fix, and that reasoning is easy to lose.
 | F6 | `void app.register(rateLimit, …)` in a synchronous factory left **every** route unlimited — the plugin's `onRoute` hook had not installed yet. No error; requests just returned 200 with no protection. | Flooding the running service and finding the limit never fired. |
 | F7 | game-backend's error handler forced every error to 500, flattening the limiter's 429 into `internal_error` — a limited client was told nothing and had no reason to back off. | Same flood; the status code was wrong. |
 | F8 | `game-socket` accepted a WebSocket handshake from any origin — the service that owns the identity boundary held the most permissive position of the three, while both HTTP surfaces named their origins explicitly. Now refused with `403` at `verifyClient`. | Working down this list. 23 tests, each verified by mutation, plus a live handshake check against a running server. |
+| F9 | The `loginAttempts` validator specified `bsonType: ["long", "int"]` — the types those values conceptually are. Every JavaScript number serialises to BSON **double**, so Mongo rejected every write and each failed login returned 500. | Driving the real stack. 333 unit tests passed throughout: the in-memory stand-in has no validator, so it models the schema we intended rather than the one Mongo enforces — the same blind spot as F1. |
+| F10 | Login was throttled **per IP only**, so an attacker spreading attempts across many addresses got the full allowance *per address* against one account — every attempt looking like a first attempt. Now also counted per account, after body parsing, where the email is actually known. | Working down this list. 23 tests, each verified by mutation, plus the real-stack run that found F9. |
 
 ---
 
@@ -45,27 +47,35 @@ This is deliberate for now — there is nowhere to deploy to — but it means
 
 GitHub requires Pro for branch protection on a private repo, so CI reports
 but cannot block a merge. A `pre-push` hook covers the realistic case
-locally (build, typecheck, 310 tests, ~25s), and is skippable with
+locally (build, typecheck, 333 tests, ~30s), and is skippable with
 `--no-verify` by design.
 
 Options: GitHub Pro at $4/month, make the repo public, or accept it. See
 the note in the README about why public is the wrong trade here.
 
-### 3. Per-account login throttling
-**Severity: medium · Effort: medium**
+### 3. Account lockout is a denial-of-service lever
+**Severity: low-medium · Effort: medium**
 
-Rate limiting now exists on all three surfaces (see the README table), but
-login is limited **per IP only**. An attacker distributing attempts across
-many addresses still gets 10 guesses per address against one account.
+Per-account throttling now exists (F10): ten consecutive failures lock an
+address for fifteen minutes, counted against the account rather than the
+source IP, so distributing an attack across many addresses no longer buys
+more guesses.
 
-The obvious fix — keying by IP *and* email — does not work at the limiter
-layer: it runs before body parsing, so the email is not available, and
-every attempt collapses into one shared bucket that lets one attacker lock
-out every administrator. Measured, not assumed.
+The trade it introduces is the one every lockout scheme has: anyone who
+knows an administrator's email can keep that account locked by failing on
+purpose, indefinitely and from anywhere. That is a real cost, accepted
+deliberately here — a fifteen-minute window that expires on its own is a
+far smaller problem than an unbounded distributed guessing rate against a
+password.
 
-Per-account throttling therefore belongs *after* parsing, tracked against
-the user record: a failed-attempt counter with a lockout window, which also
-gives the audit log something useful to record.
+The standard mitigations, none of which are free:
+
+- **Exponential backoff instead of a flat window.** Slows a real attacker
+  without ever fully denying a legitimate user. Probably the best next step.
+- **A CAPTCHA or proof-of-work after N failures**, rather than a refusal.
+- **Not locking, but requiring a second factor** once the count is high.
+
+Worth doing before this is exposed to the public internet, not before.
 
 ### 3b. Rate limits are per-instance, held in memory
 **Severity: medium before horizontal scaling · Effort: low**

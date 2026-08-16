@@ -233,6 +233,62 @@ export const COLLECTIONS: CollectionDefinition[] = [
     ],
   },
   {
+    /**
+     * Failed-login counters, keyed by the ATTEMPTED email rather than by a
+     * user id — an attempt against an address that does not exist has to be
+     * counted too, or the observable behaviour differs between a real and
+     * an unknown address and the login route's anti-enumeration work is
+     * undone. See `auth/loginThrottle.ts`.
+     *
+     * This is throttling state, not a record of anything: it is safe to
+     * lose. A restart or an expiry granting an attacker a fresh allowance
+     * is the same position the per-IP limiter is already in.
+     */
+    name: "loginAttempts",
+    validator: {
+      $jsonSchema: {
+        bsonType: "object",
+        required: ["key"],
+        additionalProperties: true,
+        properties: {
+          key: { bsonType: "string" },
+          // `number` — the alias that accepts every numeric BSON type —
+          // matching `balance` and `amount` above rather than inventing a
+          // second convention.
+          //
+          // This is the fix for a bug, not a style preference. The first
+          // version specified `["long", "int"]`, the types these values
+          // conceptually *are*; but every JavaScript number serialises to
+          // BSON `double`, including integers, so Mongo rejected all of
+          // them with "Document failed validation" and each failed login
+          // became a 500.
+          //
+          // No unit test could see it: the in-memory stand-in has no
+          // validator, so it models the schema we intended rather than the
+          // one Mongo enforces. Exactly the shape of bug F1 in
+          // docs/TODO.md, and found the same way — by running it.
+          attempts: { bsonType: "number" },
+          // Millisecond epochs, matching the `Date.now()` the throttle
+          // compares against. Deliberately not a BSON date: that would put
+          // two time representations in one comparison, which is how
+          // off-by-a-timezone bugs get in.
+          lastAttemptAt: { bsonType: ["number", "null"] },
+          lockedUntil: { bsonType: ["number", "null"] },
+          // The one real date, because a TTL index requires one.
+          expiresAt: { bsonType: ["date", "null"] },
+        },
+      },
+    },
+    indexes: [
+      { keys: { key: 1 }, options: { unique: true, name: "login_key_unique" } },
+      // Expiry as a property of the data rather than of a process being
+      // alive. `expiresAt` is a real BSON date because a TTL index requires
+      // one — the millisecond fields above are what the throttle compares,
+      // this is only what Mongo reaps.
+      { keys: { expiresAt: 1 }, options: { expireAfterSeconds: 0, name: "attempt_ttl" } },
+    ],
+  },
+  {
     // Append-only. Nothing in this codebase updates or deletes from here.
     name: "auditLogs",
     validator: {

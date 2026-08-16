@@ -120,6 +120,115 @@ describe("authentication", () => {
     assert.equal(response.statusCode, 200);
   });
 
+  it("locks an account after repeated failures, and says so with a 429", async () => {
+    // The default allowance is 10; this drives the real route table to the
+    // limit rather than testing the throttle module again in isolation.
+    const attempt = (password: string) =>
+      ctx.app.inject({ method: "POST", url: "/v1/auth/login", payload: { email: "designer@example.com", password } });
+
+    for (let i = 0; i < 10; i++) {
+      assert.equal((await attempt("wrong")).statusCode, 401, `attempt ${i + 1} should be a plain rejection`);
+    }
+
+    const locked = await attempt("wrong");
+    assert.equal(locked.statusCode, 429, "the account should be locked once the allowance is spent");
+    assert.equal(locked.json().error, "account_locked");
+    assert.ok(Number(locked.headers["retry-after"]) > 0, "a lockout must tell the client when to return");
+  });
+
+  it("refuses the CORRECT password while locked", async () => {
+    // The point of the whole feature: guessing must stop being useful even
+    // if the attacker's next guess happens to be right.
+    for (let i = 0; i < 10; i++) {
+      await ctx.app.inject({
+        method: "POST",
+        url: "/v1/auth/login",
+        payload: { email: "designer@example.com", password: "wrong" },
+      });
+    }
+
+    const response = await ctx.app.inject({
+      method: "POST",
+      url: "/v1/auth/login",
+      payload: { email: "designer@example.com", password: "correct-horse" },
+    });
+    assert.equal(response.statusCode, 429);
+  });
+
+  it("does not reveal that an account exists by locking it differently", async () => {
+    // A locked real address and a locked unknown address must look the
+    // same, or the lockout reopens the enumeration oracle that the
+    // identical 401 body closes.
+    const spend = async (email: string) => {
+      let last;
+      for (let i = 0; i < 11; i++) {
+        last = await ctx.app.inject({ method: "POST", url: "/v1/auth/login", payload: { email, password: "wrong" } });
+      }
+      return last!;
+    };
+
+    const real = await spend("designer@example.com");
+    const unknown = await spend("nobody@example.com");
+    assert.equal(real.statusCode, unknown.statusCode);
+    assert.deepEqual(real.json(), unknown.json());
+  });
+
+  it("locking one account leaves every other administrator able to log in", async () => {
+    // The failure mode of the rejected IP+email limiter design: one
+    // attacker locking out everyone. This is the regression test for it.
+    for (let i = 0; i < 11; i++) {
+      await ctx.app.inject({
+        method: "POST",
+        url: "/v1/auth/login",
+        payload: { email: "designer@example.com", password: "wrong" },
+      });
+    }
+
+    const other = await ctx.app.inject({
+      method: "POST",
+      url: "/v1/auth/login",
+      payload: { email: "viewer@example.com", password: "correct-horse" },
+    });
+    assert.equal(other.statusCode, 200, "one attacked account must not deny service to the rest");
+  });
+
+  it("a successful login clears the failure count", async () => {
+    const wrong = () =>
+      ctx.app.inject({
+        method: "POST",
+        url: "/v1/auth/login",
+        payload: { email: "designer@example.com", password: "wrong" },
+      });
+
+    for (let i = 0; i < 9; i++) await wrong();
+
+    // One success resets the run, so the next nine failures must not lock.
+    const ok = await ctx.app.inject({
+      method: "POST",
+      url: "/v1/auth/login",
+      payload: { email: "designer@example.com", password: "correct-horse" },
+    });
+    assert.equal(ok.statusCode, 200);
+
+    for (let i = 0; i < 9; i++) {
+      assert.equal((await wrong()).statusCode, 401, "the counter should have restarted");
+    }
+  });
+
+  it("records a lockout in the audit log", async () => {
+    for (let i = 0; i < 10; i++) {
+      await ctx.app.inject({
+        method: "POST",
+        url: "/v1/auth/login",
+        payload: { email: "designer@example.com", password: "wrong" },
+      });
+    }
+
+    const entries = await ctx.raw.collection("auditLogs").find({ action: "auth.account_locked" }).toArray();
+    assert.equal(entries.length, 1, "a lockout is worth exactly one audit entry");
+    assert.equal(entries[0].entityId, ctx.designer.userId);
+  });
+
   it("revokes every issued token when the user logs out everywhere", async () => {
     // The property a stateless token cannot provide on its own, and the
     // reason every request pays for one extra lookup.

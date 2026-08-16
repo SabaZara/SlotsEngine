@@ -106,6 +106,12 @@ services:
       BACKOFFICE_RATE_LIMIT: ${BACKOFFICE_RATE_LIMIT:-300}
       # Login gets a far tighter ceiling than ordinary admin traffic.
       LOGIN_RATE_LIMIT: ${LOGIN_RATE_LIMIT:-10}
+      # Per-account lockout, which the per-IP limit above cannot provide:
+      # an attacker distributed across addresses gets the IP allowance from
+      # every one of them.
+      LOGIN_MAX_ATTEMPTS: ${LOGIN_MAX_ATTEMPTS:-10}
+      LOGIN_LOCKOUT_MINUTES: ${LOGIN_LOCKOUT_MINUTES:-15}
+      LOGIN_ATTEMPT_WINDOW_MINUTES: ${LOGIN_ATTEMPT_WINDOW_MINUTES:-15}
       BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-admin@example.com}
       BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}

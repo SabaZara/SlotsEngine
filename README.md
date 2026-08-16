@@ -383,6 +383,7 @@ worse than none.
 | `game-backend` `/health*` | — | exempt |
 | `backoffice-api` (global) | client IP | 300/min |
 | `backoffice-api` `/v1/auth/login` | client IP | **10 / 5 min** |
+| `backoffice-api` `/v1/auth/login` | **the account** | **10 failures → 15 min lock** |
 | `game-socket` spins | per connection | 5/s, burst 10 |
 | `game-socket` all messages | per connection | 25/s, burst 50 |
 
@@ -393,6 +394,34 @@ healthy, converting a defence into an outage.
 
 **Login is separate from the global limit**, because 300 password guesses a
 minute is a working credential-stuffing rate rather than a defence.
+
+**Login is limited twice, by IP and by account, because neither alone is
+enough.** The per-IP ceiling stops one address guessing quickly and does
+nothing about an attacker spreading attempts across many addresses — ten
+guesses from each of a thousand hosts is ten thousand guesses at one
+password, and every one of them looks like a first attempt to a limiter
+keyed by IP. The per-account counter is keyed to the thing being attacked
+instead, so distributing the source buys nothing.
+
+It has to live *after* body parsing, in the handler, for the reason the
+next section describes: at the limiter layer the email is not available
+yet. Three details are load-bearing:
+
+- **The counter is keyed by the attempted email, not by a user id**, so a
+  failed attempt against an address that does not exist is counted too.
+  Tracking only real accounts would make the two observably different and
+  reopen the enumeration oracle that the identical error body and the
+  dummy-hash timing exist to close.
+- **The lock is checked before the password is verified**, so a locked
+  account costs one indexed lookup instead of a scrypt hash — a flood
+  against a locked account must not become a way to burn CPU.
+- **A lockout is a timestamp, not a flag.** A latching "locked" boolean
+  needs something to unlatch it, and that becomes a second failure mode;
+  an expiry recovers with nothing running.
+
+Only a successful login clears the counter. The obvious cost is that anyone
+who knows an administrator's address can hold it locked on purpose — a real
+trade, taken deliberately and recorded in `docs/TODO.md`.
 
 **Health is exempt**, because a limiter able to fail a readiness probe will
 eventually take a service out of rotation for being busy.
@@ -511,6 +540,13 @@ found by the end-to-end runs, never the unit tests:
 - The browser could not load a game at all — `/public/games/:id` is
   browser-facing by design but had no CORS, because the earlier slice had no
   browser in it.
+- The `loginAttempts` validator specified `bsonType: ["long", "int"]` — the
+  types a counter and a millisecond timestamp conceptually *are*. Every
+  JavaScript number serialises to BSON `double`, so Mongo rejected every
+  write and each failed login returned 500. All 333 unit tests passed while
+  the running service was broken, because the in-memory stand-in has no
+  validator: it models the schema we intended rather than the one Mongo
+  enforces. The same blind spot as the index bug above, found the same way.
 
 Each now has a regression test. The pattern is worth internalising: a unit
 test verifies the thing you thought to check, and an integration test finds

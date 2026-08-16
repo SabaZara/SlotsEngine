@@ -4,6 +4,7 @@ import { toPublicUser, type User } from "@slots-engine/shared-types";
 import { signSession } from "../auth/jwt.js";
 import { verifyPassword } from "../auth/passwords.js";
 import { findUserByEmail, revokeSessions } from "../auth/users.js";
+import { checkLock, clearFailures, loadThrottlePolicy, recordFailure } from "../auth/loginThrottle.js";
 import { writeAuditLog } from "../audit/log.js";
 
 /** Deliberately identical for "no such user" and "wrong password". Telling
@@ -11,6 +12,8 @@ import { writeAuditLog } from "../audit/log.js";
 const INVALID_CREDENTIALS = { error: "invalid_credentials" };
 
 export function registerAuthRoutes(app: FastifyInstance, db: Db): void {
+  const throttle = loadThrottlePolicy();
+
   app.post<{ Body: { email?: string; password?: string } }>("/v1/auth/login", {
     // Login gets its own, far tighter ceiling. The global limit is sized
     // for ordinary admin work and is useless here: 300 password guesses a
@@ -36,6 +39,22 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db): void {
     const { email, password } = request.body ?? {};
     if (!email || !password) return reply.code(400).send({ error: "email and password are required" });
 
+    // Checked BEFORE the password is verified, so a locked account costs one
+    // indexed lookup instead of a scrypt hash — a flood against a locked
+    // account must not become a way to burn the server's CPU.
+    //
+    // 429 rather than 401: the credential was never assessed, and telling a
+    // client "wrong password" when we did not look is both untrue and
+    // useless. A legitimate user locked out by someone else's attack needs
+    // to know that waiting is the remedy.
+    const lock = await checkLock(db, email);
+    if (lock.locked) {
+      return reply
+        .code(429)
+        .header("retry-after", String(lock.retryAfter))
+        .send({ error: "account_locked", message: `Too many failed attempts. Try again in ${lock.retryAfter}s.` });
+    }
+
     const user = await findUserByEmail(db, email);
 
     // Verify against a dummy hash when the user doesn't exist, so a missing
@@ -45,8 +64,36 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db): void {
     const passwordOk = await verifyPassword(password, storedHash);
 
     if (!user || !passwordOk || !user.active) {
+      // Recorded for an unknown address too, keyed by what was attempted.
+      // Tracking only real accounts would make the two observably
+      // different, reopening the enumeration oracle that the identical
+      // error body and the dummy-hash timing above exist to close.
+      const state = await recordFailure(db, email, throttle);
+
+      // The response is deliberately unchanged when this attempt is the one
+      // that trips the lock: saying "locked" here would confirm the address
+      // is worth locking. The next attempt gets the 429 — by which point
+      // the attacker has learned nothing they could not have learned by
+      // guessing an unknown address the same number of times.
+      if (state.locked && user) {
+        await writeAuditLog(
+          db,
+          {
+            actorUserId: user.userId,
+            action: "auth.account_locked",
+            entityType: "user",
+            entityId: user.userId,
+            diff: { attempts: throttle.maxAttempts, lockoutSeconds: state.retryAfter },
+          },
+          (err) => request.log?.error({ err }, "failed to write lockout audit entry"),
+        );
+      }
+
       return reply.code(401).send(INVALID_CREDENTIALS);
     }
+
+    // Only a real success clears the counter — see the note in the module.
+    await clearFailures(db, email);
 
     const { token, expiresAt } = signSession({
       userId: user.userId,
