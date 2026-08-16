@@ -244,12 +244,28 @@ is. These drive real services end to end.
 
 Both run in CI on every push and pull request, along with the build and
 typecheck — a suite that is never consulted before code ships is
-documentation, not a safety net. The first CI run earned its place
-immediately by failing: the workspace build ran alphabetically, so `apps/`
-compiled before the `packages/` they import, and 87 type errors appeared on
-a clean checkout that no local run had ever shown. Stale `dist/` output had
-been hiding it — the build failed once and passed on a second run. Build
-order is now explicit in `package.json`.
+documentation, not a safety net.
+
+The gate earned its place immediately by failing three times, on defects
+that every local run had reported as green:
+
+- **The workspace build ran alphabetically**, so `apps/` compiled before the
+  `packages/` they import through `dist/*.d.ts` — 87 type errors on a clean
+  checkout. Stale `dist/` output hid it locally: the build failed once and
+  passed on a retry. Build order is now explicit.
+- **`frontend.Dockerfile` built its app without its packages**, which only
+  shows in an image with no `dist/` already present.
+- **The test glob was shell-dependent**, and this is the one worth
+  remembering. `packages/*/src/**/*.test.ts` matched all 15 test files under
+  zsh, but npm runs scripts under `sh` — under dash it matched 2. The
+  corrected `packages/**/*.test.ts` was still wrong, silently running 78 of
+  244 tests. Only a leading `**/` is expanded by tsx itself rather than the
+  shell, and it is now verified identical under sh, bash, dash and zsh.
+
+The pattern across all three: none was a logic error, and none was
+detectable from a machine where the previous build's output was still lying
+around. The last is the sharpest — a shell-dependent glob doesn't fail, it
+reports success for a fraction of the suite.
 
 **A note on the gap between them.** Every bug found late in this project was
 found by the end-to-end runs, never the unit tests:
