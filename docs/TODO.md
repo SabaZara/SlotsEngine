@@ -538,6 +538,27 @@ testing was extracted into `paylineGrid.ts`, `reelStrip.ts` and the two
   way down — writing in place would edit the document `findOneAndUpdate`
   returns as "before", which would then show the update it is meant to
   predate.
+- ~~**`modifiedCount` counted matches, not modifications.**~~ **Fixed.**
+  Mongo counts a document as modified only when the update actually changed
+  it; re-setting a field to the value it already holds matches but does not
+  modify. `updateMany` also returned no `matchedCount` at all. Both matter
+  to real callers: `sweepAbandonedBonusSessions` returns `modifiedCount` as
+  "how many sessions I just expired", so an over-reporting fake lets a sweep
+  claim work it did not do, and `setPassword` decides 404-versus-success
+  from `matchedCount`.
+- **A flaky test, fixed properly rather than widened.** The full suite
+  failed once in five runs on "moves only the bonus half of the split" —
+  pre-existing, unrelated to the stand-in. It compared two **independent
+  unseeded** simulations and asserted their `baseRtp` drift stayed under a
+  threshold. Its own comment records having already been rewritten once for
+  flakiness: a ratio form failed when the drift was near zero, then an
+  absolute bound of 0.05 failed when it spiked (observed 0.0554). **Noise
+  has no bound you can assert against.** Both runs now share a `runSeed`, so
+  the same spins are drawn in the same order and only the bonus scoring
+  differs — `baseRtp` is now asserted **exactly equal** rather than merely
+  close, which is a stronger claim as well as a stable one. `runSeed` only
+  became available when item G's reproducibility work landed, so this was
+  not an option when the test was written. Five consecutive clean runs.
 - **Both of the above were latent, and that is the point.** Neither operator
   nor subdocument query appears anywhere in this codebase today, so no test
   could have failed. They were found by *asking what the fake does with input

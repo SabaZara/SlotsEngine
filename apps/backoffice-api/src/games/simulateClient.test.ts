@@ -200,32 +200,43 @@ describe("the assumed bonus multiplier's influence on the publish gate", () => {
     // confined to `bonusRtp`, so a report surfacing the split would let a
     // designer see which half they are trusting.
     //
-    // Asserted as a large ratio rather than an equality on `baseRtp`: with
-    // no seeding, two runs never produce identical base figures, so
-    // `assert.equal` here would be testing the RNG, not the split. What is
-    // checkable is that bonusRtp responds to the multiplier far more than
-    // baseRtp drifts between independent runs.
-    const low = runSimulation(REFERENCE_GAME, { simCount: 60_000, betPerSpin: BET, bonusReturnMultiplier: 5 });
-    const high = runSimulation(REFERENCE_GAME, { simCount: 60_000, betPerSpin: BET, bonusReturnMultiplier: 50 });
+    // **Both runs share one seed**, which is what makes this exact rather
+    // than statistical. Same seed means the same spins in the same order, so
+    // the only thing that differs is how a triggered bonus is scored —
+    // `baseRtp` must come back byte-identical, not merely close.
+    //
+    // This is the third form of this assertion, and the previous two were
+    // both flaky for the same underlying reason: they compared two
+    // INDEPENDENT unseeded runs and then tried to pick a threshold that
+    // separated signal from sampling noise. A ratio against `baseDrift`
+    // failed when the drift happened to be near zero; an absolute bound of
+    // 0.05 failed when it happened to spike (observed at 0.0554). Noise has
+    // no bound you can assert against — the fix is to remove the noise, not
+    // to keep widening the tolerance until the failures stop.
+    //
+    // `runSeed` only became available when item G's reproducibility work
+    // landed, so this was not an option when the test was first written.
+    const seed = "seeded-split-check";
+    const low = runSimulation(REFERENCE_GAME, { simCount: 60_000, betPerSpin: BET, bonusReturnMultiplier: 5, runSeed: seed });
+    const high = runSimulation(REFERENCE_GAME, { simCount: 60_000, betPerSpin: BET, bonusReturnMultiplier: 50, runSeed: seed });
 
     const bonusChange = Math.abs(high.bonusRtp - low.bonusRtp);
-    const baseDrift = Math.abs(high.baseRtp - low.baseRtp);
 
     assert.ok(bonusChange > 0.05, `bonusRtp should track the multiplier, moved ${bonusChange.toFixed(4)}`);
 
-    // Compared against an absolute bound rather than a ratio to
-    // `baseDrift`. The ratio form was flaky in the full suite: `baseDrift`
-    // is pure sampling noise between two independent unseeded runs, so it
-    // is occasionally near zero and occasionally spikes, and dividing by it
-    // makes the assertion depend on the draw. Measured run-to-run spread on
-    // `baseRtp` at 60k is ~0.015, so 0.05 is comfortably above the noise
-    // while still failing if the multiplier ever starts moving the measured
-    // half.
-    assert.ok(
-      baseDrift < 0.05,
-      `the assumption must not move the measured half: baseRtp drifted ${baseDrift.toFixed(4)} ` +
-        `between runs, which is beyond sampling noise`,
+    // The claim item G rests on: the assumption is confined to the bonus
+    // half, so a designer reading the split knows exactly which figure is
+    // trusted and which is measured.
+    assert.equal(
+      high.baseRtp,
+      low.baseRtp,
+      "with the spins held identical, the bonus multiplier must not move the measured half at all",
     );
+
+    // And the same spins really were drawn — otherwise `baseRtp` matching
+    // would be a coincidence rather than the point.
+    assert.equal(high.hitFrequency, low.hitFrequency);
+    assert.equal(high.bonusFrequency, low.bonusFrequency);
   });
 });
 

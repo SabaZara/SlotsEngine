@@ -277,10 +277,15 @@ class FakeCollection {
   ): Promise<{ matchedCount: number; modifiedCount: number; upsertedCount: number }> {
     const index = this.docs.findIndex((doc) => matches(doc, query));
     if (index >= 0) {
-      const updated = applyUpdate(this.docs[index], update);
-      this.assertUnique(updated, this.docs[index]);
+      const previous = this.docs[index];
+      const updated = applyUpdate(previous, update);
+      this.assertUnique(updated, previous);
       this.docs[index] = updated;
-      return { matchedCount: 1, modifiedCount: 1, upsertedCount: 0 };
+      // Matched but unchanged is `modifiedCount: 0` in Mongo — see the note
+      // in `updateMany`. Kept consistent across both so a caller cannot
+      // learn one rule from a test and meet the other in production.
+      const changed = JSON.stringify(updated) !== JSON.stringify(previous);
+      return { matchedCount: 1, modifiedCount: changed ? 1 : 0, upsertedCount: 0 };
     }
     if (options.upsert) {
       const seed = { ...(update.$setOnInsert as Doc | undefined), ...query };
@@ -299,14 +304,24 @@ class FakeCollection {
   async updateMany(
     query: Record<string, unknown>,
     update: Record<string, unknown>,
-  ): Promise<{ modifiedCount: number }> {
+  ): Promise<{ matchedCount: number; modifiedCount: number }> {
+    let matched = 0;
     let modified = 0;
     this.docs = this.docs.map((doc) => {
       if (!matches(doc, query)) return doc;
-      modified++;
-      return applyUpdate(doc, update);
+      matched++;
+      const updated = applyUpdate(doc, update);
+      // Mongo counts a document as MODIFIED only if the update actually
+      // changed it — re-setting a field to the value it already holds
+      // matches but does not modify. The fake counted every match, which
+      // over-reports. That matters here specifically: the abandoned-session
+      // sweep returns `modifiedCount` as "how many sessions I just expired",
+      // and a sweep that claims work it did not do is a misleading number on
+      // a money-adjacent path.
+      if (JSON.stringify(updated) !== JSON.stringify(doc)) modified++;
+      return updated;
     });
-    return { modifiedCount: modified };
+    return { matchedCount: matched, modifiedCount: modified };
   }
 
   /** Atomic by construction here — the match and the write happen in one

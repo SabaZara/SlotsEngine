@@ -732,6 +732,59 @@ describe("fakeMongo conformance with real MongoDB", () => {
     assert.deepEqual(fake, real);
   });
 
+  /**
+   * `matchedCount` versus `modifiedCount`.
+   *
+   * Mongo counts a document as *modified* only when the update actually
+   * changed it — re-setting a field to the value it already holds matches
+   * but does not modify. The fake counted every match as a modification.
+   *
+   * That matters beyond bookkeeping: `sweepAbandonedBonusSessions` returns
+   * `modifiedCount` as "how many sessions I just expired", so an
+   * over-reporting fake would let a sweep claim work it did not do on a
+   * money-adjacent path. `updateMany` also did not return `matchedCount` at
+   * all, while `setPassword` decides 404-versus-success from exactly that
+   * field on `updateOne`.
+   */
+  it("agrees that re-setting a field to its current value matches but does not modify", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ id: "p", status: "abandoned" });
+      const noop = await d.collection(collection).updateOne({ id: "p" }, { $set: { status: "abandoned" } });
+      const real = await d.collection(collection).updateOne({ id: "p" }, { $set: { status: "resolved" } });
+      return {
+        noop: { matched: noop.matchedCount, modified: noop.modifiedCount },
+        changed: { matched: real.matchedCount, modified: real.modifiedCount },
+      };
+    });
+
+    assert.deepEqual(real, {
+      noop: { matched: 1, modified: 0 },
+      changed: { matched: 1, modified: 1 },
+    });
+    assert.deepEqual(fake, real, "the fake must not count an unchanged document as modified");
+  });
+
+  it("agrees that updateMany reports both counts", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      // Two already in the target state, one not — so matched and modified
+      // must genuinely differ rather than coincidentally agreeing.
+      await d.collection(collection).insertOne({ t: 1, status: "abandoned" });
+      await d.collection(collection).insertOne({ t: 1, status: "abandoned" });
+      await d.collection(collection).insertOne({ t: 1, status: "active" });
+      const result = await d.collection(collection).updateMany({ t: 1 }, { $set: { status: "abandoned" } });
+      return { matched: result.matchedCount, modified: result.modifiedCount };
+    });
+
+    assert.deepEqual(real, { matched: 3, modified: 1 });
+    assert.deepEqual(fake, real, "the sweep's return value depends on this distinction");
+  });
+
   it("agrees that countDocuments honours a limit", async function () {
     if (!realDb) return this.skip(skipReason);
 
