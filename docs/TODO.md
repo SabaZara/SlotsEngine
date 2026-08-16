@@ -322,7 +322,7 @@ route rather than the rule that broke.
 | ~~`backoffice-api/src/games/drafts.ts`~~ | 131 | **Done.** 25 tests, all nine mutations caught. The structural promise — a draft is not a `GameDefinition`, carrying no `version` and no `status` so neither can be edited — is pinned on both construction paths, `blankDraft` and `draftFromPublished`. Writing them found F21. |
 | ~~`backoffice-api/src/games/publish.ts`~~ | 131 | **Done.** 27 tests, all 14 mutations caught. Runs the real 100k simulation (~1s per publish) rather than a stub — a stubbed one would let the gate pass against numbers no game produces, and the gate is the subject. Two mutations survived the first pass and both were real gaps: a one-sided RTP gate (dropping `Math.abs` waves through the direction that *loses* money), and a hardcoded `gameVersion: 1` that only a second publish exposes. |
 | ~~`backoffice-api/src/auth/passwords.ts`~~ | 73 | **Done, and it was not subtle.** 29 tests; found F19 (a truncated hash verified — 274 guesses to log in as anyone) and F20 (a malformed cost threw a 500 instead of returning false). 7 of 10 mutations caught; the three survivors are documented equivalents in the file header, not silence. Verified against the live stack, including all 12 pre-existing hashes in the real database and planted corrupt records. |
-| `game-backend/src/routes/*.ts` | ~250 | **`rounds.ts` and `bonus.ts` done** — 27 and 22 tests, all nine and all eight mutations caught. Between them they pin every typed error mapping on the money path: 404/400/402 on spin, and 404/410/400 on bonus, where 410-vs-404 is F12's distinction (the session existed and timed out, versus never existed). Requests are signed properly rather than bypassing service-auth. Remaining: `simulate`, `public`, `launchTokens`, `serviceAuth` — smaller, no money movement, and still covered by the e2e suites. |
+| ~~`game-backend/src/routes/*.ts`~~ | ~250 | **Done, all six.** `rounds` (27 tests), `bonus` (22), and `public`/`launchTokens`/`simulate`/`health` plus the service-auth hook (29). Every typed error mapping on the money path is now pinned: 404/400/402 on spin, 404/410/400 on bonus (410-vs-404 is F12's distinction), 409-vs-401 on a spent launch token. All mutations caught. |
 | ~~`shared-types/src/money.ts`~~ | 84 | **Done.** 26 tests, all eight mutations caught. The "no minor unit created or lost" property is pinned exhaustively over totals 0–60 × parts 1–12, plus a spread check — summing correctly is not enough on its own, since `[total, 0, 0, …]` also sums correctly. Adapted from the reference's `money.test.ts` (near-identical module), extended with the cases it lacked: negative totals, `-0`, and the `70.07 * 100 = 7006.999…` float error that is the reason this module exists. |
 | ~~`shared-types/src/rbac.ts`~~ | 65 | **Done.** 14 tests, all six mutations caught. Note the file is types plus `ROLE_IDS` and `toPublicUser` — there are no "permission sets" here, so this row overstated it; authorisation lives in `requireRole`. Writing the tests found F18. |
 
@@ -366,6 +366,14 @@ codebase's frontend and these findings may not transfer:
   around it (the middleware suite splices the backing array to delete a
   document). Each addition should arrive with a conformance test, not on its
   own.
+- **A fixture that is already minimal cannot test an allowlist.**
+  `toPublicView` maps each bonus module down to `moduleId` and `params`.
+  Both shipped fixtures happen to have exactly those two fields, so
+  replacing the map with a straight pass-through changed nothing observable
+  and the mutation survived. The allowlist exists for the day a module
+  gains a field — so the test now seeds a module carrying `segmentWeights`
+  (the odds) and an internal note, and asserts neither ships. Applies to any
+  allowlist tested against data that is already inside it.
 - **A test that waits on an event must time out.** The socket suite's first
   version used unbounded promises for "the server closes this" and "the
   server replies". Under mutation, a server that *fails* to close simply
