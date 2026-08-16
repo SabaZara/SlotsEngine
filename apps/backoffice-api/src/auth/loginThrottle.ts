@@ -49,8 +49,14 @@ import type { Db } from "mongodb";
 export interface ThrottlePolicy {
   /** Consecutive failures tolerated before the account is locked. */
   maxAttempts: number;
-  /** How long a lockout lasts, in milliseconds. */
+  /** How long the FIRST lockout lasts, in milliseconds. Each consecutive
+   * lockout doubles this — see `lockoutDurationMs`. */
   lockoutMs: number;
+  /** Ceiling on the doubling, in milliseconds. Without one, an attacker
+   * willing to keep failing could push a legitimate user's wait to weeks —
+   * turning a mitigation for the denial-of-service lever into a better
+   * version of the lever. */
+  maxLockoutMs: number;
   /** Idle time after which the failure count is forgotten, in
    * milliseconds. Without this a handful of typos spread over months would
    * eventually lock a legitimate user out. */
@@ -61,8 +67,50 @@ export function loadThrottlePolicy(env: NodeJS.ProcessEnv = process.env): Thrott
   return {
     maxAttempts: Number(env.LOGIN_MAX_ATTEMPTS ?? 10),
     lockoutMs: Number(env.LOGIN_LOCKOUT_MINUTES ?? 15) * 60_000,
+    maxLockoutMs: Number(env.LOGIN_MAX_LOCKOUT_MINUTES ?? 120) * 60_000,
     attemptWindowMs: Number(env.LOGIN_ATTEMPT_WINDOW_MINUTES ?? 15) * 60_000,
   };
+}
+
+/**
+ * How long the `n`th consecutive lockout lasts: `lockoutMs * 2^(n-1)`,
+ * capped at `maxLockoutMs`.
+ *
+ * The point of the doubling is the asymmetry between the two people it
+ * affects. A legitimate user who mistypes their password ten times hits
+ * lockout #1 and waits the base fifteen minutes — unchanged from before.
+ * An attacker grinding the same account is spending exponentially more
+ * wall-clock time per allowance of guesses, so the sustainable guessing
+ * rate collapses.
+ *
+ * The cap exists because this cuts both ways: the item this addresses
+ * (docs/TODO.md #3) is that anyone who knows an administrator's email can
+ * keep that account locked deliberately. Uncapped doubling would let them
+ * push the wait to weeks, which is a *worse* denial of service than the flat
+ * window it replaced. Two hours is the ceiling — long enough that grinding
+ * is pointless, short enough that a targeted user recovers the same day
+ * without anyone's intervention.
+ *
+ * `consecutiveLockouts` is only ever reset by a SUCCESSFUL login, for the
+ * same reason the attempt counter is: clearing it on expiry would hand an
+ * attacker a fresh full allowance every window.
+ */
+export function lockoutDurationMs(policy: ThrottlePolicy, consecutiveLockouts: number): number {
+  // A policy without a cap means "do not cap", not "produce NaN".
+  // `Math.min(x, undefined)` is NaN, which would sail through as a
+  // `lockedUntil` of NaN — and `NaN <= now` is false, so an account would
+  // be locked *forever* with no way to observe why. Caught by an existing
+  // test constructing a policy literal, which is exactly the shape a caller
+  // outside this module would write.
+  const cap = Number.isFinite(policy.maxLockoutMs) ? policy.maxLockoutMs : Number.POSITIVE_INFINITY;
+  const doublings = Math.max(0, consecutiveLockouts - 1);
+
+  // Guarded before the multiply rather than after: 2^1024 is Infinity, and
+  // Infinity against a finite cap happens to give the right answer, but an
+  // uncapped policy would then return Infinity as a duration.
+  if (doublings > 40) return Number.isFinite(cap) ? cap : policy.lockoutMs;
+
+  return Math.min(policy.lockoutMs * 2 ** doublings, cap);
 }
 
 /** Same normalisation as `findUserByEmail`, so "Ana@x.com" and "ana@x.com"
@@ -126,13 +174,41 @@ export async function recordFailure(
   const attempts = previous + 1;
 
   const locked = attempts >= policy.maxAttempts;
-  const lockedUntil = locked ? now + policy.lockoutMs : undefined;
+
+  // The attempt count restarts the moment a lock is applied, so the next
+  // lockout needs another full run of `maxAttempts` failures to arrive.
+  //
+  // Without this the count climbs past the threshold and EVERY subsequent
+  // failure satisfies `attempts >= maxAttempts` — so a single uninterrupted
+  // burst escalates the backoff once per attempt rather than once per
+  // lockout, and an attacker reaches the cap without ever waiting out a
+  // single lock. Found by tracing the stored document across four failures
+  // and seeing `consecutiveLockouts` reach 3 while the account had only
+  // genuinely locked twice.
+  const nextAttempts = locked ? 0 : attempts;
+
+  // Counts how many times this account has been locked WITHOUT a successful
+  // login in between, which is what makes the backoff exponential. Carried
+  // on the document rather than derived, because "how many times has this
+  // happened before" is not recoverable from a count that resets.
+  //
+  // Note this is deliberately NOT aged out by `attemptWindowMs` the way the
+  // attempt count is. A patient attacker who waits out each lock and starts
+  // again is exactly the case backoff exists to slow; forgetting the history
+  // between windows would reset them to a fifteen-minute penalty forever.
+  // The TTL on `expiresAt` still reaps the document once nobody returns to
+  // it at all.
+  const previousLockouts = (doc?.consecutiveLockouts as number | undefined) ?? 0;
+  const consecutiveLockouts = locked ? previousLockouts + 1 : previousLockouts;
+  const thisLockoutMs = lockoutDurationMs(policy, consecutiveLockouts);
+  const lockedUntil = locked ? now + thisLockoutMs : undefined;
 
   await db.collection("loginAttempts").updateOne(
     { key },
     {
       $set: {
-        attempts,
+        attempts: nextAttempts,
+        consecutiveLockouts,
         lastAttemptAt: now,
         // Cleared explicitly when not locking, so a fresh run of failures
         // after an expired lock does not inherit the old timestamp.
@@ -152,7 +228,7 @@ export async function recordFailure(
   );
 
   if (!locked) return { locked: false, retryAfter: 0 };
-  return { locked: true, retryAfter: Math.ceil(policy.lockoutMs / 1000) };
+  return { locked: true, retryAfter: Math.ceil(thisLockoutMs / 1000) };
 }
 
 /**
@@ -168,7 +244,14 @@ export async function clearFailures(db: Db, email: string): Promise<void> {
   // recreated on the next failure anyway, and a delete/insert cycle on a
   // hot path churns the index for nothing. `updateOne` without `upsert`
   // also means a successful first-ever login writes nothing at all.
+  // `consecutiveLockouts` is reset here and NOWHERE else. That is what makes
+  // the exponential backoff forgiving to the right person: the legitimate
+  // owner proving they know the password wipes the history, while an
+  // attacker who never succeeds keeps climbing the curve.
   await db
     .collection("loginAttempts")
-    .updateOne({ key: normaliseKey(email) }, { $set: { attempts: 0, lockedUntil: null } });
+    .updateOne(
+      { key: normaliseKey(email) },
+      { $set: { attempts: 0, consecutiveLockouts: 0, lockedUntil: null } },
+    );
 }

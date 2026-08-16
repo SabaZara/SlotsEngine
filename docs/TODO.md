@@ -117,29 +117,60 @@ locally (build, typecheck, 557 tests, ~40s), and is skippable with
 Options: GitHub Pro at $4/month, make the repo public, or accept it. See
 the note in the README about why public is the wrong trade here.
 
-### 3. Account lockout is a denial-of-service lever
-**Severity: low-medium · Effort: medium**
+### ~~3. Account lockout is a denial-of-service lever~~ — mitigated
 
-Per-account throttling now exists (F10): ten consecutive failures lock an
-address for fifteen minutes, counted against the account rather than the
-source IP, so distributing an attack across many addresses no longer buys
-more guesses.
+**Exponential backoff shipped**, the option this item called "probably the
+best next step".
 
-The trade it introduces is the one every lockout scheme has: anyone who
-knows an administrator's email can keep that account locked by failing on
-purpose, indefinitely and from anywhere. That is a real cost, accepted
-deliberately here — a fifteen-minute window that expires on its own is a
-far smaller problem than an unbounded distributed guessing rate against a
-password.
+The lever is not gone — nothing removes it short of not locking at all — but
+the asymmetry has changed. Each *consecutive* lockout on one account doubles
+the wait, and only a **successful login** resets the count:
 
-The standard mitigations, none of which are free:
+| Lockout | Wait |
+|---:|---:|
+| 1st | 15 min (unchanged) |
+| 2nd | 30 min |
+| 3rd | 60 min |
+| 4th+ | 120 min (capped) |
 
-- **Exponential backoff instead of a flat window.** Slows a real attacker
-  without ever fully denying a legitimate user. Probably the best next step.
-- **A CAPTCHA or proof-of-work after N failures**, rather than a refusal.
-- **Not locking, but requiring a second factor** once the count is high.
+Measured with production defaults: 70 guesses against one account now cost
+an attacker **9.8 hours** of wall clock, against 1.8 hours under the flat
+window — a 5.4x collapse in sustainable guessing rate. A legitimate user who
+mistypes their password still waits exactly the fifteen minutes they waited
+before.
 
-Worth doing before this is exposed to the public internet, not before.
+**The cap is the part that keeps this a mitigation rather than a trade for
+something worse.** Uncapped doubling would let anyone who knows an
+administrator's email push that account's wait to weeks, which is a *better*
+denial-of-service lever than the one this item is about. Two hours is long
+enough that grinding is pointless and short enough that a targeted
+administrator recovers the same day with nobody's intervention.
+`LOGIN_MAX_LOCKOUT_MINUTES` tunes it.
+
+The history is deliberately **not** aged out by `attemptWindowMs` the way the
+attempt count is: a patient attacker who waits out each lock and starts again
+is precisely the case backoff exists to slow, and forgetting between windows
+would reset them to a fifteen-minute penalty forever. The TTL on `expiresAt`
+still reaps a document nobody returns to.
+
+**A bug found while building it**, worth recording because it made the
+feature nearly useless while looking correct: the attempt count was never
+reset when a lock was applied, so it kept climbing past the threshold and
+*every* subsequent failure satisfied `attempts >= maxAttempts`. One
+uninterrupted burst therefore escalated the backoff once per attempt rather
+than once per lockout, reaching the cap without the attacker ever waiting out
+a single lock. Found by tracing the stored document across four failures and
+seeing `consecutiveLockouts` reach 3 when the account had genuinely locked
+twice. Now covered by a regression test.
+
+Verified against the live stack, since a stored-field change is the F9 blind
+spot: 15 → 30 → 60 → 120 minutes observed through the running service, the
+new field persisting through Mongo's real validator, and a successful login
+resetting the count to zero.
+
+Still open, and still the honest alternatives if this proves insufficient: a
+CAPTCHA or proof-of-work after N failures, or requiring a second factor once
+the count is high.
 
 ### ~~3d. `runRngTestSuite`'s aggregate cannot be tested~~ — closed
 
