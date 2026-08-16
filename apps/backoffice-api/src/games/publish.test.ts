@@ -49,12 +49,50 @@ const goodDraft = (overrides: Partial<GameDraft> = {}): GameDraft => ({
   ...overrides,
 });
 
+/**
+ * A fixed seed for the tests whose subject is what happens AFTER a
+ * successful publish, rather than the gate's verdict itself.
+ *
+ * `publishDraft` runs an unseeded 100k simulation in production — it has to,
+ * or the gate would check the same spins forever and a paytable change could
+ * pass on a seed that happened to flatter it. That makes every call here an
+ * independent sample, and measured drift on this draft ranges 0.007–0.037
+ * against a 0.05 tolerance: comfortable, but roughly 1.4 sd of headroom
+ * against ~0.02 sampling noise. Twenty-one unseeded publishes in one file is
+ * a flake waiting to happen, and it already happened twice elsewhere in the
+ * suite.
+ *
+ * This seed measures 0.9457 — a drift of 0.0043, an order of magnitude
+ * inside tolerance — so these tests fail when the code breaks rather than
+ * when the sample is unlucky.
+ *
+ * The refusal tests deliberately do NOT use it: they set `rtpTarget` far
+ * outside any plausible measurement, so their verdict does not depend on the
+ * draw, and leaving them unseeded keeps them honest about that.
+ *
+ * **This seed is a stabiliser, not behaviour, and mutation testing says so.**
+ * Deleting the `options.runSeed` passthrough in `publish.ts` leaves every
+ * test here passing — correctly, because the seed does not change what the
+ * gate decides, only whether the decision is the same one twice. A mutation
+ * that reintroduces flakiness cannot be caught by a suite that runs once.
+ * The protection is the comment and this note, not an assertion.
+ */
+const STABLE_SEED = "publish-test";
+
+/** `publishDraft` with the sampling removed. */
+const publishStable = (
+  db: Parameters<typeof publishDraft>[0],
+  draft: GameDraft,
+  actorUserId = "designer-1",
+  options: { force?: boolean } = {},
+) => publishDraft(db, draft, actorUserId, { ...options, runSeed: STABLE_SEED });
+
 describe("the RTP gate", () => {
   it("publishes a game whose measured RTP matches its target", async () => {
     // Load-bearing: without a passing case, every refusal below would also
     // pass against a gate that refused everything.
     const db = setup();
-    const { gameDef, simulation } = await publishDraft(db, goodDraft(), "designer-1");
+    const { gameDef, simulation } = await publishStable(db, goodDraft());
 
     assert.equal(gameDef.status, "published");
     assert.ok(
@@ -178,7 +216,7 @@ describe("the RTP gate", () => {
 
   it("runs the official spin count, not a sample", async () => {
     const db = setup();
-    const { simulation } = await publishDraft(db, goodDraft(), "designer-1");
+    const { simulation } = await publishStable(db, goodDraft());
     assert.equal(simulation.simCount, OFFICIAL_SIM_COUNT);
   });
 });
@@ -208,16 +246,16 @@ describe("validation runs before anything else", () => {
 describe("versioning", () => {
   it("starts a game that has never been published at version 1", async () => {
     const db = setup();
-    const { gameDef } = await publishDraft(db, goodDraft(), "designer-1");
+    const { gameDef } = await publishStable(db, goodDraft());
     assert.equal(gameDef.version, 1);
   });
 
   it("increments from whatever is currently live", async () => {
     const db = setup();
 
-    await publishDraft(db, goodDraft(), "designer-1");
-    const second = await publishDraft(db, goodDraft(), "designer-1");
-    const third = await publishDraft(db, goodDraft(), "designer-1");
+    await publishStable(db, goodDraft());
+    const second = await publishStable(db, goodDraft());
+    const third = await publishStable(db, goodDraft());
 
     assert.equal(second.gameDef.version, 2);
     assert.equal(third.gameDef.version, 3);
@@ -227,11 +265,11 @@ describe("versioning", () => {
     // A refused publish is not an event in the game's history. Burning a
     // version would leave a gap that looks like a missing snapshot.
     const db = setup();
-    await publishDraft(db, goodDraft(), "designer-1");
+    await publishStable(db, goodDraft());
 
     await assert.rejects(() => publishDraft(db, goodDraft({ rtpTarget: 0.5 }), "designer-1"));
 
-    const next = await publishDraft(db, goodDraft(), "designer-1");
+    const next = await publishStable(db, goodDraft());
     assert.equal(next.gameDef.version, 2, "the refused attempt must not have taken version 2");
   });
 
@@ -240,8 +278,8 @@ describe("versioning", () => {
     // snapshot is a round nobody can audit.
     const db = setup();
 
-    await publishDraft(db, goodDraft(), "designer-1");
-    await publishDraft(db, goodDraft(), "designer-1");
+    await publishStable(db, goodDraft());
+    await publishStable(db, goodDraft());
 
     const snapshots = await db.collection("gameVersions").find({ gameId: REFERENCE_GAME.gameId }).toArray();
     assert.deepEqual(
@@ -256,8 +294,8 @@ describe("versioning", () => {
     // version, and history lives in gameVersions.
     const db = setup();
 
-    await publishDraft(db, goodDraft(), "designer-1");
-    await publishDraft(db, goodDraft(), "designer-1");
+    await publishStable(db, goodDraft());
+    await publishStable(db, goodDraft());
 
     assert.equal(await db.collection("games").countDocuments({ gameId: REFERENCE_GAME.gameId }), 1);
     const live = await db.collection("games").findOne({ gameId: REFERENCE_GAME.gameId });
@@ -291,7 +329,7 @@ describe("versioning", () => {
       });
     };
 
-    await publishDraft(db, goodDraft(), "designer-1");
+    await publishStable(db, goodDraft());
 
     assert.ok(
       writes.indexOf("gameVersions") < writes.indexOf("games"),
@@ -346,7 +384,7 @@ describe("the audit trail", () => {
   it("records the publish with both versions, so a change is traceable", async () => {
     const db = setup();
 
-    await publishDraft(db, goodDraft(), "designer-1");
+    await publishStable(db, goodDraft());
     await publishDraft(db, goodDraft(), "designer-2");
 
     const entries = await db.collection("auditLogs").find({ action: "game.publish" }).toArray();
@@ -362,7 +400,7 @@ describe("the audit trail", () => {
     // that reads differently from "we do not know".
     const db = setup();
 
-    await publishDraft(db, goodDraft(), "designer-1");
+    await publishStable(db, goodDraft());
 
     const entry = await db.collection("auditLogs").findOne({ action: "game.publish" });
     assert.equal((entry?.diff as Record<string, unknown>).fromVersion, null);
@@ -373,7 +411,7 @@ describe("the audit trail", () => {
     // game shipped honestly".
     const db = setup();
 
-    await publishDraft(db, goodDraft(), "designer-1");
+    await publishStable(db, goodDraft());
 
     const entry = await db.collection("auditLogs").findOne({ action: "game.publish" });
     const diff = entry?.diff as Record<string, unknown>;
@@ -388,8 +426,8 @@ describe("the audit trail", () => {
     // mutation survived until this covered a second version.
     const db = setup();
 
-    await publishDraft(db, goodDraft(), "designer-1");
-    await publishDraft(db, goodDraft(), "designer-1");
+    await publishStable(db, goodDraft());
+    await publishStable(db, goodDraft());
 
     const runs = await db.collection("rtpSimulationRuns").find({ gameId: REFERENCE_GAME.gameId }).toArray();
 
@@ -408,7 +446,7 @@ describe("the audit trail", () => {
     // number — see docs/TODO.md item G.
     const db = setup();
 
-    await publishDraft(db, goodDraft(), "designer-1");
+    await publishStable(db, goodDraft());
 
     const entry = await db.collection("auditLogs").findOne({ action: "game.publish" });
     const diff = entry?.diff as Record<string, unknown>;
@@ -423,7 +461,7 @@ describe("the audit trail", () => {
     // simulation never played.
     const db = setup();
 
-    await publishDraft(db, goodDraft(), "designer-1");
+    await publishStable(db, goodDraft());
 
     const entry = await db.collection("auditLogs").findOne({ action: "game.publish" });
     const diff = entry?.diff as Record<string, unknown>;
@@ -442,7 +480,7 @@ describe("the audit trail", () => {
     // so the record has to say.
     const db = setup();
 
-    await publishDraft(db, goodDraft(), "designer-1");
+    await publishStable(db, goodDraft());
 
     const entry = await db.collection("auditLogs").findOne({ action: "game.publish" });
     const diff = entry?.diff as Record<string, unknown>;

@@ -54,7 +54,7 @@ export async function publishDraft(
   db: Db,
   draft: GameDraft,
   actorUserId: string,
-  options: { force?: boolean } = {},
+  options: { force?: boolean; runSeed?: string } = {},
 ): Promise<PublishResult> {
   validateDraft(draft);
 
@@ -84,7 +84,25 @@ export async function publishDraft(
 
   // The lowest configured bet, so results stay comparable across publishes
   // however betOptions is later reordered.
-  const simulation = await requestSimulation(gameDef, OFFICIAL_SIM_COUNT, Math.min(...draft.betOptions));
+  //
+  // `runSeed` is optional and production never passes it: a real publish
+  // must draw a fresh sample, or the gate would be checking the same 100k
+  // spins forever and a paytable change could pass on a seed that happened
+  // to flatter it. `requestSimulation` generates one and records it on the
+  // report either way, which is what makes a verdict reproducible.
+  //
+  // Tests pass it for the opposite reason. An unseeded run is an independent
+  // sample, and measured drift on the tuned reference draft ranges
+  // 0.007–0.037 against a 0.05 tolerance — comfortable, but only ~1.4 sd of
+  // headroom against ~0.02 sampling noise, so a test that publishes and then
+  // asserts on the result is rarely but genuinely flaky. Pinning the seed
+  // removes the sampling from tests whose subject is not the sampling.
+  const simulation = await requestSimulation(
+    gameDef,
+    OFFICIAL_SIM_COUNT,
+    Math.min(...draft.betOptions),
+    options.runSeed,
+  );
 
   const drift = Math.abs(simulation.resultRtp - draft.rtpTarget);
   if (drift > RTP_TOLERANCE && !options.force) {

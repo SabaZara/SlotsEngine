@@ -589,6 +589,24 @@ testing was extracted into `paylineGrid.ts`, `reelStrip.ts` and the two
   untouched.** That last is the fake being *more destructive* than the
   database, a direction none of the earlier divergences had: a test could
   show a field correctly cleared while production quietly kept the old one.
+- **The publish gate's sampling was the root cause of both flakes, and is
+  now optional.** `publishDraft` takes a `runSeed` that **production never
+  passes** — a real publish must draw a fresh sample, or the gate would check
+  the same 100k spins forever and a paytable change could pass on a seed that
+  happened to flatter it. Verified: three consecutive production-shape
+  publishes still produce three distinct seeds. Tests pass one for the
+  opposite reason, and `publish.test.ts` had **twenty-one** unseeded
+  success-path publishes in a single file. They now share a seed measuring
+  0.9457 — a drift of 0.0043, an order of magnitude inside tolerance — so
+  they fail when the code breaks rather than when the sample is unlucky. The
+  refusal tests stay unseeded deliberately: their targets are far outside any
+  plausible measurement, so their verdict never depended on the draw.
+
+  Worth recording that the seed passthrough is an **equivalent mutation**:
+  deleting it leaves every test passing, because the seed changes only
+  whether a decision repeats, not what it is. A mutation that reintroduces
+  flakiness cannot be caught by a suite that runs once — the protection is
+  the comment, not an assertion.
 - **A second unseeded-simulation flake, in `app.test.ts` this time.** The
   version-bump test published twice and asserted the version reached 2;
   `publishDraft` runs an **unseeded** 100k simulation, so each publish is an
