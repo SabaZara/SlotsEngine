@@ -300,7 +300,7 @@ These have no direct test AND no meaningful indirect coverage.
 
 | Module | Lines | Why it matters |
 |---|---:|---|
-| `game-backend/src/startupGuards.ts` | 45 | **Highest value left.** Refuses to boot on a missing or weak secret, on `SERVICE_AUTH_SECRET === LAUNCH_TOKEN_SECRET`, and on `INITIAL_PLAYER_BALANCE` being set in production — that last one grants free money to every new player. Zero tests: `assertStartupConfig` appears in no test file. A guard nobody has watched refuse is a guard nobody knows works. |
+| ~~`game-backend/src/startupGuards.ts`~~ | 45 | **Done.** 15 tests, all six mutations caught (length floor, `=== "production"` loosened to a prefix, each production guard removed, first-problem-only reporting, and the guard made a no-op). Both directions are covered — a guard that throws on everything fails the "accepts a valid environment" test. What they still cannot establish: that `main()` calls it before binding a port, which is `index.ts`'s job and untested below. |
 | `backoffice-api/src/auth/middleware.ts` | 69 | The hook every admin route depends on: bearer parsing, `verifySession`, the `tokenVersion` revocation check, and role guards. `app.test.ts` touches it obliquely (one assertion mentions its error codes) but nothing tests the hook itself — notably the revocation lookup, which is the reason every request pays an extra database read. |
 | `backoffice-api/src/games/simulateClient.ts` | 66 | Runs the pre-publish simulation **in this process** (deliberately — a 100k-spin run on game-backend would stall live players). Untested, and it carries `ASSUMED_BONUS_RETURN_MULTIPLIER = 20`: a flat estimate for a triggered bonus rather than playing the module. That constant feeds `bonusRtp`, which feeds the measured RTP the publish gate compares against target — so **the number the gate trusts is part measurement, part assumption**, and nothing pins the assumption. The file says so honestly; see item G below. |
 | `game-socket/src/index.ts` | 118 | The connection lifecycle — limiter wiring, session-map cleanup on close, the `MAX_CONNECTIONS` ceiling. `session.ts`, `rateLimit.ts`, `origin.ts` and `backendClient.ts` are each well covered; the file that wires them together is not. |
@@ -318,7 +318,7 @@ route rather than the rule that broke.
 | `backoffice-api/src/games/publish.ts` | 131 | The RTP gate is well covered through routes (and closes the review's finding #2). The versioning and audit-write paths are not directly tested. |
 | `backoffice-api/src/auth/passwords.ts` | 73 | scrypt hashing and verification. One indirect reference. Worth pinning the format and that verification is constant-time-ish, since a rewrite here is easy to get subtly wrong. |
 | `game-backend/src/routes/*.ts` | ~250 | `rounds`, `bonus`, `simulate`, `public`, `launchTokens`, `serviceAuth`. Well exercised by the three e2e suites, which is real coverage — but e2e failures are slow and name a flow, not a branch. |
-| `shared-types/src/money.ts` | 84 | `splitIntegerEvenly` and friends. Referenced widely, tested directly nowhere. The "no minor unit created or lost" property is exactly the kind of thing a property test would pin cheaply. |
+| ~~`shared-types/src/money.ts`~~ | 84 | **Done.** 26 tests, all eight mutations caught. The "no minor unit created or lost" property is pinned exhaustively over totals 0–60 × parts 1–12, plus a spread check — summing correctly is not enough on its own, since `[total, 0, 0, …]` also sums correctly. Adapted from the reference's `money.test.ts` (near-identical module), extended with the cases it lacked: negative totals, `-0`, and the `70.07 * 100 = 7006.999…` float error that is the reason this module exists. |
 | `shared-types/src/rbac.ts` | 65 | Role definitions and permission sets. Zero direct references in tests. A wrong entry here is a privilege bug that looks like a config typo. |
 
 ### C. Frontend — untouched this whole session
@@ -364,6 +364,43 @@ Items 1, 2, 3b and 4 above. Ordered by what actually blocks going live:
    the moment there are two.
 4. **Branch protection (item 2).** Needs a paid plan; the pre-push hook
    covers the realistic case.
+
+### H. The production balance guard covers the set case, not the unset one
+
+**Severity: medium (production only) · Effort: low**
+
+Found while writing the `startupGuards` tests, by asking what the guard does
+*not* refuse.
+
+`assertStartupConfig` refuses `INITIAL_PLAYER_BALANCE` in production when it
+is set to a positive value — correctly, since that grants free money to every
+new player. But `packages/ledger/src/players.ts` reads:
+
+```ts
+const INITIAL_BALANCE = Number(process.env.INITIAL_PLAYER_BALANCE ?? 100_000);
+```
+
+So **unsetting** the variable does not give a zero starting balance — it gives
+100,000 minor units, the development default, and the guard is satisfied. The
+one configuration the guard forces you toward in production is the one that
+still hands out free money. Passing the guard requires setting it explicitly
+to `0`, which nothing states and nothing checks.
+
+The module comment above that line already says the right thing ("in a real
+deployment … this default would be zero"), so this is a default that
+contradicts its own documented intent rather than an unconsidered one.
+
+Options:
+- **Default to 0 and let development set it explicitly.** The safe direction:
+  a missing value grants nothing, and `infra/docker-compose.yml` already
+  passes `${INITIAL_PLAYER_BALANCE:-100000}`, so local behaviour is unchanged.
+- **Guard the unset case too** — refuse to boot in production unless the
+  variable is explicitly present, whatever its value.
+
+Not done here because it is a behaviour change on the money path rather than
+a test, and it deserves its own commit with a real-stack check. The tests
+added for the guard pin the current behaviour, including the deliberate
+acceptance of an explicit `0`.
 
 ### G. A real finding from writing this list
 
