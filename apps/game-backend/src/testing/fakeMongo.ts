@@ -58,12 +58,37 @@ function matches(doc: Doc, query: Record<string, unknown>): boolean {
   });
 }
 
+/**
+ * Operators this fake implements. Anything else throws rather than being
+ * ignored — see the check below.
+ */
+const SUPPORTED_UPDATE_OPERATORS = new Set(["$set", "$inc", "$unset", "$setOnInsert"]);
+
 function applyUpdate(doc: Doc, update: Record<string, unknown>): Doc {
+  // An unrecognised operator used to be dropped in silence, which is the
+  // F16 failure mode again: the fake being *more permissive* than Mongo, so
+  // a test asking for something unimplemented passes for the wrong reason.
+  // Found when a `$unset` in a middleware test quietly did nothing and the
+  // test still went green — it was asserting on a field it had not removed.
+  // Refusing loudly means the next unsupported operator is a failing test
+  // naming itself, not a false pass.
+  for (const key of Object.keys(update)) {
+    if (key.startsWith("$") && !SUPPORTED_UPDATE_OPERATORS.has(key)) {
+      throw new Error(
+        `fakeMongo does not implement the update operator ${key}. ` +
+          `Add it to applyUpdate rather than working around it — a stand-in that ignores an operator ` +
+          `silently makes any test using it meaningless.`,
+      );
+    }
+  }
+
   const next: Doc = { ...doc };
   for (const [key, value] of Object.entries((update.$set as Record<string, unknown>) ?? {})) next[key] = value;
   for (const [key, value] of Object.entries((update.$inc as Record<string, number>) ?? {})) {
     next[key] = ((next[key] as number | undefined) ?? 0) + value;
   }
+  // Mongo ignores the value entirely; only the key matters.
+  for (const key of Object.keys((update.$unset as Record<string, unknown>) ?? {})) delete next[key];
   return next;
 }
 

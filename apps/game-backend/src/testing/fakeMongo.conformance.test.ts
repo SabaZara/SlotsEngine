@@ -175,6 +175,46 @@ describe("fakeMongo conformance with real MongoDB", () => {
     assert.deepEqual(real, fake);
   });
 
+  it("removes a field on $unset, rather than setting it to null or ignoring it", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // The fake used to drop `$unset` silently, which made any test using it
+    // pass for the wrong reason — a middleware test "removed" a
+    // `tokenVersion` field, the document kept it, and the assertion that the
+    // missing-field fallback worked was really asserting nothing. Same
+    // family as F16: the stand-in being more permissive than Mongo.
+    //
+    // The distinction that matters is absent vs. null, since `?? 0`
+    // fallbacks fire on the first and not the second.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ id: "u", tokenVersion: 3, keep: "yes" });
+      await d.collection(collection).updateOne({ id: "u" }, { $unset: { tokenVersion: "" } });
+      const doc = await d.collection(collection).findOne({ id: "u" });
+      return {
+        present: doc !== null && "tokenVersion" in doc,
+        value: doc?.tokenVersion ?? "absent",
+        untouched: doc?.keep,
+      };
+    });
+
+    assert.deepEqual(fake, { present: false, value: "absent", untouched: "yes" });
+    assert.deepEqual(real, fake, "the fake must agree with Mongo on $unset");
+  });
+
+  it("refuses an update operator it does not implement, instead of ignoring it", async function () {
+    // No real-Mongo half: the point is precisely that the fake must NOT
+    // quietly accept what it cannot do. Mongo would apply `$push`; the fake
+    // cannot, and the honest answer is to fail loudly rather than to leave
+    // a test asserting on an update that never happened.
+    const { db } = fakeMongo();
+    await db.collection("c").insertOne({ id: "x", items: [] });
+    await assert.rejects(
+      () => db.collection("c").updateOne({ id: "x" }, { $push: { items: 1 } }),
+      /does not implement the update operator \$push/,
+    );
+  });
+
   it("creates a document on upsert, and updates it on the second call", async function () {
     if (!realDb) return this.skip(skipReason);
 

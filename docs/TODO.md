@@ -84,6 +84,7 @@ existed matters more than the fix, and that reasoning is easy to lose.
 | F13 | `verifySession` typed `JSON.parse`'s result as `SessionPayload` and read fields straight off it. A correctly signed token whose payload was the literal `null` threw a TypeError instead of returning null, and the auth middleware does not catch — so junk produced **500 instead of 401** on every admin route. Now refuses any non-object, and the parsed value is typed `unknown` so the compiler requires the check. | Writing the first tests for the file. Confirmed against the running service — 500 before, 401 after, for `null`, an array, a number and a string. |
 | F14 | The ledger's idempotency was only ever tested as a **sequential** replay — call, then call again — on a stand-in that models no transactions. Two callers arriving at the same instant is a different guarantee, resting on the unique index plus the driver's write-conflict retry, and nothing exercised it at this level. Now covered against a real replica set. | Reading the reference repo's own ledger suite (`~/Desktop/irakli/slot-engine`), which had exactly these tests and which I had not consulted. Both mutations caught: removing the in-flight check fails even with the index intact. |
 | F15 | `evaluateScatter` looks a count up **exactly** (`payout[count]`), so a table of `{3,4,5}` pays **nothing** at 6 — the biggest outcome in the game silently returning zero. Unreachable for `reference-5x3` (one scatter per strip caps it at 5), but one edit in the backoffice makes it live, and draft validation checked each entry's shape without ever checking the table covered the reachable range. `validateDraft` now refuses to publish an under-covered table. | Writing the first tests for `scatter.ts`, after the reference's suite flagged that its own engine uses N-or-more semantics where this one does not. Verified the shipped game still publishes and the dangerous edit is refused. |
+| F17 | `fakeMongo`'s `applyUpdate` handled `$set` and `$inc` and **silently dropped every other operator**. A `$unset` in a test did nothing, the document kept the field, and the test asserting on the missing-field fallback passed while asserting nothing. Same family as F16 — the stand-in more permissive than Mongo — but worse, because the test *looked* like it covered the branch. `$unset` is now implemented, and an unrecognised `$`-operator throws instead of being ignored. | Mutation testing the auth middleware. Changing `?? 0` to `?? -1` was the one mutation of twelve that survived; the test that should have caught it was the `$unset` one. Pinned now by two conformance tests, one of them against real Mongo. |
 | F16 | `fakeMongo` ignored `projection` entirely, so `_id` survived in tests while the real routes correctly stripped it. **More permissive than Mongo**, which is the inverse of F1/F9 and just as misleading — a correct assertion ("no `_id` in the response") failed against correct code. The fake now honours `{ _id: 0 }` on `find` and `findOne`. | Writing route tests for `/v1/games/:gameId/versions`. The test failed, the route was right, and comparing the two engines directly showed real Mongo stripping `_id` and the fake keeping it. Now pinned by two conformance tests. |
 
 ---
@@ -301,7 +302,7 @@ These have no direct test AND no meaningful indirect coverage.
 | Module | Lines | Why it matters |
 |---|---:|---|
 | ~~`game-backend/src/startupGuards.ts`~~ | 45 | **Done.** 15 tests, all six mutations caught (length floor, `=== "production"` loosened to a prefix, each production guard removed, first-problem-only reporting, and the guard made a no-op). Both directions are covered — a guard that throws on everything fails the "accepts a valid environment" test. What they still cannot establish: that `main()` calls it before binding a port, which is `index.ts`'s job and untested below. |
-| `backoffice-api/src/auth/middleware.ts` | 69 | The hook every admin route depends on: bearer parsing, `verifySession`, the `tokenVersion` revocation check, and role guards. `app.test.ts` touches it obliquely (one assertion mentions its error codes) but nothing tests the hook itself — notably the revocation lookup, which is the reason every request pays an extra database read. |
+| ~~`backoffice-api/src/auth/middleware.ts`~~ | 69 | **Done.** 23 tests on a bare Fastify instance with probe routes, so a failure names the rule rather than a route. All 12 mutations caught — including the revocation lookup in all four of its states (version behind, version ahead, deactivated, user gone). The twelfth mutation is what surfaced F17. Still cannot establish that `buildApp` mounts the hook at all; that is `app.test.ts`'s territory. |
 | `backoffice-api/src/games/simulateClient.ts` | 66 | Runs the pre-publish simulation **in this process** (deliberately — a 100k-spin run on game-backend would stall live players). Untested, and it carries `ASSUMED_BONUS_RETURN_MULTIPLIER = 20`: a flat estimate for a triggered bonus rather than playing the module. That constant feeds `bonusRtp`, which feeds the measured RTP the publish gate compares against target — so **the number the gate trusts is part measurement, part assumption**, and nothing pins the assumption. The file says so honestly; see item G below. |
 | `game-socket/src/index.ts` | 118 | The connection lifecycle — limiter wiring, session-map cleanup on close, the `MAX_CONNECTIONS` ceiling. `session.ts`, `rateLimit.ts`, `origin.ts` and `backendClient.ts` are each well covered; the file that wires them together is not. |
 | `game-backend/src/index.ts` | 175 | Same shape: composition, the CORS delegator, the rate-limit key generator, the error handler, and the bonus-sweep interval. Every piece is tested individually; the assembly is not. Note F6 and F7 were both *assembly* bugs. |
@@ -341,11 +342,18 @@ codebase's frontend and these findings may not transfer:
 
 ### D. Test-infrastructure debt
 
-- **`fakeMongo` is 275 lines and still not directly tested.** The
-  conformance suite now pins its agreement with real Mongo on 14
-  behaviours, which is the more valuable half — but it has grown twice this
-  session (projection support, and the F1/F9 lessons) and every unit test in
-  the repo trusts it.
+- **`fakeMongo` is ~300 lines and still not directly tested.** The
+  conformance suite now pins its agreement with real Mongo on 16
+  behaviours, which is the more valuable half — but it has grown three times
+  this session (projection support, `$unset`, and the F1/F9 lessons) and
+  every unit test in the repo trusts it.
+- **The fake implements only the operators this codebase happens to use.**
+  `$push`, `deleteOne` and friends are absent. Since F17 an unknown update
+  operator throws rather than being ignored, so the *silent* half of that
+  problem is closed — but a test needing one of them still has to work
+  around it (the middleware suite splices the backing array to delete a
+  document). Each addition should arrive with a conformance test, not on its
+  own.
 - **Item 3d** — `runRngTestSuite`'s aggregate cannot be tested without an
   injectable RNG algorithm. Recorded above with two concrete fixes.
 - **Item 3c** — `e2e:backoffice` exhausts the per-IP login limit on a second
