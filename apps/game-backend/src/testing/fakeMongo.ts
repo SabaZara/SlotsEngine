@@ -39,6 +39,23 @@ function get(doc: Doc, path: string): unknown {
 }
 
 /**
+ * Multi-key sort, in declaration order — shared by `find().sort()` and
+ * `findOne({ sort })` so the two cannot drift. `findOne` previously ignored
+ * its `sort` option entirely and returned insertion order.
+ */
+function sortDocs(docs: Doc[], spec: Record<string, 1 | -1>): Doc[] {
+  const keys = Object.entries(spec);
+  return [...docs].sort((a, b) => {
+    for (const [key, direction] of keys) {
+      const av = get(a, key) as string | number;
+      const bv = get(b, key) as string | number;
+      if (av !== bv) return (av > bv ? 1 : -1) * direction;
+    }
+    return 0;
+  });
+}
+
+/**
  * Query operators this fake implements. Anything else throws rather than
  * being silently ignored.
  *
@@ -79,11 +96,21 @@ function matches(doc: Doc, query: Record<string, unknown>): boolean {
 
       if ("$lt" in ops) return (actual as number | string) < (ops.$lt as number | string);
       if ("$gt" in ops) return (actual as number | string) > (ops.$gt as number | string);
-      // Mongo's `$ne` matches documents where the field is absent, which is
-      // load-bearing here: `active: { $ne: false }` is how "active unless
-      // explicitly deactivated" is expressed, and a fake that required the
-      // field to exist would silently count zero active administrators.
-      if ("$ne" in ops) return actual !== ops.$ne;
+      // Two rules, both load-bearing.
+      //
+      // On a scalar field, `$ne` matches documents where the field is
+      // ABSENT as well: `active: { $ne: false }` is how "active unless
+      // explicitly deactivated" is expressed, and a fake requiring the field
+      // to exist would silently count zero active administrators.
+      //
+      // On an ARRAY field, `$ne` excludes any document whose array
+      // *contains* the value — the negation of the membership rule below,
+      // not a reference comparison. The fake compared the array object
+      // itself against a scalar, which is never equal, so every document
+      // matched. `countActiveSuperAdmins` queries `roles` this way.
+      if ("$ne" in ops) {
+        return Array.isArray(actual) ? !actual.includes(ops.$ne) : actual !== ops.$ne;
+      }
     }
     // Matching a scalar against an array field tests membership — how
     // `roles: "super_admin"` finds a user whose `roles` array contains it.
@@ -103,6 +130,14 @@ function matches(doc: Doc, query: Record<string, unknown>): boolean {
     if (expected !== null && typeof expected === "object") {
       return JSON.stringify(actual) === JSON.stringify(expected);
     }
+
+    // Mongo treats `{ field: null }` as matching documents where the field
+    // is null OR absent entirely. `undefined === null` is false in
+    // JavaScript, so the fake matched only an explicit null — the
+    // restrictive direction, which reads as "no such documents" rather than
+    // as an error. `loginThrottle` stores `lockedUntil: null`, so a query
+    // for un-locked accounts is exactly this shape.
+    if (expected === null) return actual === null || actual === undefined;
 
     return actual === expected;
   });
@@ -260,9 +295,15 @@ class FakeCollection {
 
   async findOne(
     query: Record<string, unknown>,
-    options: { projection?: Record<string, 0 | 1> } = {},
+    options: { projection?: Record<string, 0 | 1>; sort?: Record<string, 1 | -1> } = {},
   ): Promise<Doc | null> {
-    const doc = this.docs.find((d) => matches(d, query)) ?? null;
+    // `sort` used to be accepted by the type and ignored, so `findOne({}, {
+    // sort: { n: 1 } })` returned whatever happened to be inserted first.
+    // Silently returning a DIFFERENT document than the caller asked for is
+    // the worst failure available from a read: the value is plausible, and
+    // nothing about it looks wrong.
+    const matched = this.docs.filter((d) => matches(d, query));
+    const doc = (options.sort ? sortDocs(matched, options.sort) : matched)[0] ?? null;
     return doc ? applyProjection(doc, options.projection) : null;
   }
 
@@ -379,15 +420,7 @@ class FakeCollection {
        * recovery query breaks a `createdAt` tie with `_id`, and a
        * single-key fake would silently not exercise that. */
       sort(spec: Record<string, 1 | -1>) {
-        const keys = Object.entries(spec);
-        results = [...results].sort((a, b) => {
-          for (const [key, direction] of keys) {
-            const av = get(a, key) as string | number;
-            const bv = get(b, key) as string | number;
-            if (av !== bv) return (av > bv ? 1 : -1) * direction;
-          }
-          return 0;
-        });
+        results = sortDocs(results, spec);
         return cursor;
       },
       limit(n: number) {

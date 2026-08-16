@@ -559,6 +559,24 @@ testing was extracted into `paylineGrid.ts`, `reelStrip.ts` and the two
   close, which is a stronger claim as well as a stable one. `runSeed` only
   became available when item G's reproducibility work landed, so this was
   not an option when the test was written. Five consecutive clean runs.
+- ~~**`findOne` ignored its `sort` option.**~~ **Fixed.** Accepted by the
+  signature and silently dropped, so `findOne({}, { sort: { n: 1 } })`
+  returned whatever was inserted first. Returning a *different document*
+  than the caller asked for is the worst failure a read can produce — the
+  value is plausible and nothing about it looks wrong. `find().sort()` and
+  `findOne` now share one comparator so they cannot drift again.
+- ~~**`$ne` against an array field matched everything.**~~ **Fixed.** Mongo's
+  `$ne` on an array is the negation of *membership*; the fake compared the
+  array object against a scalar, which is never equal, so every document
+  matched. The permissive direction, and `countActiveSuperAdmins` queries
+  `roles` exactly this way — an over-matching fake would report
+  administrators who do not hold the role.
+- ~~**A `null` query did not match a missing field.**~~ **Fixed.** Mongo
+  treats `{ field: null }` as matching both an explicit null and an absent
+  field; `undefined === null` is false in JavaScript, so the fake matched
+  only the explicit case. The restrictive direction, reading as "no such
+  documents" rather than as an error. `loginThrottle` stores
+  `lockedUntil: null`, so a query for un-locked accounts is this shape.
 - **Both of the above were latent, and that is the point.** Neither operator
   nor subdocument query appears anywhere in this codebase today, so no test
   could have failed. They were found by *asking what the fake does with input
@@ -568,11 +586,19 @@ testing was extracted into `paylineGrid.ts`, `reelStrip.ts` and the two
   nothing — it has to be audited against the thing it stands in for.
 
   **The audit that found them is worth repeating rather than describing.**
-  Nine behaviours were run against both engines in one script and their
-  results diffed: four divergences surfaced in a couple of minutes, where
-  reading the file had found none. The conformance suite is now 30 cases,
-  and the cheapest way to extend it is to write the probe first and keep
-  only the rows that differ.
+  Behaviours were run against both engines in a throwaway script and the
+  results diffed. Three rounds of this found **nine** divergences in about
+  as many minutes, where reading the file had found none. The conformance
+  suite is now 36 cases, and the cheapest way to extend it is to write the
+  probe first and keep only the rows that differ.
+
+  Worth noting how they split: three were the fake being *more permissive*
+  than Mongo (F16/F21's direction), three *more restrictive* (F22's), and
+  three *silent* — accepting an option or operator and ignoring it. Only the
+  last group is unique to a stand-in; the other two are ordinary bugs that
+  happen to live in test infrastructure. None of the nine was reachable from
+  any existing caller, so no amount of running the suite would have surfaced
+  them.
 - **A fixture that is already minimal cannot test an allowlist.**
   `toPublicView` maps each bonus module down to `moduleId` and `params`.
   Both shipped fixtures happen to have exactly those two fields, so

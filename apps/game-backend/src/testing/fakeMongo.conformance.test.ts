@@ -785,6 +785,86 @@ describe("fakeMongo conformance with real MongoDB", () => {
     assert.deepEqual(fake, real, "the sweep's return value depends on this distinction");
   });
 
+  it("agrees that findOne honours its sort option", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // `sort` was accepted by the signature and ignored, so `findOne({}, {
+    // sort: { n: 1 } })` returned whatever was inserted first. Silently
+    // returning a DIFFERENT document than the caller asked for is the worst
+    // failure a read can produce: the value is plausible and nothing about
+    // it looks wrong. Both directions are asserted so the fix cannot be a
+    // reversed comparator that happens to pass one of them.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      for (const n of [3, 1, 2]) await d.collection(collection).insertOne({ n });
+      const lowest = await d.collection(collection).findOne({}, { sort: { n: 1 } });
+      const highest = await d.collection(collection).findOne({}, { sort: { n: -1 } });
+      return { lowest: lowest?.n, highest: highest?.n };
+    });
+
+    assert.deepEqual(real, { lowest: 1, highest: 3 });
+    assert.deepEqual(fake, real, "the fake must sort before taking the first document");
+  });
+
+  it("agrees that $ne on an array field excludes documents containing the value", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // Mongo's `$ne` against an array is the negation of membership, not a
+    // reference comparison. The fake compared the array object itself
+    // against a scalar — never equal — so every document matched, the
+    // permissive direction. `countActiveSuperAdmins` queries `roles` this
+    // way, so an over-matching fake would report administrators who do not
+    // hold the role.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ roles: ["admin", "operations"] });
+      const excluded = await d.collection(collection).find({ roles: { $ne: "admin" } }).toArray();
+      const kept = await d.collection(collection).find({ roles: { $ne: "super_admin" } }).toArray();
+      return { excluded: excluded.length, kept: kept.length };
+    });
+
+    assert.deepEqual(real, { excluded: 0, kept: 1 });
+    assert.deepEqual(fake, real);
+  });
+
+  it("agrees that $ne on a scalar still matches a document missing the field", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // The rule the array fix must not break. `active: { $ne: false }` is how
+    // "active unless explicitly deactivated" is expressed, and it has to
+    // keep matching rows that predate the field.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ userId: "u1" });
+      return (await d.collection(collection).find({ active: { $ne: false } }).toArray()).length;
+    });
+
+    assert.equal(real, 1);
+    assert.equal(fake, real);
+  });
+
+  it("agrees that a null query matches both an explicit null and a missing field", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // `undefined === null` is false in JavaScript, so the fake matched only
+    // an explicit null — the restrictive direction, which reads as "no such
+    // documents" rather than as an error. `loginThrottle` stores
+    // `lockedUntil: null`, so a query for un-locked accounts is this shape.
+    // The third case guards the fix from overshooting into matching
+    // everything.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ id: "missing" });
+      await d.collection(collection).insertOne({ id: "explicit", lockedUntil: null });
+      await d.collection(collection).insertOne({ id: "set", lockedUntil: 12345 });
+      const found = await d.collection(collection).find({ lockedUntil: null }).toArray();
+      return found.map((doc) => doc.id).sort();
+    });
+
+    assert.deepEqual(real, ["explicit", "missing"]);
+    assert.deepEqual(fake, real, "null must match absent and explicit-null, but not a set value");
+  });
+
   it("agrees that countDocuments honours a limit", async function () {
     if (!realDb) return this.skip(skipReason);
 
