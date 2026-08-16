@@ -307,7 +307,7 @@ These have no direct test AND no meaningful indirect coverage.
 | ~~`game-backend/src/startupGuards.ts`~~ | 45 | **Done.** 15 tests, all six mutations caught (length floor, `=== "production"` loosened to a prefix, each production guard removed, first-problem-only reporting, and the guard made a no-op). Both directions are covered — a guard that throws on everything fails the "accepts a valid environment" test. What they still cannot establish: that `main()` calls it before binding a port, which is `index.ts`'s job and untested below. |
 | ~~`backoffice-api/src/auth/middleware.ts`~~ | 69 | **Done.** 23 tests on a bare Fastify instance with probe routes, so a failure names the rule rather than a route. All 12 mutations caught — including the revocation lookup in all four of its states (version behind, version ahead, deactivated, user gone). The twelfth mutation is what surfaced F17. Still cannot establish that `buildApp` mounts the hook at all; that is `app.test.ts`'s territory. |
 | ~~`backoffice-api/src/games/simulateClient.ts`~~ | 66 | **Done.** 10 tests, all seven mutations caught — including the one that matters most, the adapter silently ceasing to pass `ASSUMED_BONUS_RETURN_MULTIPLIER` (`runSimulation` defaults it to 0, so every bonus would score nothing and a tuned game would be refused for a reason no report explains). The constant's leverage is now measured by a test rather than asserted from memory, and writing it turned up the sampling-noise figures added to item G. |
-| `game-socket/src/index.ts` | 118 | The connection lifecycle — limiter wiring, session-map cleanup on close, the `MAX_CONNECTIONS` ceiling. `session.ts`, `rateLimit.ts`, `origin.ts` and `backendClient.ts` are each well covered; the file that wires them together is not. |
+| ~~`game-socket/src/index.ts`~~ | 118 | **Done**, by splitting it. The assembly moved to `server.ts` as `createSocketServer`, following `backoffice-api`'s existing `app.ts`/`index.ts` convention, leaving `index.ts` as config-plus-listen. 17 tests drive a real server on an ephemeral port with a real `ws` client. Two gaps are stated in the file header rather than left silent: the `maxPayload` ceiling and the `readyState` guard both survive mutation, and both were judged not worth a fragile test. Verified end to end — `e2e:spin` passes in full against the rebuilt container. |
 | `game-backend/src/index.ts` | 175 | Same shape: composition, the CORS delegator, the rate-limit key generator, the error handler, and the bonus-sweep interval. Every piece is tested individually; the assembly is not. Note F6 and F7 were both *assembly* bugs. |
 
 ### B. Covered indirectly, worth direct tests
@@ -357,6 +357,13 @@ codebase's frontend and these findings may not transfer:
   around it (the middleware suite splices the backing array to delete a
   document). Each addition should arrive with a conformance test, not on its
   own.
+- **A test that waits on an event must time out.** The socket suite's first
+  version used unbounded promises for "the server closes this" and "the
+  server replies". Under mutation, a server that *fails* to close simply
+  hung — two ten-minute timeouts before the pattern was obvious, and a
+  hanging run gives no information at all about which mutation survived.
+  Every wait there now rejects with a named timeout. Applies to any test
+  awaiting a callback rather than a return value.
 - **A malformed-input fixture must be malformed in exactly one way.** The
   `passwords.ts` suite first used short fake digests for every corrupt-hash
   case (`scrypt$0$c2FsdA$aGFzaA` and friends). Every test passed — but the
