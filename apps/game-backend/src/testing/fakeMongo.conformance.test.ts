@@ -865,6 +865,78 @@ describe("fakeMongo conformance with real MongoDB", () => {
     assert.deepEqual(fake, real, "null must match absent and explicit-null, but not a set value");
   });
 
+  /**
+   * `ignoreUndefined`, which the real client is constructed with and the
+   * fake modelled not at all.
+   *
+   * `connectMongo` passes `ignoreUndefined: true` and its comment explains
+   * why: without it an optional field left undefined is stored as an
+   * explicit null, and a round read back would no longer match the round
+   * that was written. That option changes three separate behaviours, and the
+   * fake disagreed on all three.
+   *
+   * The `$set` case is the one that mattered — the fake ERASED a value that
+   * Mongo leaves untouched, so a test could show a field correctly cleared
+   * while production quietly kept the old one. That is the fake being more
+   * destructive than the database, a direction none of the earlier
+   * divergences had.
+   *
+   * Note this suite's own client is constructed with `ignoreUndefined: true`
+   * to match production; without that these would compare against a
+   * differently-configured driver and prove nothing about the real system.
+   */
+  it("agrees that an undefined field is dropped on insert, not stored", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ id: "p", note: undefined } as never);
+      const doc = await d.collection(collection).findOne({ id: "p" }, { projection: { _id: 0 } });
+      return Object.keys(doc ?? {}).sort();
+    });
+
+    assert.deepEqual(real, ["id"], "Mongo drops the undefined key entirely");
+    assert.deepEqual(fake, real);
+  });
+
+  it("agrees that $set with an undefined value leaves the field untouched", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // The destructive divergence. `$unset` is how a field is removed; an
+    // undefined `$set` is a no-op, not a deletion.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ id: "p", note: "keep" });
+      await d.collection(collection).updateOne({ id: "p" }, { $set: { note: undefined } } as never);
+      const kept = (await d.collection(collection).findOne({ id: "p" }))?.note ?? "<gone>";
+
+      // And the two operations that MUST still change things, so the fix
+      // cannot overshoot into ignoring every write.
+      await d.collection(collection).updateOne({ id: "p" }, { $set: { note: "new" } });
+      const replaced = (await d.collection(collection).findOne({ id: "p" }))?.note;
+      await d.collection(collection).updateOne({ id: "p" }, { $unset: { note: "" } });
+      const removed = (await d.collection(collection).findOne({ id: "p" }))?.note ?? "<gone>";
+
+      return { kept, replaced, removed };
+    });
+
+    assert.deepEqual(real, { kept: "keep", replaced: "new", removed: "<gone>" });
+    assert.deepEqual(fake, real, "the fake must not erase what Mongo leaves alone");
+  });
+
+  it("agrees that an undefined query condition is ignored rather than matching nothing", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ id: "p", note: "x" });
+      return (await d.collection(collection).find({ note: undefined } as never).toArray()).length;
+    });
+
+    assert.equal(real, 1, "the condition is stripped before it reaches Mongo");
+    assert.equal(fake, real);
+  });
+
   it("agrees that countDocuments honours a limit", async function () {
     if (!realDb) return this.skip(skipReason);
 

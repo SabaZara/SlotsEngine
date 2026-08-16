@@ -411,6 +411,33 @@ describe("publishing", () => {
   const publish = (force = false) =>
     ctx.app.inject({ method: "POST", url: "/v1/games/g/publish", headers: auth(token), payload: { force } });
 
+  /**
+   * A publish that MUST succeed, for tests whose subject is what happens
+   * afterwards rather than the gate itself.
+   *
+   * `publishDraft` runs an unseeded 100k simulation, so each call is an
+   * independent sample: measured drift on the tuned draft ranges 0.007–0.037
+   * against a 0.05 tolerance, which is comfortable but not unreachable. When
+   * a run does land outside, a bare `publish()` returns 422 and the test
+   * fails several assertions later on a version that never advanced — "1 !==
+   * 2", naming neither the cause nor the gate. Observed once in the full
+   * suite.
+   *
+   * Asserting the status here makes that failure say what happened. It does
+   * not make the flake impossible — only seeding the publish route would, and
+   * that is a production change item G already tracks — but it turns a
+   * confusing failure into an obvious one.
+   */
+  const publishOrFail = async (force = false) => {
+    const response = await publish(force);
+    assert.equal(
+      response.statusCode,
+      200,
+      `publish was expected to succeed but returned ${response.statusCode}: ${JSON.stringify(response.json())}`,
+    );
+    return response;
+  };
+
   it("publishes a well-tuned game and makes it live at version 1", async () => {
     await ctx.app.inject({ method: "PUT", url: "/v1/games/g", headers: auth(token), payload: tunedDraft() });
 
@@ -464,8 +491,8 @@ describe("publishing", () => {
     // A round records the gameVersion it ran under, so history must be
     // append-only for any historical round to stay auditable.
     await ctx.app.inject({ method: "PUT", url: "/v1/games/g", headers: auth(token), payload: tunedDraft() });
-    await publish();
-    await publish();
+    await publishOrFail();
+    await publishOrFail();
 
     assert.equal((await ctx.raw.collection("games").findOne({ gameId: "g" }))?.version, 2);
     const versions = await ctx.raw.collection("gameVersions").find({ gameId: "g" }).toArray();
@@ -474,7 +501,7 @@ describe("publishing", () => {
 
   it("records who published, and the measured RTP", async () => {
     await ctx.app.inject({ method: "PUT", url: "/v1/games/g", headers: auth(token), payload: tunedDraft() });
-    await publish();
+    await publishOrFail();
 
     const entry = ctx.raw.collection("auditLogs").all().find((e) => e.action === "game.publish");
     assert.equal(entry?.actorUserId, ctx.designer.userId);
@@ -484,7 +511,7 @@ describe("publishing", () => {
 
   it("stores a simulation run for every publish", async () => {
     await ctx.app.inject({ method: "PUT", url: "/v1/games/g", headers: auth(token), payload: tunedDraft() });
-    await publish();
+    await publishOrFail();
     assert.equal(ctx.raw.collection("rtpSimulationRuns").all().length, 1);
   });
 
@@ -493,9 +520,9 @@ describe("publishing", () => {
       // A designer needs to see what shipped and when; ordering matters
       // because the UI shows the current version at the top.
       await ctx.app.inject({ method: "PUT", url: "/v1/games/g", headers: auth(token), payload: tunedDraft() });
-      await publish();
+      await publishOrFail();
       await ctx.app.inject({ method: "POST", url: "/v1/games/g/draft-from-published", headers: auth(token) });
-      await publish();
+      await publishOrFail();
 
       const response = await ctx.app.inject({ method: "GET", url: "/v1/games/g/versions", headers: auth(token) });
       assert.equal(response.statusCode, 200);
@@ -514,7 +541,7 @@ describe("publishing", () => {
 
     it("never leaks Mongo's _id into the response", async () => {
       await ctx.app.inject({ method: "PUT", url: "/v1/games/g", headers: auth(token), payload: tunedDraft() });
-      const published = await publish();
+      const published = await publishOrFail();
       assert.equal(published.statusCode, 200, JSON.stringify(published.json()));
 
       const versions = (await ctx.app.inject({ method: "GET", url: "/v1/games/g/versions", headers: auth(token) })).json()
@@ -534,7 +561,7 @@ describe("publishing", () => {
       // game is in. My first version of this test published and
       // immediately expected 200; it got a correct 409.
       await ctx.app.inject({ method: "PUT", url: "/v1/games/g", headers: auth(token), payload: tunedDraft() });
-      await publish();
+      await publishOrFail();
       await ctx.raw.collection("gameDrafts").updateMany({ gameId: "g" }, { $set: { gameId: "archived" } });
 
       const response = await ctx.app.inject({
@@ -553,7 +580,7 @@ describe("publishing", () => {
       // The destructive case. Overwriting an in-progress draft with the
       // published version would silently throw away unsaved design work.
       await ctx.app.inject({ method: "PUT", url: "/v1/games/g", headers: auth(token), payload: tunedDraft() });
-      await publish();
+      await publishOrFail();
       await ctx.app.inject({ method: "POST", url: "/v1/games/g/draft-from-published", headers: auth(token) });
 
       const second = await ctx.app.inject({

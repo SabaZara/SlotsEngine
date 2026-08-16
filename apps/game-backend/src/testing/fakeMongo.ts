@@ -34,6 +34,33 @@ class DuplicateKeyError extends Error {
   }
 }
 
+/**
+ * Drops keys whose value is `undefined`, recursively.
+ *
+ * The real client is constructed with `ignoreUndefined: true` (see
+ * `connectMongo`, where the comment explains why: without it an optional
+ * field left undefined is stored as an explicit null, and a round read back
+ * would no longer match the round that was written). The fake modelled none
+ * of that, so it stored the key — a divergence in three places at once:
+ * an inserted document kept a field Mongo drops, a `$set: { x: undefined }`
+ * ERASED a value Mongo leaves untouched, and a query on an undefined value
+ * matched nothing where Mongo ignores the condition entirely.
+ *
+ * The `$set` case is the one that mattered: the fake was more DESTRUCTIVE
+ * than the database, so a test could show a field correctly cleared while
+ * production quietly kept the old value.
+ */
+function stripUndefined(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(stripUndefined);
+  if (value === null || typeof value !== "object" || value instanceof Date) return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, inner] of Object.entries(value as Record<string, unknown>)) {
+    if (inner === undefined) continue;
+    out[key] = stripUndefined(inner);
+  }
+  return out;
+}
+
 function get(doc: Doc, path: string): unknown {
   return path.split(".").reduce<unknown>((acc, part) => (acc as Record<string, unknown> | undefined)?.[part], doc);
 }
@@ -77,6 +104,12 @@ const SUPPORTED_QUERY_OPERATORS = new Set(["$lt", "$gt", "$ne"]);
 
 function matches(doc: Doc, query: Record<string, unknown>): boolean {
   return Object.entries(query).every(([key, expected]) => {
+    // `ignoreUndefined` strips an undefined condition from the query before
+    // it is sent, so Mongo never sees it and every document matches. The
+    // fake compared against undefined and matched nothing — the restrictive
+    // direction, which reads as "no such documents".
+    if (expected === undefined) return true;
+
     const actual = get(doc, key);
     if (expected && typeof expected === "object" && !Array.isArray(expected) && !(expected instanceof Date)) {
       const ops = expected as Record<string, unknown>;
@@ -209,7 +242,13 @@ function applyUpdate(doc: Doc, update: Record<string, unknown>): Doc {
   }
 
   const next: Doc = { ...doc };
-  for (const [key, value] of Object.entries((update.$set as Record<string, unknown>) ?? {})) setPath(next, key, value);
+  for (const [key, value] of Object.entries((update.$set as Record<string, unknown>) ?? {})) {
+    // Mongo never receives an undefined value under `ignoreUndefined`, so
+    // the field keeps whatever it already held. Erasing it here made the
+    // fake more destructive than the database.
+    if (value === undefined) continue;
+    setPath(next, key, stripUndefined(value));
+  }
   for (const [key, value] of Object.entries((update.$inc as Record<string, number>) ?? {})) {
     setPath(next, key, ((get(next, key) as number | undefined) ?? 0) + value);
   }
@@ -284,6 +323,7 @@ class FakeCollection {
   }
 
   async insertOne(doc: Doc): Promise<{ insertedId: string }> {
+    doc = stripUndefined(doc) as Doc;
     this.assertUnique(doc);
     // Zero-padded so lexicographic ordering matches insertion order past
     // the tenth document — a real ObjectId is monotonic, and a fake that

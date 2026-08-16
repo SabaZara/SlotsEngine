@@ -577,6 +577,31 @@ testing was extracted into `paylineGrid.ts`, `reelStrip.ts` and the two
   only the explicit case. The restrictive direction, reading as "no such
   documents" rather than as an error. `loginThrottle` stores
   `lockedUntil: null`, so a query for un-locked accounts is this shape.
+- ~~**The fake modelled none of `ignoreUndefined`.**~~ **Fixed**, and this
+  was the largest single divergence found. The real client is constructed
+  with `ignoreUndefined: true` — `connectMongo`'s comment explains why:
+  without it an optional field left undefined is stored as an explicit null,
+  and a round read back would no longer match the round that was written.
+  That option changes three behaviours and the fake disagreed on all three:
+  an inserted document kept a field Mongo drops, a query on an undefined
+  value matched nothing where Mongo ignores the condition, and — the one
+  that mattered — **`$set: { x: undefined }` ERASED a value Mongo leaves
+  untouched.** That last is the fake being *more destructive* than the
+  database, a direction none of the earlier divergences had: a test could
+  show a field correctly cleared while production quietly kept the old one.
+- **A second unseeded-simulation flake, in `app.test.ts` this time.** The
+  version-bump test published twice and asserted the version reached 2;
+  `publishDraft` runs an **unseeded** 100k simulation, so each publish is an
+  independent sample. Measured drift on the tuned draft ranges 0.007–0.037
+  against a 0.05 tolerance — comfortable, but roughly 1.4 sd of headroom
+  against ~0.02 noise, so a refusal is rare rather than impossible. When it
+  happened the test failed several assertions later with `1 !== 2`, naming
+  neither the gate nor the cause. A `publishOrFail` helper now asserts the
+  200 at the point of publishing, so the failure says what happened. **This
+  does not remove the flake** — only seeding the publish route would, which
+  is a production change item G already tracks — it converts a confusing
+  failure into an obvious one. Applied to all seven call sites whose subject
+  is post-publish state rather than the gate.
 - **Both of the above were latent, and that is the point.** Neither operator
   nor subdocument query appears anywhere in this codebase today, so no test
   could have failed. They were found by *asking what the fake does with input
