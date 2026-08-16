@@ -1,0 +1,44 @@
+import { createHash } from "node:crypto";
+import { createRng, type Rng } from "@slots-engine/rng";
+import type { BonusModule } from "./types.js";
+import { wheelModule } from "./modules/wheel.js";
+import { pickModule } from "./modules/pick.js";
+
+const modules = new Map<string, BonusModule>();
+
+export function registerBonusModule(module: BonusModule): void {
+  modules.set(module.moduleId, module);
+}
+
+/** Throws rather than falling back — a game referencing an unregistered
+ * module is a deployment error, and paying out under a substituted module
+ * would be worse than refusing. */
+export function getBonusModule(moduleId: string): BonusModule {
+  const module = modules.get(moduleId);
+  if (!module) {
+    throw new Error(`no bonus module registered under id '${moduleId}' (registered: ${[...modules.keys()].join(", ") || "none"})`);
+  }
+  return module;
+}
+
+export function listBonusModules(): string[] {
+  return [...modules.keys()];
+}
+
+/**
+ * Derives a bonus step's RNG deterministically from the session's own seed
+ * plus the step number, rather than drawing fresh entropy at step time.
+ *
+ * This is what makes a bonus round auditable to the same standard as a
+ * spin: given the session seed, every step's randomness can be recomputed
+ * exactly. It also means a retried or concurrent step for the same step
+ * number sees the identical stream, so a duplicate request cannot produce a
+ * different prize than the one already recorded.
+ */
+export function deriveStepRng(sessionSeed: string, stepIndex: number): Rng {
+  const derived = createHash("sha256").update(`${sessionSeed}:${stepIndex}`).digest("hex");
+  return createRng(derived);
+}
+
+registerBonusModule(wheelModule);
+registerBonusModule(pickModule);

@@ -1,0 +1,138 @@
+name: CI
+
+# The gate. Nothing merges to main without passing this.
+#
+# The reasoning, worth stating because it is the whole point of the file:
+# a test suite that exists but is never consulted before code ships is not
+# a safety net, it is documentation. Every check below already existed and
+# already passed locally; what was missing was the requirement to run them.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# A second push to the same branch makes the first run irrelevant. Cancel it
+# rather than paying for an answer about code nobody will ship.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Unit tests + typecheck. Fast, hermetic, no services required.
+  # ---------------------------------------------------------------------
+  unit:
+    name: Typecheck and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      # Workspace packages must be compiled before anything that imports
+      # them by name can resolve. Running this first also means a genuine
+      # build break is reported as a build break, not as a confusing
+      # cascade of module-not-found failures in the test step.
+      - name: Build workspace packages
+        run: npm run build
+
+      # `npm test` runs the typecheck itself before the suite. That order is
+      # deliberate and load-bearing: tsx strips types without checking them,
+      # so the suite alone once gave a clean pass on a real type error.
+      - name: Typecheck and test
+        run: npm test
+
+  # ---------------------------------------------------------------------
+  # End-to-end against the real stack.
+  #
+  # This job is the reason the gate is trustworthy. Unit tests use an
+  # in-memory database stand-in, which cannot prove that transactions roll
+  # back, that unique indexes are really declared, or that two services
+  # agree on how a request is signed. Every bug found late in this project
+  # was found here and not by the unit suite.
+  # ---------------------------------------------------------------------
+  e2e:
+    name: End-to-end (real services)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      # CI-only secrets. These are throwaway values for an ephemeral stack
+      # that is destroyed with the runner — they are deliberately NOT
+      # repository secrets, because pretending a public test fixture is a
+      # secret teaches the wrong habit. Real deployments inject real ones.
+      #
+      # They still satisfy the startup guards (length, and the two secrets
+      # differing), which is itself worth exercising: if a guard regressed
+      # into rejecting a valid config, this step catches it.
+      - name: Write CI environment
+        run: |
+          cp .env.example infra/.env
+          {
+            echo "SERVICE_AUTH_SECRET=ci-only-service-secret-not-a-real-credential-0001"
+            echo "LAUNCH_TOKEN_SECRET=ci-only-launch-secret-not-a-real-credential-0002"
+            echo "BACKOFFICE_JWT_SECRET=ci-only-backoffice-secret-not-a-real-cred-0003"
+            echo "BOOTSTRAP_ADMIN_PASSWORD=ci-admin-password"
+          } >> infra/.env
+
+      - name: Start the stack
+        run: docker compose -f infra/docker-compose.yml up --build -d
+
+      # compose `depends_on: service_healthy` already gates game-backend on
+      # a healthy Mongo, but backoffice-api has no healthcheck of its own,
+      # so wait for it explicitly rather than racing it.
+      - name: Wait for services to be ready
+        run: |
+          for svc in "game backend|http://localhost:9102/health/ready" \
+                     "backoffice api|http://localhost:9105/health/ready"; do
+            name="${svc%%|*}"; url="${svc##*|}"
+            echo "waiting for $name at $url"
+            for i in $(seq 1 60); do
+              if curl -fsS "$url" >/dev/null 2>&1; then
+                echo "  $name ready after ${i}s"; break
+              fi
+              if [ "$i" -eq 60 ]; then
+                echo "  $name never became ready"; exit 1
+              fi
+              sleep 1
+            done
+          done
+
+      - name: Spin flow
+        env:
+          GAME_BACKEND_URL: http://localhost:9102
+          GAME_SOCKET_URL: ws://localhost:9103
+          LAUNCH_TOKEN_SECRET: ci-only-launch-secret-not-a-real-credential-0002
+        run: npm run e2e:spin
+
+      - name: Backoffice flow
+        env:
+          BACKOFFICE_URL: http://localhost:9105
+          GAME_BACKEND_URL: http://localhost:9102
+          BOOTSTRAP_ADMIN_EMAIL: admin@example.com
+          BOOTSTRAP_ADMIN_PASSWORD: ci-admin-password
+        run: npm run e2e:backoffice
+
+      # A failed e2e run is usually a service that refused to start, and the
+      # assertion output alone does not say why. Logs make the failure
+      # diagnosable from the run page without reproducing locally.
+      - name: Service logs on failure
+        if: failure()
+        run: docker compose -f infra/docker-compose.yml logs --tail 200
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f infra/docker-compose.yml down -v

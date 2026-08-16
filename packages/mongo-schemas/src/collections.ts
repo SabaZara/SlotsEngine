@@ -1,0 +1,294 @@
+import type { CreateIndexesOptions, Db, IndexDirection } from "mongodb";
+
+/**
+ * **The indexes in this file are the concurrency design.** Most of this
+ * system's exactly-once guarantees are declared here, not in application
+ * code: the house idiom throughout is "insert and let a unique index
+ * arbitrate the race", because an application-level read-then-write cannot
+ * survive two concurrent callers no matter how carefully it is written.
+ *
+ * Validators are deliberately loose (`additionalProperties: true`). They
+ * pin down identity and idempotency fields — the ones a bug would corrupt
+ * expensively — without becoming a second source of truth that drifts from
+ * the TypeScript types.
+ */
+export interface IndexDefinition {
+  keys: Record<string, IndexDirection>;
+  options?: CreateIndexesOptions;
+}
+
+export interface CollectionDefinition {
+  name: string;
+  validator?: Record<string, unknown>;
+  indexes: IndexDefinition[];
+}
+
+export const COLLECTIONS: CollectionDefinition[] = [
+  {
+    name: "games",
+    validator: {
+      $jsonSchema: {
+        bsonType: "object",
+        required: ["gameId", "version", "status"],
+        additionalProperties: true,
+        properties: {
+          gameId: { bsonType: "string" },
+          version: { bsonType: "int" },
+          status: { enum: ["draft", "published", "archived"] },
+        },
+      },
+    },
+    indexes: [{ keys: { gameId: 1 }, options: { unique: true, name: "gameId_unique" } }],
+  },
+  {
+    // Append-only publish history. A round records the `gameVersion` it ran
+    // under, so any historical round can be reconstructed against the exact
+    // math in force at the time — which is precisely what a regulator asks
+    // for, and impossible if published versions are ever overwritten.
+    name: "gameVersions",
+    validator: {
+      $jsonSchema: {
+        bsonType: "object",
+        required: ["gameId", "version"],
+        additionalProperties: true,
+        properties: {
+          gameId: { bsonType: "string" },
+          version: { bsonType: "int" },
+        },
+      },
+    },
+    indexes: [{ keys: { gameId: 1, version: 1 }, options: { unique: true, name: "gameId_version_unique" } }],
+  },
+  {
+    name: "rounds",
+    validator: {
+      $jsonSchema: {
+        bsonType: "object",
+        required: ["roundId", "operatorId", "playerId", "gameId", "status"],
+        additionalProperties: true,
+        properties: {
+          roundId: { bsonType: "string" },
+          operatorId: { bsonType: "string" },
+          playerId: { bsonType: "string" },
+          gameId: { bsonType: "string" },
+          status: { enum: ["open", "resolved", "recovered", "voided"] },
+        },
+      },
+    },
+    indexes: [
+      { keys: { roundId: 1 }, options: { unique: true, name: "roundId_unique" } },
+      { keys: { operatorId: 1, playerId: 1, createdAt: -1 }, options: { name: "operator_player_recent" } },
+      // Sparse: only rounds actually created from a client request carry a
+      // clientRequestId. This is what lets a retried spin short-circuit to
+      // the original round instead of spinning — and charging — twice.
+      {
+        keys: { operatorId: 1, playerId: 1, clientRequestId: 1 },
+        options: { unique: true, sparse: true, name: "operator_player_clientRequest_idempotency" },
+      },
+    ],
+  },
+  {
+    name: "players",
+    validator: {
+      $jsonSchema: {
+        bsonType: "object",
+        required: ["operatorId", "playerId", "balance"],
+        additionalProperties: true,
+        properties: {
+          operatorId: { bsonType: "string" },
+          playerId: { bsonType: "string" },
+          balance: { bsonType: "number" },
+        },
+      },
+    },
+    indexes: [{ keys: { operatorId: 1, playerId: 1 }, options: { unique: true, name: "operator_player_unique" } }],
+  },
+  {
+    name: "transactions",
+    validator: {
+      $jsonSchema: {
+        bsonType: "object",
+        required: ["transactionId", "operatorId", "playerId", "type", "amount", "status"],
+        additionalProperties: true,
+        properties: {
+          transactionId: { bsonType: "string" },
+          operatorId: { bsonType: "string" },
+          playerId: { bsonType: "string" },
+          type: { enum: ["debit", "credit"] },
+          amount: { bsonType: "number" },
+          status: { enum: ["pending", "completed", "failed", "voided"] },
+        },
+      },
+    },
+    indexes: [
+      // THE idempotency guarantee: a retry carrying the same transactionId
+      // hits this index rather than creating a second movement of money.
+      {
+        keys: { operatorId: 1, transactionId: 1 },
+        options: { unique: true, name: "operator_transaction_idempotency" },
+      },
+      { keys: { roundId: 1 }, options: { name: "roundId_lookup" } },
+      { keys: { operatorId: 1, playerId: 1, createdAt: -1 }, options: { name: "operator_player_statement" } },
+    ],
+  },
+  {
+    name: "bonusSessions",
+    validator: {
+      $jsonSchema: {
+        bsonType: "object",
+        required: ["bonusSessionId", "operatorId", "playerId", "gameId", "moduleId", "status"],
+        additionalProperties: true,
+        properties: {
+          bonusSessionId: { bsonType: "string" },
+          operatorId: { bsonType: "string" },
+          playerId: { bsonType: "string" },
+          gameId: { bsonType: "string" },
+          moduleId: { bsonType: "string" },
+          status: { enum: ["active", "resolved", "abandoned"] },
+        },
+      },
+    },
+    indexes: [
+      { keys: { bonusSessionId: 1 }, options: { unique: true, name: "bonusSessionId_unique" } },
+      { keys: { operatorId: 1, playerId: 1, status: 1 }, options: { name: "operator_player_active_lookup" } },
+      // One bonus session per round, enforced rather than assumed: a
+      // duplicated auto-start after a reconnect would otherwise be able to
+      // open a second paying session for a single triggering spin.
+      { keys: { roundId: 1 }, options: { unique: true, name: "roundId_unique" } },
+      // Drives the abandonment sweep without a collection scan.
+      { keys: { status: 1, createdAt: 1 }, options: { name: "status_age_sweep" } },
+    ],
+  },
+  {
+    // Single-use enforcement for launch tokens. The token's own signature
+    // and expiry check is stateless, but "this one has been used" needs
+    // somewhere to live. TTL matches token expiry — nothing needs
+    // remembering past the point the token would fail its own expiry check.
+    name: "usedLaunchTokens",
+    validator: {
+      $jsonSchema: {
+        bsonType: "object",
+        required: ["jti", "expireAt"],
+        additionalProperties: true,
+        properties: {
+          jti: { bsonType: "string" },
+          expireAt: { bsonType: "date" },
+        },
+      },
+    },
+    indexes: [
+      { keys: { jti: 1 }, options: { unique: true, name: "jti_unique" } },
+      { keys: { expireAt: 1 }, options: { expireAfterSeconds: 0, name: "expireAt_ttl" } },
+    ],
+  },
+  {
+    // Backoffice authoring state. A draft is freely editable and never
+    // playable — publishing is what moves it into `games`.
+    name: "gameDrafts",
+    validator: {
+      $jsonSchema: {
+        bsonType: "object",
+        required: ["gameId"],
+        additionalProperties: true,
+        properties: { gameId: { bsonType: "string" } },
+      },
+    },
+    indexes: [{ keys: { gameId: 1 }, options: { unique: true, name: "gameId_unique" } }],
+  },
+  {
+    name: "users",
+    validator: {
+      $jsonSchema: {
+        bsonType: "object",
+        required: ["userId", "email", "roles"],
+        additionalProperties: true,
+        properties: {
+          userId: { bsonType: "string" },
+          email: { bsonType: "string" },
+          roles: { bsonType: "array" },
+        },
+      },
+    },
+    indexes: [
+      { keys: { userId: 1 }, options: { unique: true, name: "userId_unique" } },
+      // Unique, because two accounts sharing an email is an ambiguity the
+      // login path has no correct way to resolve.
+      { keys: { email: 1 }, options: { unique: true, name: "email_unique" } },
+    ],
+  },
+  {
+    // Append-only. Nothing in this codebase updates or deletes from here.
+    name: "auditLogs",
+    validator: {
+      $jsonSchema: {
+        bsonType: "object",
+        required: ["entryId", "actorUserId", "action", "entityType", "entityId", "timestamp"],
+        additionalProperties: true,
+        properties: {
+          entryId: { bsonType: "string" },
+          actorUserId: { bsonType: "string" },
+          action: { bsonType: "string" },
+          entityType: { bsonType: "string" },
+          entityId: { bsonType: "string" },
+          timestamp: { bsonType: "string" },
+        },
+      },
+    },
+    indexes: [
+      { keys: { entryId: 1 }, options: { unique: true, name: "entryId_unique" } },
+      // The read is always "what happened to this thing recently".
+      { keys: { entityId: 1, timestamp: -1 }, options: { name: "entity_timeline" } },
+      { keys: { timestamp: -1 }, options: { name: "recent_activity" } },
+    ],
+  },
+  {
+    name: "rtpSimulationRuns",
+    validator: {
+      $jsonSchema: {
+        bsonType: "object",
+        required: ["runId", "gameId", "gameVersion", "simCount", "resultRtp"],
+        additionalProperties: true,
+        properties: {
+          runId: { bsonType: "string" },
+          gameId: { bsonType: "string" },
+          gameVersion: { bsonType: "int" },
+          // "number", not "long" or "double": a plain JS number serializes
+          // as whichever concrete BSON numeric type fits (int32 for a round
+          // 200000, double otherwise), never reliably one specific type.
+          // Requiring a specific one is a latent bug that only surfaces on
+          // the first real insert.
+          simCount: { bsonType: "number" },
+          resultRtp: { bsonType: "number" },
+          baseRtp: { bsonType: "number" },
+          bonusRtp: { bsonType: "number" },
+        },
+      },
+    },
+    indexes: [
+      { keys: { runId: 1 }, options: { unique: true, name: "runId_unique" } },
+      { keys: { gameId: 1, gameVersion: 1 }, options: { name: "game_version_lookup" } },
+    ],
+  },
+];
+
+/**
+ * Idempotently creates every collection's validator and indexes. Safe to
+ * run on every boot: `collMod` on an already-conformant collection is a
+ * no-op, and `createIndexes` ignores an index that already exists with the
+ * same spec.
+ */
+export async function applySchemas(db: Db): Promise<void> {
+  const existing = new Set((await db.listCollections({}, { nameOnly: true }).toArray()).map((c) => c.name));
+
+  for (const def of COLLECTIONS) {
+    if (!existing.has(def.name)) {
+      await db.createCollection(def.name, def.validator ? { validator: def.validator } : undefined);
+    } else if (def.validator) {
+      await db.command({ collMod: def.name, validator: def.validator, validationLevel: "moderate" });
+    }
+
+    if (def.indexes.length > 0) {
+      await db.collection(def.name).createIndexes(def.indexes.map((ix) => ({ key: ix.keys, ...ix.options })));
+    }
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "name": "@slots-engine/game-backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@fastify/cors": "^10.0.1",
+    "@slots-engine/ledger": "*",
+    "@slots-engine/logging": "*",
+    "@slots-engine/math-engine": "*",
+    "@slots-engine/mongo-schemas": "*",
+    "@slots-engine/rng": "*",
+    "@slots-engine/service-auth": "*",
+    "@slots-engine/shared-types": "*",
+    "fastify": "^5.2.0",
+    "mongodb": "^6.12.0"
+  }
+}

@@ -1,0 +1,29 @@
+{
+  "name": "slots-engine",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Slots Engine \u2014 config-driven multi-game slot platform. Core vertical slice: a player can spin end to end.",
+  "type": "module",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run typecheck && tsx --test \"packages/*/src/**/*.test.ts\" \"apps/*/src/**/*.test.ts\"",
+    "dev:game-backend": "npm run dev -w apps/game-backend",
+    "dev:game-socket": "npm run dev -w apps/game-socket",
+    "e2e:spin": "node scripts/e2e/spin-flow-check.mjs",
+    "e2e:backoffice": "node scripts/e2e/backoffice-flow-check.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "pino-pretty": "^13.0.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
