@@ -317,7 +317,7 @@ route rather than the rule that broke.
 
 | Module | Lines | Gap |
 |---|---:|---|
-| `backoffice-api/src/auth/users.ts` | 135 | Role changes and deactivation both bump `tokenVersion` — the mechanism that makes a demotion take effect immediately instead of up to eight hours later. Exercised through `/v1/users` route tests; the invariant deserves its own. |
+| ~~`backoffice-api/src/auth/users.ts`~~ | 135 | **Done.** 33 tests, all 12 mutations caught. The `tokenVersion` invariant now has direct tests on all four paths that must bump it (role change, deactivation, password reset, explicit revoke), plus monotonicity and the empty-patch no-op. Pairs with `middleware.test.ts`: that file proves the hook rejects a stale version, this one proves the version actually moves. |
 | `backoffice-api/src/games/drafts.ts` | 131 | `blankDraft`, `saveDraft`, `draftFromPublished`. This session found that `draftFromPublished` returns no `status` field and that publishing does not clear the draft — both discovered by a test failing, neither written down anywhere. |
 | `backoffice-api/src/games/publish.ts` | 131 | The RTP gate is well covered through routes (and closes the review's finding #2). The versioning and audit-write paths are not directly tested. |
 | ~~`backoffice-api/src/auth/passwords.ts`~~ | 73 | **Done, and it was not subtle.** 29 tests; found F19 (a truncated hash verified — 274 guesses to log in as anyone) and F20 (a malformed cost threw a 500 instead of returning false). 7 of 10 mutations caught; the three survivors are documented equivalents in the file header, not silence. Verified against the live stack, including all 12 pre-existing hashes in the real database and planted corrupt records. |
