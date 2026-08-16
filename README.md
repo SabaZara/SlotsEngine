@@ -552,6 +552,22 @@ Each now has a regression test. The pattern is worth internalising: a unit
 test verifies the thing you thought to check, and an integration test finds
 the thing you didn't.
 
+**A related habit: check what a fix would cost before making it.** The
+bonus-session timeout used to depend entirely on a 5-minute in-process
+sweep, so a stale session stayed playable if the interval was missed — a
+money path taking correctness from a timer. The obvious fix, and the one
+this project's own TODO proposed, was a Mongo TTL index.
+
+It would have been a regression. A TTL *deletes* the row, and `abandoned`
+is a meaningful state rather than garbage: a player returning to a
+timed-out bonus gets a precise `410 bonus_session_abandoned` — "that bonus
+round timed out". Delete the row and the same player gets "no such
+session", which is a worse answer to someone asking where their bonus went.
+The deadline is now enforced on every read instead, so expiry is a property
+of the data while the row survives to explain itself. Verified by
+backdating a live session on the running stack: 410, nothing paid, row
+intact, stored status still `active` — proof the sweep had not run.
+
 ---
 
 ## Authoring a game

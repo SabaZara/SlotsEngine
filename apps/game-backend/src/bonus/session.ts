@@ -150,7 +150,28 @@ export async function stepBonus(
   })) as (BonusSession & { seed: string; stepIndex: number }) | null;
 
   if (!current) throw new BonusSessionNotFoundError(`no bonus session '${input.bonusSessionId}'`);
-  if (current.status === "abandoned") {
+  if (current.status === "abandoned" || isExpired(current, Date.now())) {
+    // The deadline is enforced HERE, on the read, not only by the sweep.
+    //
+    // `sweepAbandonedSessions` runs on an interval inside this process, so
+    // relying on it alone makes expiry a property of a process being
+    // alive: if every instance is down for twenty minutes, or the interval
+    // is simply missed, a session that timed out long ago is still
+    // `active` in the database and would be playable on the next request.
+    // That is a money path deciding correctness from a timer.
+    //
+    // Checking the timestamp on the way past costs a comparison and makes
+    // the deadline a property of the DATA. The sweep is then what it
+    // should have been all along — bookkeeping that tidies rows, not the
+    // thing standing between a stale session and a payout.
+    //
+    // Deliberately NOT a Mongo TTL index, which is where docs/TODO.md
+    // pointed: a TTL deletes the row, and this branch is exactly why the
+    // row is worth keeping. A deleted session is indistinguishable from
+    // one that never existed, so a player returning to a bonus that timed
+    // out would get "no such session" instead of "that bonus round timed
+    // out" — strictly worse information, on the path where it matters
+    // most.
     throw new BonusSessionAbandonedError("this bonus session timed out and can no longer be played");
   }
   if (current.status === "resolved") {
@@ -235,14 +256,32 @@ export async function getPlayerBalance(db: Db, operatorId: string, playerId: str
   return getBalance(db, operatorId, playerId);
 }
 
+/** Whether a session is past its deadline, whatever its stored status says.
+ *
+ * One definition of "too old", used by both the read path and the sweep, so
+ * the two can never disagree about which sessions are expired. */
+function isExpired(session: { status: string; createdAt: string }, now: number): boolean {
+  return session.status === "active" && Date.parse(session.createdAt) < now - ABANDON_AFTER_MS;
+}
+
 /**
  * Closes sessions a player never came back to.
  *
  * A conditional `updateMany`, so it is idempotent and cheap to run
  * repeatedly, and it only ever moves `active` sessions — a resolved session
  * that already paid can never be reopened or swept.
+ *
+ * Note this is now *bookkeeping*, not a guard: `stepBonusSession` checks the
+ * deadline itself on every read, so an expired session is refused whether or
+ * not this has run. What the sweep still buys is that the stored status
+ * matches reality — queries and future reporting see `abandoned` rather
+ * than a row that only looks active until someone touches it.
  */
 export async function sweepAbandonedSessions(db: Db, now = Date.now()): Promise<number> {
+  // Same deadline as `isExpired`, expressed as a query rather than a
+  // predicate because it has to run inside Mongo. `createdAt` is an ISO
+  // string and ISO-8601 sorts lexicographically in UTC, which is what makes
+  // this string comparison correct rather than a coincidence.
   const cutoff = new Date(now - ABANDON_AFTER_MS).toISOString();
   const result = await db.collection("bonusSessions").updateMany(
     { status: "active", createdAt: { $lt: cutoff } },

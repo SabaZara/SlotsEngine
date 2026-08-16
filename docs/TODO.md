@@ -27,6 +27,7 @@ existed matters more than the fix, and that reasoning is easy to lose.
 | F9 | The `loginAttempts` validator specified `bsonType: ["long", "int"]` — the types those values conceptually are. Every JavaScript number serialises to BSON **double**, so Mongo rejected every write and each failed login returned 500. | Driving the real stack. 333 unit tests passed throughout: the in-memory stand-in has no validator, so it models the schema we intended rather than the one Mongo enforces — the same blind spot as F1. |
 | F10 | Login was throttled **per IP only**, so an attacker spreading attempts across many addresses got the full allowance *per address* against one account — every attempt looking like a first attempt. Now also counted per account, after body parsing, where the email is actually known. | Working down this list. 23 tests, each verified by mutation, plus the real-stack run that found F9. |
 | F11 | `e2e:load` is a heavy single caller (~400 spins plus a balance read each, one service name) against a per-caller 600/min limit, so it exhausted its own bucket mid-run. `balanceOf` destructured `balance` off a 429 body and returned `undefined`, which surfaced as "0 of 25 allowed through from a balance of undefined" — an overdraw failure that never happened. | Running it. The check now throws on a non-200 balance read and names the 429; CI raises the limit for its stack only. |
+| F12 | Bonus session expiry depended on an in-process interval: if every instance was down for twenty minutes, or one tick was missed, a session that timed out long ago was still `active` and would be played on the next request — a money path deciding correctness from a timer. The deadline is now checked on every read. | Working down this list. Verified against the running stack by backdating a live session: HTTP 410, nothing paid, row intact, and its stored status still `active` — proving the sweep had not run. |
 
 ---
 
@@ -48,7 +49,7 @@ This is deliberate for now — there is nowhere to deploy to — but it means
 
 GitHub requires Pro for branch protection on a private repo, so CI reports
 but cannot block a merge. A `pre-push` hook covers the realistic case
-locally (build, typecheck, 333 tests, ~30s), and is skippable with
+locally (build, typecheck, 337 tests, ~30s), and is skippable with
 `--no-verify` by design.
 
 Options: GitHub Pro at $4/month, make the repo public, or accept it. See
@@ -102,17 +103,27 @@ Worth noting this is the same finding the review made about the reference
 architecture's encryption key — a fair characterisation there, and it
 applies here too.
 
-### 5. Bonus sessions are swept, not expired by the database
+### 5. Bonus session rows are never reaped
 **Severity: low · Effort: low**
 
-`sweepAbandonedSessions` runs on a 5-minute interval inside `game-backend`
-and closes sessions older than 15 minutes. If every instance is down, or
-the interval is missed, sessions stay `active` indefinitely. A Mongo TTL
-index would make expiry a property of the data rather than of a process
-being alive.
+The correctness half of this is fixed (F12): `stepBonus` now checks the
+deadline on every read, so an expired session is refused whether or not
+`sweepAbandonedSessions` has run. Expiry is a property of the data, not of
+a process being alive.
 
-The sweep is idempotent and tested, so this is robustness, not
-correctness.
+**The TTL index this item originally proposed was the wrong fix**, and the
+reasoning is worth keeping. A TTL *deletes* the row — but `abandoned` is a
+meaningful state, not garbage: a player returning to a timed-out bonus gets
+a precise 410 `bonus_session_abandoned` ("that bonus round timed out"). Had
+the row been deleted, they would get "no such session" instead, which is
+strictly worse information on a money path. Cheaper storage is not worth a
+worse answer to a player asking where their bonus went.
+
+What remains is genuine housekeeping: resolved and abandoned sessions
+accumulate forever. That wants an archival policy with a retention window
+long enough to answer a player dispute — a different decision from
+"expire it", and one that should be made deliberately rather than by
+setting `expireAfterSeconds`.
 
 ### 6. The load check's bonus race depends on a seeded fixture
 **Severity: low · Effort: low**

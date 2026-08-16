@@ -188,6 +188,103 @@ describe("stepBonus", () => {
   });
 });
 
+describe("bonus session expiry is enforced on read, not only by the sweep", () => {
+  /** Backdates a session past the deadline without touching its status, so
+   * it is exactly what the database looks like when the sweep has not run:
+   * expired in fact, still `active` on paper. */
+  async function backdate(ctx: ReturnType<typeof setup>, bonusSessionId: string, ageMs: number) {
+    await ctx.raw
+      .collection("bonusSessions")
+      .updateOne(
+        { bonusSessionId },
+        { $set: { createdAt: new Date(Date.now() - ageMs).toISOString() } },
+      );
+  }
+
+  it("refuses a stepped session that timed out while the sweep never ran", async () => {
+    // The failure this closes: every instance down for twenty minutes, or
+    // one missed interval, and a session that expired long ago is still
+    // `active` in the database — playable, on the money path.
+    const ctx = setup();
+    const started = await startBonus(ctx.db, ctx.client, GAME, startInput("pick", "round-1"));
+    await backdate(ctx, started.publicState.bonusSessionId, 60 * 60 * 1000);
+
+    await assert.rejects(
+      () =>
+        stepBonus(ctx.db, ctx.client, GAME, {
+          operatorId: OPERATOR,
+          playerId: PLAYER,
+          bonusSessionId: started.publicState.bonusSessionId,
+          action: "pick",
+          payload: { tileIndex: 0 },
+        }),
+      /timed out/,
+      "an expired session must be refused whether or not the sweep has run",
+    );
+  });
+
+  it("pays nothing for an expired session", async () => {
+    const ctx = setup();
+    const started = await startBonus(ctx.db, ctx.client, GAME, startInput("pick", "round-1"));
+    const before = (await ctx.raw.collection("players").findOne({ playerId: PLAYER }))?.balance;
+    await backdate(ctx, started.publicState.bonusSessionId, 60 * 60 * 1000);
+
+    await assert.rejects(() =>
+      stepBonus(ctx.db, ctx.client, GAME, {
+        operatorId: OPERATOR,
+        playerId: PLAYER,
+        bonusSessionId: started.publicState.bonusSessionId,
+        action: "pick",
+        payload: { tileIndex: 0 },
+      }),
+    );
+
+    const after = (await ctx.raw.collection("players").findOne({ playerId: PLAYER }))?.balance;
+    assert.equal(after, before, "a refused expired session must not move money");
+  });
+
+  it("still plays a session that is inside the window", async () => {
+    // The guard must not be so eager that it breaks an ordinary bonus.
+    const ctx = setup();
+    const started = await startBonus(ctx.db, ctx.client, GAME, startInput("pick", "round-1"));
+    await backdate(ctx, started.publicState.bonusSessionId, 60 * 1000);
+
+    const result = await stepBonus(ctx.db, ctx.client, GAME, {
+      operatorId: OPERATOR,
+      playerId: PLAYER,
+      bonusSessionId: started.publicState.bonusSessionId,
+      action: "pick",
+      payload: { tileIndex: 0 },
+    });
+    assert.ok(result, "a session one minute old is not expired");
+  });
+
+  it("keeps the row, so an expired session is distinguishable from one that never existed", async () => {
+    // The reason this is a read-time check rather than a Mongo TTL index: a
+    // deleted row would turn "that bonus round timed out" into "no such
+    // session", which is strictly worse information on a money path.
+    const ctx = setup();
+    const started = await startBonus(ctx.db, ctx.client, GAME, startInput("pick", "round-1"));
+    await backdate(ctx, started.publicState.bonusSessionId, 60 * 60 * 1000);
+
+    await assert.rejects(
+      () =>
+        stepBonus(ctx.db, ctx.client, GAME, {
+          operatorId: OPERATOR,
+          playerId: PLAYER,
+          bonusSessionId: started.publicState.bonusSessionId,
+          action: "pick",
+          payload: { tileIndex: 0 },
+        }),
+      /timed out/,
+      "the error must name the timeout, not report a missing session",
+    );
+
+    const row = await ctx.raw.collection("bonusSessions").findOne({ bonusSessionId: started.publicState.bonusSessionId });
+    assert.ok(row, "the session row must survive so the timeout can still be explained");
+  });
+});
+
 describe("sweepAbandonedSessions", () => {
   it("closes stale active sessions and leaves fresh ones alone", async () => {
     const ctx = setup();
