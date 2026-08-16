@@ -546,6 +546,18 @@ testing was extracted into `paylineGrid.ts`, `reelStrip.ts` and the two
   the suite still green. Fixtures now carry a valid salt and a full 64-byte
   digest so the named field is the only thing wrong. Worth checking wherever
   a suite tests refusals by handing over obviously-junk input.
+- **A fallback inside the unit under test can absorb your malformed
+  fixture.** The `Number.isFinite` guard on the derived bonus multiplier
+  survived mutation at first, because the test fed it `rewardMultipliers:
+  []` — and the wheel module's *own* `rewards()` helper falls back to its
+  defaults for an empty array, so the value never reached the guard. The
+  test asserted nothing while reading as though it asserted the important
+  thing. `rewardMultipliers: [Infinity]` does reach it, because `Infinity`
+  passes the module's `typeof v === "number" && v >= 0` filter. This is the
+  "fixture already inside the allowlist" trap one layer deeper: not a
+  fixture that is already valid, but one the callee *repairs* before your
+  guard sees it. When a guard survives mutation, check whether the input
+  ever arrives.
 - **Asserting on a verdict cannot pin arithmetic.** The runs test's first
   suite caught 6 of 11 mutations, and every survivor was an off-by-one that
   a pass/fail assertion is structurally blind to: in a 1000-draw stream a
@@ -859,7 +871,7 @@ Three test suites now set `INITIAL_PLAYER_BALANCE` explicitly at the top of
 the file, because a player must be funded to spin at all — which is a better
 statement of the precondition than inheriting it from a global default.
 
-### G. A real finding from writing this list
+### ~~G. A real finding from writing this list~~ — largely closed
 
 **The publish gate's measured RTP is part assumption.**
 `simulateClient.ts` scores a triggered bonus at a flat
@@ -933,15 +945,57 @@ approximation rather than a defect — but it is the most substantive thing
 found while writing this list, and it was found by reading the file rather
 than by any test.
 
-Options, none free:
-- **Derive the multiplier per module** from its own configured payouts,
-  which is exact for `wheel` (it resolves at start from a fixed segment
-  set) and estimable for `pick`.
-- **Simulate the module for real** behind a flag, accepting the conflation
-  in exchange for a true number.
-- **Surface it in the publish response** so a designer sees "measured RTP
-  0.95, of which 0.12 is an estimated bonus contribution" rather than one
-  figure implying uniform confidence.
+**Three of the four options are now done.**
+
+- ~~**Derive the multiplier per module**~~ — shipped, and this was the
+  substantive one. `BonusModule` gained an optional
+  `expectedReturnMultiplier(params)`, so each module owns its own expected
+  value rather than a central switch guessing on its behalf.
+
+  **`wheel` is exact.** Every segment is equally likely — the property its
+  own docstring promises — so the answer is the arithmetic mean of the
+  reward table. For `reference-5x3` that is **16.875**, not the 20 that was
+  assumed: a 16% error on the figure feeding the gate. Measured at 100k
+  spins on one seed, the change moves the game's RTP from 0.9387 to 0.9267
+  and **doubles its drift** from 0.011 to 0.023 against a ±0.05 tolerance.
+  Still passes, but now on a number tied to the actual paytable.
+
+  **`pick` is analytic but assumes a stopping rule:**
+  `E[total] = P/(B+1) × mean(rewards)`, where the first factor is the
+  standard result for how many of P items precede the first of B markers in
+  a random arrangement. Verified against a 400k-round simulation across five
+  configurations; worst disagreement 0.07 on a value of 26.5. The assumption
+  is that a player keeps picking until a blank — which is the only behaviour
+  the module permits today, since `step` accepts no cash-out. Recorded in
+  the source so that if one is ever added, this becomes an upper bound
+  rather than a silently wrong number.
+
+  Deriving is **not** playing the module, and the original reasoning for not
+  playing it still stands: folding in a module's own randomness would
+  conflate "is the base game's maths right" with "is the bonus module's
+  maths right". Computing the expected value analytically keeps the two
+  questions separate while removing the guess.
+
+- ~~**Surface it in the publish response**~~ — shipped earlier, and now
+  extended: the report carries `bonusReturnSource` (`"derived"` or
+  `"assumed"`) and `bonusModuleId` alongside the figure, and **the audit
+  entry records both**. The share alone could not distinguish them, and they
+  are very different evidence — 7% resting on arithmetic over the real
+  reward table versus 7% resting on a flat guess are the same number. An
+  auditor reading a stored record years later cannot be expected to know
+  which modules supported derivation on the day it was written.
+
+- **Simulate the module for real** behind a flag — still open, and now
+  considerably less valuable. Deriving closed most of the gap for the two
+  shipped modules at none of the conflation cost.
+
+**Where it still falls back, honestly.** A game declaring **no** module, or
+**more than one**, and any module not implementing the hook. The
+multi-module case is deliberate: weighting each module by its trigger share
+is something nothing in this codebase currently expresses, and deriving from
+the first while ignoring the rest would be *worse* than the flat constant,
+because the result would look derived. Both shipped fixtures declare exactly
+one module.
 
 ### F. What I would NOT do next, and why
 

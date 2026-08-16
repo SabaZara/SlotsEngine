@@ -130,6 +130,15 @@ export async function publishDraft(
       // And how much of that figure was measured rather than assumed — see
       // docs/TODO.md item G.
       estimatedBonusShare: simulation.confidence.estimatedShare,
+      // Whether that estimated share was DERIVED from the module's own
+      // configured payouts or fell back to a flat constant. The share alone
+      // does not say: 7% resting on arithmetic over the real reward table
+      // and 7% resting on a guess are the same number and very different
+      // evidence. An auditor reading this record years later cannot be
+      // expected to know which modules supported derivation on the day it
+      // was written, so the record says.
+      bonusReturnSource: simulation.confidence.bonusReturnSource,
+      bonusReturnMultiplier: simulation.confidence.assumedBonusReturnMultiplier,
       ...(options.force && drift > RTP_TOLERANCE ? { forcedPastRtpTolerance: true } : {}),
     },
   });

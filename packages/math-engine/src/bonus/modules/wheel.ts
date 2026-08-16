@@ -44,4 +44,21 @@ export const wheelModule: BonusModule = {
     // returning a no-op keeps a client bug loud instead of silent.
     throw new InvalidBonusActionError("the wheel module resolves on start and accepts no further actions");
   },
+
+  /**
+   * **Exact**, not an estimate. Every segment is equally likely — that is
+   * the property the module's own docstring promises — so the expected
+   * multiplier is the arithmetic mean of the reward table, and there is no
+   * player decision and no accumulation to model.
+   *
+   * Reads the table through the same `rewards()` helper `start` uses, so a
+   * malformed `rewardMultipliers` falls back to exactly the defaults the
+   * round would actually pay. Deriving from a separately-parsed copy would
+   * be the classic way for this number to drift from reality without
+   * anything failing.
+   */
+  expectedReturnMultiplier(params: Record<string, unknown>): number {
+    const table = rewards(params);
+    return table.reduce((sum, multiplier) => sum + multiplier, 0) / table.length;
+  },
 };

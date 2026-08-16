@@ -211,3 +211,111 @@ describe("bonus registry", () => {
     assert.throws(() => getBonusModule("nope"), /no bonus module registered/);
   });
 });
+
+/**
+ * `expectedReturnMultiplier` — what the publish gate uses in place of
+ * playing the module (docs/TODO.md item G).
+ *
+ * Tested here, at the module, as well as at the adapter: these pin the
+ * *arithmetic*, while `simulateClient.test.ts` pins the wiring and the
+ * fallbacks. The distinction matters because a 100k-spin simulation cannot
+ * tell 16.875 from 16.9 — sampling noise is larger than the difference — so
+ * only a direct assertion on the number is capable of catching a drift.
+ */
+describe("expectedReturnMultiplier", () => {
+  describe("wheel — exact, since every segment is equally likely", () => {
+    it("is the arithmetic mean of the configured reward table", () => {
+      // [10,20,30,40] -> 25. Chosen so the answer is checkable by eye.
+      assert.equal(getBonusModule("wheel").expectedReturnMultiplier!({ rewardMultipliers: [10, 20, 30, 40] }), 25);
+    });
+
+    it("agrees with what the module actually pays, over many rounds", () => {
+      // The claim is that this number describes the real payout. Playing
+      // 40k rounds against the same table must converge to it — if the
+      // derivation ever drifts from `start`, this catches it where an
+      // assertion on the formula alone could not.
+      const params = { rewardMultipliers: [2, 3, 5, 8, 12, 20, 35, 50] };
+      const expected = getBonusModule("wheel").expectedReturnMultiplier!(params)!;
+
+      let total = 0;
+      const rounds = 40_000;
+      for (let i = 0; i < rounds; i++) {
+        const out = getBonusModule("wheel").start({ totalBet: 1_000_000, params, state: {}, rng: deriveStepRng(`w${i}`, 0) });
+        total += out.totalWin / 1_000_000;
+      }
+      const actual = total / rounds;
+
+      assert.ok(
+        Math.abs(actual - expected) < 0.5,
+        `derived ${expected} but 40k rounds averaged ${actual.toFixed(4)}`,
+      );
+    });
+
+    it("uses the module's own defaults for a malformed table", () => {
+      // Must agree with what `start` would pay, which falls back the same
+      // way. Deriving from a separately-parsed copy is how the two drift.
+      assert.equal(getBonusModule("wheel").expectedReturnMultiplier!({ rewardMultipliers: "nope" }), 16.875);
+      assert.equal(getBonusModule("wheel").expectedReturnMultiplier!({}), 16.875);
+    });
+  });
+
+  describe("pick — prizeCount/(blanks+1) x mean reward", () => {
+    it("computes the expected accumulation for a player who picks until a blank", () => {
+      // 9 tiles, 1 blank, single reward of 10: 8/(1+1) x 10 = 40.
+      assert.equal(
+        getBonusModule("pick").expectedReturnMultiplier!({ tileCount: 9, blankCount: 1, rewardMultipliers: [10] }),
+        40,
+      );
+    });
+
+    it("agrees with what the module actually pays under that stopping rule", () => {
+      // The formula's justification, checked against the module rather than
+      // against itself. Plays each round by revealing tiles in order until a
+      // blank ends it — which is what a player with no cash-out can do.
+      const params = { tileCount: 9, blankCount: 2, rewardMultipliers: [1, 2, 3, 5, 8, 12, 20, 40] };
+      const expected = getBonusModule("pick").expectedReturnMultiplier!(params)!;
+      const bet = 1_000_000;
+
+      let total = 0;
+      const rounds = 20_000;
+      for (let i = 0; i < rounds; i++) {
+        let out = getBonusModule("pick").start({ totalBet: bet, params, state: {}, rng: deriveStepRng(`p${i}`, 0) });
+        let state = out.state;
+        for (let tile = 0; tile < 9 && !out.done; tile++) {
+          out = getBonusModule("pick").step({
+            totalBet: bet,
+            state,
+            params,
+            action: "pick",
+            payload: { tileIndex: tile },
+            rng: deriveStepRng(`p${i}`, tile + 1),
+          });
+          state = out.state;
+        }
+        total += out.totalWin / bet;
+      }
+      const actual = total / rounds;
+
+      assert.ok(
+        Math.abs(actual - expected) < 1.5,
+        `derived ${expected.toFixed(4)} but 20k played rounds averaged ${actual.toFixed(4)}`,
+      );
+    });
+
+    it("pays less as blanks rise, since a round ends sooner", () => {
+      const at = (blankCount: number) =>
+        getBonusModule("pick").expectedReturnMultiplier!({ tileCount: 9, blankCount, rewardMultipliers: [10] })!;
+
+      assert.ok(at(1) > at(2) && at(2) > at(4), "more blanks must mean a smaller expected return");
+    });
+
+    it("never reports a non-positive return, however the tiles are configured", () => {
+      // `config` guarantees at least one prize tile. Without that floor the
+      // formula could report zero, and a zero bonus return would silently
+      // drop the whole bonus contribution from the gate's input.
+      const result = getBonusModule("pick").expectedReturnMultiplier!({ tileCount: 3, blankCount: 99, rewardMultipliers: [10] })!;
+
+      assert.ok(result > 0 && Number.isFinite(result), `got ${result}`);
+    });
+  });
+});

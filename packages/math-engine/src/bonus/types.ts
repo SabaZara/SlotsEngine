@@ -49,4 +49,23 @@ export interface BonusModule {
   start(input: Omit<BonusStepInput, "action" | "payload">): BonusStepOutput;
   /** Called for each client action on a multi-step module. */
   step(input: BonusStepInput): BonusStepOutput;
+  /**
+   * Expected return of one round of this module, as a multiple of the bet,
+   * derived from the module's OWN configured payouts.
+   *
+   * This exists because the publish gate needs a number for a bonus it does
+   * not play. It used to use a flat constant of 20 for every module and
+   * every configuration, and that constant moves the gate's own input by
+   * roughly 0.17 RTP against a tolerance of ±0.05 — larger than the band it
+   * is compared against (docs/TODO.md item G).
+   *
+   * A module implements this only when its expected value is genuinely
+   * computable from `params` alone. **Returning `undefined` is a real
+   * answer, not a stub**: it means "this module's return depends on
+   * something params cannot tell you" — player strategy, or state this
+   * function does not see. The caller must then fall back to an assumption
+   * and say that it did, rather than quoting a derived-looking number that
+   * was guessed.
+   */
+  expectedReturnMultiplier?(params: Record<string, unknown>): number | undefined;
 }

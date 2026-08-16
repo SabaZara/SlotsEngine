@@ -426,10 +426,32 @@ describe("the audit trail", () => {
     await publishDraft(db, goodDraft(), "designer-1");
 
     const entry = await db.collection("auditLogs").findOne({ action: "game.publish" });
-    const share = (entry?.diff as Record<string, unknown>).estimatedBonusShare as number;
+    const diff = entry?.diff as Record<string, unknown>;
+    const share = diff.estimatedBonusShare as number;
 
     assert.equal(typeof share, "number");
     assert.ok(share >= 0 && share < 1, `estimatedBonusShare ${share} should be a proper fraction`);
+  });
+
+  it("records whether the bonus figure was derived or merely assumed", async () => {
+    // The share alone does not distinguish them, and they are very
+    // different evidence: 7% resting on arithmetic over the game's real
+    // reward table, versus 7% resting on a flat guess about a module the
+    // simulation never played. An auditor reading this record later cannot
+    // be expected to know which modules supported derivation at the time,
+    // so the record has to say.
+    const db = setup();
+
+    await publishDraft(db, goodDraft(), "designer-1");
+
+    const entry = await db.collection("auditLogs").findOne({ action: "game.publish" });
+    const diff = entry?.diff as Record<string, unknown>;
+
+    assert.ok(
+      diff.bonusReturnSource === "derived" || diff.bonusReturnSource === "assumed",
+      `bonusReturnSource should name a provenance, got ${JSON.stringify(diff.bonusReturnSource)}`,
+    );
+    assert.equal(typeof diff.bonusReturnMultiplier, "number", "and the figure it actually used");
   });
 
   it("writes no audit entry and no simulation run for a refused publish", async () => {
