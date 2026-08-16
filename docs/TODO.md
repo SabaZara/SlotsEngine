@@ -1,11 +1,60 @@
 # Known bugs, gaps and next steps
 
-Ordered by what I would actually do next, not by severity alone — a few
-cheap items near the top because they unblock or de-risk the rest.
+Numbered items keep their original numbers forever, so a commit message or a
+comment referring to "item 3b" still resolves years later. That means the
+numbering is **not** a priority order and has not been one for a while — read
+section E for what actually blocks going live.
 
 Status key: **Open** · **Open (accepted)** — a known limitation we have
 decided to live with for now, recorded so it is a decision rather than an
-oversight.
+oversight. A struck-through heading is closed, and the entry is kept rather
+than deleted because in almost every case the *reasoning* outlived the fix.
+
+## Where this stands
+
+**Everything testable is tested; what remains is mostly infrastructure that
+needs a decision rather than code.**
+
+- **23 bugs found and fixed** (F1–F23), each recorded below with *how it was
+  found*. **Not one was found by a test that already passed** — the closest
+  is F17, where a mutation of existing code exposed a stand-in that had been
+  silently ignoring an operator. Counted:
+
+  | How | Count | Which |
+  |---|---:|---|
+  | Writing the *first* test for a file | 9 | F13, F15, F16, F18–F23 |
+  | Running the real stack | 8 | F1, F6–F12 |
+  | CI, on a clean checkout | 2 | F3, F4 |
+  | Reading the reference repo | 2 | F5, F14 |
+  | Mutation-testing existing code | 1 | F17 |
+  | Found while fixing another | 1 | F2 |
+
+  The 9 and the 8 are the load-bearing rows, and they say different things.
+  **Writing a file's first test found a bug 9 times across 55 test files** —
+  roughly one in six, which is the argument for covering a module at all
+  rather than covering an already-covered one more deeply. **Running the real
+  stack found 8**, and no amount of test-writing substitutes for it: every
+  one of those was invisible to a green suite, because the in-memory stand-in
+  models no schema validator, no rollback, and no real index.
+
+  The row that should be zero and is: **existing tests caught nothing**. That
+  is not a criticism of them — a test that never fails is doing its job as a
+  regression guard — but it does mean the suite's value here has been in the
+  *writing*, and its value from here on is in the *guarding*.
+- **1096 tests**, of which 48 are conformance cases run against real MongoDB.
+- **Sections A, B and C are closed** — no source module with meaningful
+  logic is without a direct test. The React components are the deliberate
+  exception, recorded in section C.
+- **The deploy pipeline is built and green** (item 1). It builds five images
+  per commit and stops, honestly, at the point where a server would be.
+
+The three things standing between this and a running service, in order:
+
+| # | What | Blocked on |
+|---|---|---|
+| 1 | A host to deploy to (item 1) | A box and six secrets — a provisioning decision, not engineering. |
+| 2 | Secrets in a managed store (item 4) | Choosing one. The deploy already injects them from GitHub rather than a committed file. |
+| 3 | Shared rate limits (item 3b) | Redis, and it is also what blocks zero-downtime deploys. |
 
 ---
 
@@ -473,7 +522,7 @@ layer are now covered.** What remains is mostly the surfaces around them —
 boot guards, the admin auth hook, the frontend, and the operational gaps
 that were always known.
 
-### A. Untested and genuinely uncovered — do these first
+### ~~A. Untested and genuinely uncovered~~ — both sweeps closed
 
 These have no direct test AND no meaningful indirect coverage.
 
@@ -508,7 +557,7 @@ what gets tested once you are in there.
 | ~~`game-socket/src/index.ts`~~ | 118 | **Done**, by splitting it. The assembly moved to `server.ts` as `createSocketServer`, following `backoffice-api`'s existing `app.ts`/`index.ts` convention, leaving `index.ts` as config-plus-listen. 17 tests drive a real server on an ephemeral port with a real `ws` client. Two gaps are stated in the file header rather than left silent: the `maxPayload` ceiling and the `readyState` guard both survive mutation, and both were judged not worth a fragile test. Verified end to end — `e2e:spin` passes in full against the rebuilt container. |
 | ~~`game-backend/src/index.ts`~~ | 175 | **Done**, split the same way: composition moved to `app.ts` as `buildApp`, leaving `index.ts` with connections, the sweep interval and shutdown. 14 tests, 10 of 11 mutations caught — **including regression tests for F6 and F7 themselves**, the two bugs that actually happened in this file. Verified live: rebuilt, `e2e:spin` and all four sections of `e2e:load` pass under real concurrency. |
 
-### B. Covered indirectly, worth direct tests
+### ~~B. Covered indirectly, worth direct tests~~ — closed
 
 Real logic reachable only through route tests today, so a failure names a
 route rather than the rule that broke.
@@ -523,7 +572,7 @@ route rather than the rule that broke.
 | ~~`shared-types/src/money.ts`~~ | 84 | **Done.** 26 tests, all eight mutations caught. The "no minor unit created or lost" property is pinned exhaustively over totals 0–60 × parts 1–12, plus a spread check — summing correctly is not enough on its own, since `[total, 0, 0, …]` also sums correctly. Adapted from the reference's `money.test.ts` (near-identical module), extended with the cases it lacked: negative totals, `-0`, and the `70.07 * 100 = 7006.999…` float error that is the reason this module exists. |
 | ~~`shared-types/src/rbac.ts`~~ | 65 | **Done.** 14 tests, all six mutations caught. Note the file is types plus `ROLE_IDS` and `toPublicUser` — there are no "permission sets" here, so this row overstated it; authorisation lives in `requireRole`. Writing the tests found F18. |
 
-### C. Frontend — the request layers are now covered
+### ~~C. Frontend — the request layers~~ — closed, with a stated stopping point
 
 `game-frontend/src/api.ts` (20 tests) and `backoffice-frontend/src/api.ts`
 (15 tests) are done. Between them they close all three of the specific
@@ -571,19 +620,39 @@ testing was extracted into `paylineGrid.ts`, `reelStrip.ts` and the two
 
 ### D. Test-infrastructure debt
 
-- **`fakeMongo` is ~340 lines and still not directly tested.** The
-  conformance suite now pins its agreement with real Mongo on 19
-  behaviours, which is the more valuable half — but it has grown four times
-  this session (exclusion projections, `$unset`, inclusion projections, and
-  the F1/F9 lessons) and every unit test in the repo trusts it.
-- **Three of the last five findings were in the stand-in, not the code**
-  (F16, F17, F21). Each was the same shape: the fake quietly more permissive
-  than Mongo, so a correct assertion failed against correct code or a test
-  passed while asserting nothing. The pattern is strong enough to be worth
-  stating as a rule — **when a test fails against code that reads correctly,
-  suspect the fake before the code** — and it argues for pinning each new
-  `fakeMongo` behaviour with a conformance test at the moment it is added,
-  which is now the practice.
+- **`fakeMongo` is 562 lines and still has no test of its own.** It is
+  covered instead by **48 conformance cases run against real MongoDB**, which
+  is the more valuable half: a stand-in's only meaningful property is
+  agreement with the thing it stands in for, and a unit test of the fake
+  would pin its behaviour to itself. The file has roughly doubled in size
+  under that suite, and every unit test in the repo trusts it — so the
+  conformance count is the number to watch, not the line count.
+
+  **Nine divergences have been found and fixed** (see the bullets below).
+  They split three ways, and the split is the useful part: three where the
+  fake was *more permissive* than Mongo, three *more restrictive*, and three
+  *silent* — accepting an option or operator and ignoring it. Only the last
+  group is unique to a stand-in; the other six are ordinary bugs that happen
+  to live in test infrastructure.
+
+  **None was reachable from any existing caller**, so no amount of running
+  the suite would have surfaced them. All nine came from probing: running the
+  same operations against both engines in a throwaway script and diffing the
+  results. That took minutes and found what reading the file had not.
+- **Three of the F-rows were in the stand-in, not the code** (F16, F17,
+  F21) — the ones that surfaced through a failing test rather than a probe.
+  Each was the same shape: the fake quietly more permissive than Mongo, so a
+  correct assertion failed against correct code, or a test passed while
+  asserting nothing.
+
+  The rule that came out of them still holds and is worth keeping at the top
+  of this section: **when a test fails against code that reads correctly,
+  suspect the fake before the code.** Its limit is now known, though — six of
+  the nine divergences never failed a test at all, so the rule catches the
+  ones that announce themselves and nothing else. Pinning each new
+  `fakeMongo` behaviour with a conformance test at the moment it is added is
+  the practice; **probing for divergences the callers do not exercise** is
+  what actually finds them.
 - **The fake implements only the operators this codebase happens to use.**
   `$push` and friends are still absent. Since F17 an unknown update operator
   throws rather than being ignored, so the *silent* half of that problem is
@@ -908,6 +977,36 @@ Ordered by what stands between the current state and a running service.
 The dependency worth noticing: **3b blocks zero-downtime**, so the deploy's
 brief gap during `up -d` is not independently fixable. Both are recorded in
 `docs/DEPLOY.md`'s closing section rather than implied away.
+
+#### Two decisions waiting on the first box
+
+Both are small and neither should be made unilaterally, so they are recorded
+here rather than done.
+
+**The environment should probably be called `staging`, not `production`.**
+Both workflows name a GitHub environment `production`. For a project at this
+stage that is likely untrue, and a deployment history page that claims
+otherwise is worse than one that does not exist. The reference repo landed in
+exactly this ambiguity and left it visible: its overlay is headed
+`# Remote/staging deploy overlay` while its workflow calls the same box
+production. Renaming is a one-line change in each file, and the honest
+sequence is staging first, a second environment later if there is ever
+something to separate.
+
+**Mongo's port must not be published on a public box.** `infra/docker-compose.yml`
+maps `27018:27017`, which is right locally and dangerous anywhere reachable:
+this stack runs Mongo with **no authentication at all** (`mongodb://mongo:27017`,
+no credentials anywhere), so any public reachability means anyone can read,
+write or delete every collection. The reference hit this and recorded
+something worth inheriting — binding to `127.0.0.1` instead of removing the
+mapping triggered a Docker networking bug on their host where the container's
+own network attachment silently failed, breaking sibling DNS resolution,
+reproduced three times. Omitting `ports:` entirely both sidesteps that and is
+the correct posture: `docker exec … mongosh` covers real operational access.
+
+A `docker-compose.staging.yml` overlay is the natural home for both, plus
+`restart: always`. Not written yet, because the shape should follow the box
+rather than precede it.
 
 ### I. The internal routes' rate limit is unreachable in practice
 
