@@ -285,17 +285,28 @@ long enough to answer a player dispute — a different decision from
 "expire it", and one that should be made deliberately rather than by
 setting `expireAfterSeconds`.
 
-### 6. The load check's bonus race depends on a seeded fixture
-**Severity: low · Effort: low**
+### ~~6. The load check's bonus race depends on a seeded fixture~~ — surfaced
 
-Section 4 needs `pick-bonus-5x3`, which is only seeded when
-`SEED_TEST_FIXTURES=true`. CI sets it. Run the load check against a stack
-started without it and the section skips — honestly, with a message
-naming the flag, but it skips.
+The dependency itself is unchanged and still correct: section 4 needs
+`pick-bonus-5x3`, which is a **test instrument** with a deliberately broken
+RTP (100% bonus trigger rate), so seeding it into every environment would be
+worse than skipping. CI sets `SEED_TEST_FIXTURES=true`.
 
-Acceptable, because the alternative is seeding a game with a
-deliberately-broken RTP into every environment. Worth knowing before
-reading a local run as complete.
+What was actually wrong was the *reporting*. A skip printed mid-run scrolls
+away, and the summary then said "All load checks passed" whether four
+sections ran or two — a true sentence giving a false impression, in the one
+script whose entire purpose is evidence about the money path.
+
+Skips are now collected and restated in the summary, each with its reason and
+its remedy, and a partial run says plainly that it **establishes less than a
+complete one**. A full run now makes the positive claim explicitly: "every
+section ran".
+
+Both paths were verified against the live stack — a complete run, and a run
+pointed at an unpublished bonus game.
+
+The same treatment covers section 3's skip (item 8, the overdraw random
+walk), which had the identical problem.
 
 ---
 

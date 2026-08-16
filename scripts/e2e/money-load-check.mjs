@@ -49,6 +49,26 @@ const check = (label, condition, detail = "") => {
   }
 };
 
+/**
+ * Sections that did not run, and why.
+ *
+ * A skip printed mid-run scrolls away, and the summary then says "All load
+ * checks passed" whether four sections ran or two — so a partial run reads
+ * exactly like a complete one, which is the failure mode this whole script
+ * exists to avoid. Collected here and restated at the end, where the reader
+ * is actually deciding what the run established.
+ *
+ * `SKIPPABLE` names why each one can skip, so a skip is a known limitation
+ * rather than a surprise: sections 3 and 4 are documented as items 8 and 6
+ * in docs/TODO.md.
+ */
+const skipped = [];
+const skip = (section, reason, remedy) => {
+  skipped.push({ section, reason, remedy });
+  console.log(`  – skipped (not a failure): ${reason}`);
+  if (remedy) console.log(`    ${remedy}`);
+};
+
 /** Mirrors @slots-engine/service-auth. Deliberately reimplemented: a test
  * that imports the signer cannot detect the signer disagreeing with the
  * verifier, which is exactly the sort of drift this should catch. */
@@ -273,7 +293,11 @@ console.log("\n3. Concurrent spins cannot overdraw the balance");
   }
 
   if (drained >= bigBet) {
-    console.log(`  – the walk never went broke (balance ${drained} after ${spent.length} spins); skipping (not a failure)`);
+    skip(
+      "3. Concurrent spins cannot overdraw",
+      `the walk never went broke (balance ${drained} after ${spent.length} spins)`,
+      "Inherent: draining a balance is a random walk at ~95% return. Observed to run in 5 of 6 local runs — see item 8 in docs/TODO.md.",
+    );
   } else {
     const opening = drained;
     // Every one of these would overdraw, since the balance is now under a
@@ -319,9 +343,11 @@ console.log("\n4. Concurrent bonus steps: exactly one wins the claim");
   const probe = await fetch(`${BACKEND}/public/games/${bonusGame}`);
 
   if (!probe.ok) {
-    console.log(
-      `  – '${bonusGame}' is not published; skipping (not a failure).` +
-        " Start game-backend with SEED_TEST_FIXTURES=true to run this section.",
+    skip(
+      "4. Concurrent bonus steps",
+      `'${bonusGame}' is not published`,
+      "Start game-backend with SEED_TEST_FIXTURES=true to run this section. The fixture is " +
+        "a test instrument with a deliberately broken RTP, which is why it is not seeded everywhere.",
     );
   } else {
   // Spin until a bonus triggers. Bounded so a game without a reachable
@@ -333,7 +359,11 @@ console.log("\n4. Concurrent bonus steps: exactly one wins the claim");
   }
 
   if (!opened) {
-    console.log("  – no bonus triggered in 400 spins; skipping (not a failure)");
+    skip(
+      "4. Concurrent bonus steps",
+      `no bonus triggered in 400 spins on '${bonusGame}'`,
+      "Expected only if BONUS_GAME_ID points at a game whose bonus is rare — pick-bonus-5x3 triggers constantly.",
+    );
   } else {
     const start = await call("/internal/bonus/start", {
       operatorId: OPERATOR,
@@ -428,10 +458,32 @@ console.log("\n4. Concurrent bonus steps: exactly one wins the claim");
   }
 }
 
+if (failures > 0) {
+  console.error(`\n${failures} load check(s) FAILED.\n`);
+  process.exit(1);
+}
+
+// Restated here rather than left in the scroll-back. "All load checks
+// passed" after a run where half the sections skipped is a true sentence
+// that gives a false impression, and this script's entire purpose is
+// evidence about the money path — so what did NOT run belongs next to what
+// did.
+if (skipped.length > 0) {
+  console.log(`\nAll load checks that RAN passed — but ${skipped.length} section(s) did not run:\n`);
+  for (const { section, reason, remedy } of skipped) {
+    console.log(`  – ${section}: ${reason}`);
+    if (remedy) console.log(`    ${remedy}`);
+  }
+  console.log(
+    "\nThis run therefore establishes less than a complete one. Each skip above is a\n" +
+      "known limitation rather than a surprise; none is a failure.\n",
+  );
+} else {
+  console.log("\nAll load checks passed — every section ran.\n");
+}
+
 console.log(
-  failures === 0
-    ? "\nAll load checks passed.\n\nThis is evidence under contention, not a proof of correctness:\n" +
-        "an interleaving that did not occur here may still exist.\n"
-    : `\n${failures} load check(s) FAILED.\n`,
+  "This is evidence under contention, not a proof of correctness:\n" +
+    "an interleaving that did not occur here may still exist.\n",
 );
-process.exit(failures === 0 ? 0 : 1);
+process.exit(0);
