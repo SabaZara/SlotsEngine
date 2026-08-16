@@ -1,6 +1,6 @@
 import type { Db } from "mongodb";
 import type { GameDefinition } from "@slots-engine/shared-types";
-import { PICK_BONUS_GAME, REFERENCE_GAME } from "@slots-engine/math-engine";
+import { FREE_SPINS_GAME, PICK_BONUS_GAME, REFERENCE_GAME } from "@slots-engine/math-engine";
 
 export class GameNotFoundError extends Error {}
 
@@ -30,6 +30,12 @@ export async function loadGameDefinition(db: Db, gameId: string): Promise<GameDe
  */
 export async function seedReferenceGame(db: Db): Promise<void> {
   await seedGame(db, REFERENCE_GAME);
+
+  // Seeded unconditionally, unlike the pick fixture below, because it is a
+  // real game rather than an instrument: tuned to a believable 0.95 and
+  // fitted by simulation, so it passes the publish gate on its merits.
+  // `free-spins-game.test.ts` is that gate run against the fixture itself.
+  await seedGame(db, FREE_SPINS_GAME);
 
   // The pick-bonus fixture is a TEST INSTRUMENT, not a game: its bonus is
   // tuned to trigger constantly so the multi-step step race is reachable in

@@ -41,7 +41,7 @@ needs a decision rather than code.**
   is not a criticism of them — a test that never fails is doing its job as a
   regression guard — but it does mean the suite's value here has been in the
   *writing*, and its value from here on is in the *guarding*.
-- **1138 tests**, of which 50 are conformance cases run against real MongoDB.
+- **1176 tests**, of which 50 are conformance cases run against real MongoDB.
 - **Sections A, B and C are closed** — no source module with meaningful
   logic is without a direct test. The React components are the deliberate
   exception, recorded in section C.
@@ -757,6 +757,82 @@ Also recorded deliberately: re-registering the same id **replaces** rather
 than refusing. That is what keeps the bottom-of-file registration idempotent
 if the module is imported twice, and it is now a decision someone has to see
 a test fail to change.
+
+### ~~N. Free spins~~ — shipped
+
+The engine's first feature built as a feature rather than as a fix. Three
+bonus modules now: `wheel` (single-step), `pick` (multi-step, self-contained)
+and `freeSpins` (multi-step, **played on the game's own reels**).
+
+**The interface change is the interesting part.** Free spins is the first
+module whose outcome is not a function of `params` alone — a free spin is a
+real spin, drawn from the same strips, paylines, wilds and scatters the base
+game uses. `BonusStepInput` therefore gained two *optional* fields,
+`gameDef` and `sessionSeed`, and optional is the decision:
+
+- A self-contained module **must not** be able to reach the game definition.
+  That is what keeps its expected value computable by reading params rather
+  than by reading module source — the property the publish gate depends on.
+- A module that needs them **refuses when they are absent** rather than
+  falling back. A free spin evaluated against anything else pays out under
+  mathematics nobody configured, and a silent default would make that
+  indistinguishable from a correct round. Same reasoning as `getMathEngine`
+  refusing an unknown id.
+
+`sessionSeed` is deliberately not `rng`. The per-step generator's stream
+depends on how many times `step` was called, so a round seeded from it would
+replay only if the call sequence were reproduced too. Each spin's seed is
+`sha256(sessionSeed:freespin:index)`, so the whole round replays from one
+stored value.
+
+**Retriggering is capped, and the cap is load-bearing.** A free spin can
+trigger the feature again because it is a real spin. With per-spin trigger
+probability p, a round terminates only because N·p < 1 — raise either enough
+and the session never ends and pays without bound. `maxRetriggers` makes the
+worst case finite and computable, which is what lets the gate reason about
+the module at all.
+
+**A mutation survived, and the reason is the useful part.** Removing the
+retrigger cap entirely failed *nothing*. `reference-5x3` triggers on
+**0.415% of spins** (measured over 20,000), so a ten-spin round retriggers
+about once every 24 rounds and no test ever reached a second one. **A fixture
+that cannot reach a branch cannot test it**, and the suite was green either
+way — section D's lesson, arriving in the engine this time. Fixed with an
+always-triggering fixture (`probabilityTrigger: 1`) which exercises the cap
+on the first spin; the runaway case now terminates at exactly 155 spins
+instead of never. 6 of 6 mutations caught after that.
+
+**`expectedReturnMultiplier` is an estimate, and says so.** `wheel`'s is
+exact and `pick`'s is a closed form; this one cannot be either, because a
+free spin's return is the base game's RTP and `params` cannot see the game.
+It reads `params.assumedBaseRtp` and falls back to 0.95. Two things make
+that honest rather than a guess dressed up: the fixture passes its own
+measured base return (0.81) explicitly, and the retrigger term uses an
+**upper bound** rather than the true expectation — overstating the bonus
+makes the gate *stricter*, so the failure mode is a false refusal a designer
+investigates rather than a false acceptance that ships.
+
+**The fixture is shippable, not an instrument.** `free-spins-5x3` seeds
+unconditionally alongside `reference-5x3`, unlike `pick-bonus-5x3` which is
+flag-gated and refused in production. Its paytable sits ~8% below the
+reference game's because the base game funds the feature; the figure was
+found by simulation, not arithmetic — 12% measured 0.927, 10% overshot to
+1.03, and 8% landed at **0.954, a drift of 0.004 against a 0.05 tolerance**.
+The curve is steep because the feature's return scales with the paytable it
+is drawn from, so both halves move together. `free-spins-game.test.ts` is
+the publish gate run against the fixture itself.
+
+**Verified against the live stack, end to end.** A real round: triggered on
+spin 394, ten free spins on the real reels, the ×2 multiplier applied
+correctly (850→1700, 130→260), resolved to **1960**, credited through the
+ledger, `archiveAfter` a genuine BSON Date. Then the audit property, which
+is the one that matters: **replaying the round from the stored session seed
+alone reproduced 1960 exactly.**
+
+Still open, and deliberately: the backoffice has no editor for these params
+(they are set in the fixture, and a designer would edit them as raw JSON),
+and `runSimulation` still scores the feature with one multiplier rather than
+playing rounds out — item G's standing assumption, unchanged by this work.
 
 ### D. Test-infrastructure debt
 
@@ -1625,6 +1701,19 @@ Recorded so the reasoning is not rediscovered:
   interleave and the prize-tile guard.
 - **Testing the fixtures** (`reference-game.ts`, `pick-bonus-game.ts`).
   They are data. Their properties are asserted where they are used.
+
+  **`free-spins-game.ts` is the exception, and the distinction is worth
+  keeping.** It has its own suite because its RTP is a *fitted* number whose
+  fit couples two things that move together — the free spins are drawn from
+  the same paytable as the base game, so lowering the base lowers the
+  feature too. That made the fit non-obvious (12% measured 0.927, 10%
+  overshot to 1.03, 8% landed at 0.954) and easy to break with an edit that
+  looks locally harmless. The other two fixtures have no such coupling: the
+  reference game's bonus is a self-contained wheel, and the pick fixture is
+  a deliberately-broken instrument with no RTP worth asserting.
+
+  The rule, then, is not "fixtures are data" but **"data whose values were
+  fitted needs a test that re-runs the fit"**.
 - **Barrel files** (`index.ts` re-exports, 2–12 lines each). Nothing to
   test.
 - **A Redis-backed limiter.** Scaffolding for a scale this deployment is not

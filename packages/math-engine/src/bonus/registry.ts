@@ -3,6 +3,7 @@ import { createRng, type Rng } from "@slots-engine/rng";
 import type { BonusModule } from "./types.js";
 import { wheelModule } from "./modules/wheel.js";
 import { pickModule } from "./modules/pick.js";
+import { freeSpinsModule } from "./modules/freeSpins.js";
 
 const modules = new Map<string, BonusModule>();
 
@@ -42,3 +43,4 @@ export function deriveStepRng(sessionSeed: string, stepIndex: number): Rng {
 
 registerBonusModule(wheelModule);
 registerBonusModule(pickModule);
+registerBonusModule(freeSpinsModule);

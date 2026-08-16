@@ -1,3 +1,4 @@
+import type { GameDefinition } from "@slots-engine/shared-types";
 import type { Rng } from "@slots-engine/rng";
 
 export interface BonusStepInput {
@@ -17,6 +18,34 @@ export interface BonusStepInput {
    * reason a spin's is — see `deriveStepRng`.
    */
   rng: Rng;
+  /**
+   * The game being played, for the one class of module that needs to spin
+   * the REAL reels rather than invent its own randomness — free spins.
+   *
+   * Optional because most modules must not have it. A wheel or a pick round
+   * is self-contained: its outcome depends on `params` and `rng` alone,
+   * which is what makes its expected value computable by reading the game
+   * definition rather than by reading module source. Handing every module
+   * the whole game definition would quietly make that untrue.
+   *
+   * A module that needs this must say so and fail loudly when it is absent,
+   * rather than falling back to a guess — a free spin evaluated against
+   * anything other than the game's own reels is a payout under mathematics
+   * nobody configured.
+   */
+  gameDef?: GameDefinition;
+  /**
+   * The bonus session's own seed, for a module that must derive further
+   * seeds from it — free spins turns it into one seed per spin, so the whole
+   * round replays from this single stored value.
+   *
+   * Distinct from `rng`, which is already derived *per step*. A module
+   * needing spin `n` to be reproducible from `(sessionSeed, n)` alone cannot
+   * use `rng`: that stream depends on how many times `step` has been called,
+   * so a replay would have to reproduce the call sequence rather than just
+   * the seed.
+   */
+  sessionSeed?: string;
 }
 
 export interface BonusStepOutput {

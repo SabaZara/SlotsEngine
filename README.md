@@ -37,6 +37,12 @@ GAME_BACKEND_URL=http://localhost:9102 GAME_SOCKET_URL=ws://localhost:9103 LAUNC
 | Backoffice API | `http://localhost:9105` |
 | Game backend | `http://localhost:9102` |
 
+**Two games are seeded on first boot.** `reference-5x3` carries a
+single-step `wheel` bonus; `free-spins-5x3` awards **ten free spins at ×2**,
+played on its own reels and retriggerable up to three times. Both are tuned
+to a 0.95 RTP and measured by simulation rather than by eye. Swap the
+`gameId` in the command below to play either.
+
 A player needs a signed launch token, which a real casino would mint. To
 generate one locally:
 

@@ -146,6 +146,15 @@ class GameApp {
       return;
     }
 
+    // Dispatch on what the view actually carries rather than on a module id.
+    // The server decides which module is running; the client only needs to
+    // know how to draw what it was sent, and a view carrying `remaining` is
+    // a free-spins round whatever it is called.
+    if ("remaining" in state.view) {
+      this.renderFreeSpins(state);
+      return;
+    }
+
     // A multi-step module. The view carries only what the player is allowed
     // to see — never the unrevealed remainder of the layout.
     const tileCount = Number(state.view.tileCount ?? 0);
@@ -163,6 +172,45 @@ class GameApp {
       button.addEventListener("click", () => this.client?.bonusStep("pick", { tileIndex: i }));
       tiles.appendChild(button);
     }
+  }
+
+  /**
+   * Free spins: the reels the player already knows, spun again.
+   *
+   * The grid is drawn through the SAME renderer the base game uses rather
+   * than a separate bonus display — a free spin is a real spin, and showing
+   * it any other way would teach the player it is something else. The last
+   * spin's outcome arrives in the view, so `spinTo` is given a settled
+   * result exactly as it is in the base game.
+   */
+  private renderFreeSpins(state: BonusPublicState): void {
+    const panel = el("bonus");
+    const remaining = Number(state.view.remaining ?? 0);
+    const multiplier = Number(state.view.winMultiplier ?? 1);
+    const accumulated = Number(state.view.accumulatedWin ?? 0);
+    const retriggers = Number(state.view.retriggers ?? 0);
+    const lastSpin = state.view.lastSpin as { matrix?: string[][]; multipliedWin?: number; retriggered?: boolean } | undefined;
+
+    // Replay the spin onto the real reels. Guarded on `matrix` because the
+    // first view — the one from `start` — has no spin yet.
+    if (lastSpin?.matrix) this.renderer?.spinTo(lastSpin.matrix);
+
+    panel.innerHTML = `
+      <strong>Free spins${multiplier > 1 ? ` ×${multiplier}` : ""}</strong>
+      <span>${remaining} left${retriggers > 0 ? ` · ${retriggers} retrigger${retriggers > 1 ? "s" : ""}` : ""}</span>
+      <span>${formatMoney(accumulated, this.game?.currency)}</span>
+      <button class="tile" id="free-spin">Spin</button>
+    `;
+
+    const button = panel.querySelector<HTMLButtonElement>("#free-spin")!;
+    // Disabled while the reels are moving, so a player cannot queue spins
+    // faster than they can watch them. The server refuses a step for an
+    // already-claimed index regardless — this is presentation, not the
+    // guarantee.
+    button.addEventListener("click", () => {
+      button.disabled = true;
+      this.client?.bonusStep("spin", {});
+    });
   }
 
   private handleError(code: string, message: string): void {

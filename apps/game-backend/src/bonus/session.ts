@@ -103,7 +103,18 @@ export async function startBonus(
   const params = gameDef.bonusModules.find((m) => m.moduleId === input.moduleId)?.params ?? {};
   const seed = generateSeed();
 
-  const started = module.start({ totalBet: input.totalBet, state: {}, params, rng: deriveStepRng(seed, 0) });
+  const started = module.start({
+    totalBet: input.totalBet,
+    state: {},
+    params,
+    rng: deriveStepRng(seed, 0),
+    // Passed to every module; only free spins reads them. See the note on
+    // `BonusStepInput.gameDef` for why they are optional rather than
+    // required — a self-contained module must not be able to reach the game
+    // definition, or its expected value stops being computable from params.
+    gameDef,
+    sessionSeed: seed,
+  });
 
   const session: BonusSession & { seed: string; stepIndex: number } = {
     bonusSessionId: randomUUID(),
@@ -238,6 +249,11 @@ export async function stepBonus(
     action: input.action,
     payload: input.payload,
     rng: deriveStepRng(session.seed, session.stepIndex),
+    gameDef,
+    // The session's own seed, NOT the per-step rng. Free spins derives one
+    // seed per spin from it, so the whole round replays from this single
+    // stored value regardless of how the step calls interleaved.
+    sessionSeed: session.seed,
   });
 
   const resolvedAt = new Date().toISOString();
