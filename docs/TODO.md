@@ -105,7 +105,7 @@ This is deliberate for now — there is nowhere to deploy to — but it means
 
 GitHub requires Pro for branch protection on a private repo, so CI reports
 but cannot block a merge. A `pre-push` hook covers the realistic case
-locally (build, typecheck, 516 tests, ~35s), and is skippable with
+locally (build, typecheck, 533 tests, ~35s), and is skippable with
 `--no-verify` by design.
 
 Options: GitHub Pro at $4/month, make the repo public, or accept it. See
@@ -134,6 +134,35 @@ The standard mitigations, none of which are free:
 - **Not locking, but requiring a second factor** once the count is high.
 
 Worth doing before this is exposed to the public internet, not before.
+
+### 3d. `runRngTestSuite`'s aggregate cannot be tested
+**Severity: low · Effort: low, but widens production surface**
+
+The RNG report's `passed` field is `results.every(r => r.passed)`. Changing
+that to `some` breaks no test, because all three sub-tests pass on a
+healthy generator, so the two operators agree on every input reachable
+through the exported API. A report that claimed success while a sub-test
+failed would be the most misleading thing this artefact could do, and
+nothing currently prevents it.
+
+The blocker is that no sub-test can be made to fail on demand.
+`createRng` takes an `algorithm` parameter but ignores it — there is only
+one implementation — so a deliberately broken generator cannot be
+injected. Chi-squared is also robust enough that no draw or bin count
+produces a genuine failure; extreme sparsity converges toward the mean
+rather than away from it, which was measured, not assumed.
+
+Two ways to close it, both real changes rather than test-only ones:
+
+- **Honour the `algorithm` parameter** in `createRng` and register a
+  deliberately-biased implementation for tests. Also the honest fix for the
+  parameter being decorative today.
+- **Take the results array as an argument** so the aggregate is a pure
+  function that can be handed constructed values.
+
+The narrower half of this gap is already closed: `evaluate` is exported and
+its two-sided band is tested directly against known critical values, which
+catches both an always-pass band and a one-sided one.
 
 ### 3c. `e2e:backoffice` can exhaust the login rate limit
 **Severity: low (test-only) · Effort: low**

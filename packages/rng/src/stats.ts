@@ -32,7 +32,21 @@ function chiSquaredPValue(statistic: number, degreesOfFreedom: number): number {
   return upperRegularizedGamma(degreesOfFreedom / 2, statistic / 2);
 }
 
-function evaluate(name: string, statistic: number, degreesOfFreedom: number): TestResult {
+/**
+ * Applies the two-sided significance band to a statistic.
+ *
+ * Exported for testing, deliberately. Every input reachable through the
+ * three public tests *passes* — `createRng` offers one algorithm, so a
+ * broken generator cannot be injected, and chi-squared is robust enough
+ * that no draw or bin count yields a genuine failure. With no failing
+ * input, a band that always returned `true` would be indistinguishable
+ * from a correct one, which is precisely the defect that would make this
+ * whole report worthless as evidence.
+ *
+ * The alternative — leaving it private and untested — costs more than the
+ * one line of exposed surface.
+ */
+export function evaluate(name: string, statistic: number, degreesOfFreedom: number): TestResult {
   const pValue = chiSquaredPValue(statistic, degreesOfFreedom);
   return { name, statistic, degreesOfFreedom, pValue, passed: pValue > ALPHA && pValue < 1 - ALPHA };
 }
