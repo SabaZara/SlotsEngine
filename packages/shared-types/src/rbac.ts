@@ -41,7 +41,12 @@ export function toPublicUser(user: User): PublicUser {
   return {
     userId: user.userId,
     email: user.email,
-    roles: user.roles,
+    // Copied, not aliased. Returning the same array reference means
+    // `publicUser.roles.push("super_admin")` edits the source record in
+    // place — a privilege escalation through a function whose entire job is
+    // handing out a safe copy. No caller does this today; the copy costs
+    // nothing and removes the possibility.
+    roles: [...user.roles],
     active: user.active,
     createdAt: user.createdAt,
     ...(user.lastLoginAt !== undefined ? { lastLoginAt: user.lastLoginAt } : {}),
