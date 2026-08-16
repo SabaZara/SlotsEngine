@@ -172,27 +172,41 @@ existed for. Verified against the live stack: round replay still produces
 the identical seed and outcome, which was the real risk in touching
 `createRng`.
 
-### 3c. `e2e:backoffice` can exhaust the login rate limit
-**Severity: low (test-only) · Effort: low**
+### ~~3c. `e2e:backoffice` can exhaust the login rate limit~~ — closed
 
-The suite signs in many times — the bootstrap admin, then each user it
-creates — against a per-IP limit of 10 logins per 5 minutes. A single clean
-run fits. Running it twice in quick succession, or running it after any
-manual login attempts, does not: the second run fails with
-`a deactivated user cannot sign back in — got 429`, which reads like a
-broken deactivation check rather than a throttled request.
+**Fixed, both halves, and the investigation found a third mechanism this
+item did not know about.**
 
-Same shape as F11, and found the same way — by running it. The recovery is
-simply to wait out the window, which is what makes it easy to misdiagnose:
-the suite passes on retry, so the failure looks flaky rather than
-explained.
+The suite signs in many times — the bootstrap admin, then every user it
+creates. The failure used to surface as `a deactivated user cannot sign back
+in — got 429`, which reads like a broken deactivation check; the suite then
+passes on retry, so it looked flaky rather than explained.
 
-Two honest fixes, neither done yet: have the e2e client assert on a 429
-explicitly ("rate limited, not a real failure") instead of reporting the
-status mismatch, and give the e2e stack a raised `LOGIN_RATE_LIMIT` the way
-CI already raises `GAME_RATE_LIMIT` for the load check. The limiter itself
-is correct and has its own tests; it is the suite that assumes it can log
-in freely.
+- **The e2e client now names a 429 at the source.** Caught in `api()` rather
+  than at one call site, so every login is covered, and it exits non-zero
+  with an explanation instead of letting a check report the wrong thing.
+- **CI raises `LOGIN_RATE_LIMIT` for its stack**, the way it already raises
+  `GAME_RATE_LIMIT` for the load check. The default is unchanged everywhere
+  the limiter is the thing being trusted.
+
+**The third mechanism.** Verifying the fix by deliberately exhausting the
+limit revealed that **two different defences return 429 here**, and the first
+version of this message blamed the wrong one:
+
+| | Where it lives | Survives a restart? | Raising `LOGIN_RATE_LIMIT` helps? |
+|---|---|---|---|
+| Per-IP login limiter | process memory | no | yes |
+| Per-account lockout (F10) | `loginAttempts` in Mongo | **yes** | **no** |
+
+F10's lockout counts consecutive failures against one *email* and is
+deliberately not the same defence — its whole purpose was that an attacker
+spreading attempts across many addresses should still be stopped. So it
+ignores the per-IP limit entirely. The message now reads the response body
+(`account_locked` names it) and tells the two apart, because sending someone
+to raise a limit that cannot help is worse than the original confusion.
+
+Verified: with the lockout cleared, the suite runs **twice back to back and
+passes both times** — the exact case this item described as failing.
 
 ### 3b. Rate limits are per-instance, held in memory
 **Severity: medium before horizontal scaling · Effort: low**

@@ -38,6 +38,51 @@ async function api(path, options = {}) {
     ...(options.body ? { body: JSON.stringify(options.body) } : {}),
   });
   const payload = await response.json().catch(() => ({}));
+
+  // A 429 is never what a check in this suite is asserting about, so let it
+  // announce itself rather than be reported as whatever the check happened
+  // to expect.
+  //
+  // The failure used to surface as `a deactivated user cannot sign back in —
+  // got 429`, which reads like a broken deactivation check. The suite then
+  // passes on retry, so it looks flaky rather than explained. Same shape as
+  // F11 on the load check, and found the same way: by running it twice.
+  //
+  // TWO different mechanisms return 429 here, and conflating them sends
+  // someone to the wrong fix — which the first version of this message did:
+  //
+  //   * The per-IP login limiter (`LOGIN_RATE_LIMIT`, default 10 per 5
+  //     minutes), held in the process's memory. Restarting the service
+  //     clears it.
+  //   * The per-account lockout (F10), which is stored in `loginAttempts`
+  //     in MongoDB and counts CONSECUTIVE FAILURES against one email. It
+  //     survives a restart and a raised limit, because it is deliberately
+  //     not the same defence — the whole point of F10 was that an attacker
+  //     spreading attempts across many IPs should still be stopped.
+  //
+  // The body tells them apart: the lockout names the account.
+  if (response.status === 429) {
+    const reason = JSON.stringify(payload);
+    const looksLikeLockout = /lock/i.test(reason);
+    console.error(
+      `\n  ✘ rate limited on ${path} — this is a THROTTLE, not a broken check.\n` +
+        `    Response: ${reason}\n` +
+        (looksLikeLockout
+          ? `    This looks like the per-ACCOUNT lockout (F10): consecutive failed logins for\n` +
+            `    one email, recorded in the loginAttempts collection. It survives a service\n` +
+            `    restart and ignores LOGIN_RATE_LIMIT. Wait out lockedUntil, or clear that\n` +
+            `    document for the affected email.`
+          : `    This looks like the per-IP login limiter — currently ${
+              process.env.LOGIN_RATE_LIMIT ?? 10
+            } logins per 5 minutes.\n` +
+            `    Wait out the window, restart backoffice-api (the counter is in memory), or\n` +
+            `    raise LOGIN_RATE_LIMIT for the stack under test the way CI does.`) +
+        `\n    Both defences are correct and have their own tests; this suite simply\n` +
+        `    signs in more often than a real administrator would.`,
+    );
+    process.exit(1);
+  }
+
   return { status: response.status, payload };
 }
 

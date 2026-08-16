@@ -98,6 +98,16 @@ jobs:
             # is unchanged everywhere the limiter is the thing being
             # trusted. The limiter itself is covered by its own tests.
             echo "GAME_RATE_LIMIT=20000"
+            # Same shape, different surface. The backoffice check signs in
+            # many times — the bootstrap admin, then every user it creates —
+            # against a per-IP limit of 10 logins per 5 minutes. One clean
+            # run fits; a re-run inside the window does not, and the failure
+            # surfaces as "a deactivated user cannot sign back in — got 429",
+            # which reads like a broken deactivation check rather than a
+            # throttled request. Raised for the CI stack only; the limiter
+            # has its own tests and its default is unchanged everywhere it
+            # is the thing being trusted.
+            echo "LOGIN_RATE_LIMIT=2000"
           } >> infra/.env
 
       - name: Start the stack
