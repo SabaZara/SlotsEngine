@@ -32,9 +32,23 @@ export function assertStartupConfig(env: NodeJS.ProcessEnv = process.env): void 
     if (env.SERVICE_AUTH_SECRET === env.LAUNCH_TOKEN_SECRET) {
       problems.push("SERVICE_AUTH_SECRET and LAUNCH_TOKEN_SECRET must be different secrets.");
     }
-    if (env.INITIAL_PLAYER_BALANCE && Number(env.INITIAL_PLAYER_BALANCE) > 0) {
+    // Both directions are refused, and the pair is the point.
+    //
+    // A positive value grants free money to every new player. But refusing
+    // only that left the guard satisfied by an UNSET variable, which used to
+    // mean the ledger's own 100_000 default — so the one configuration this
+    // guard pushed an operator toward was the one that still handed out free
+    // money (item H). The ledger now defaults to 0, and requiring the value
+    // explicitly means nobody has to know that to be safe: the starting
+    // balance in production is a decision someone wrote down.
+    if (env.INITIAL_PLAYER_BALANCE === undefined || env.INITIAL_PLAYER_BALANCE === "") {
       problems.push(
-        "INITIAL_PLAYER_BALANCE grants free balance to every new player and must not be set in production.",
+        "INITIAL_PLAYER_BALANCE must be set explicitly in production — use 0 unless new players are " +
+          "deliberately funded, so the starting balance is a recorded decision rather than a default.",
+      );
+    } else if (Number(env.INITIAL_PLAYER_BALANCE) > 0) {
+      problems.push(
+        "INITIAL_PLAYER_BALANCE grants free balance to every new player and must not be positive in production.",
       );
     }
   }

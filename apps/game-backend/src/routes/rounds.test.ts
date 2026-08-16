@@ -1,3 +1,10 @@
+// A player must be funded to spin at all. Set explicitly rather than
+// inherited from a default: `INITIAL_PLAYER_BALANCE` now defaults to 0 so
+// that forgetting to configure a money default costs nothing in production
+// (docs/TODO.md item H), which makes funding a test player the test's own
+// job. Set before the imports below, since the ledger reads it per call.
+process.env.INITIAL_PLAYER_BALANCE = "1000000";
+
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { FastifyInstance } from "fastify";

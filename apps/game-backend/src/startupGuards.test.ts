@@ -127,22 +127,44 @@ describe("assertStartupConfig", () => {
       );
     });
 
-    it("refuses INITIAL_PLAYER_BALANCE in production, because it grants every new player free money", () => {
+    it("refuses a positive INITIAL_PLAYER_BALANCE, because it grants every new player free money", () => {
       assert.throws(
         () =>
           assertStartupConfig({ ...valid(), NODE_ENV: "production", INITIAL_PLAYER_BALANCE: "100000" }),
-        /INITIAL_PLAYER_BALANCE/,
+        /must not be positive/,
+      );
+    });
+
+    it("refuses an UNSET INITIAL_PLAYER_BALANCE, so the starting balance is a written-down decision", () => {
+      // Item H. Refusing only the positive case left the guard satisfied by
+      // an absent variable — which used to mean the ledger's own 100_000
+      // default, so the configuration this guard pushed an operator toward
+      // was the one that still handed out free money. The ledger now
+      // defaults to 0, and this makes the choice explicit besides.
+      assert.throws(
+        () => assertStartupConfig({ ...valid(), NODE_ENV: "production" }),
+        /INITIAL_PLAYER_BALANCE must be set explicitly/,
+      );
+      assert.throws(
+        () => assertStartupConfig({ ...valid(), NODE_ENV: "production", INITIAL_PLAYER_BALANCE: "" }),
+        /must be set explicitly/,
       );
     });
 
     it("allows INITIAL_PLAYER_BALANCE=0 in production, which grants nothing", () => {
-      // The check is on the value, not on the variable being present. An
-      // explicit zero is the correct production setting, and refusing it
-      // would push operators toward unsetting it instead — which is worse,
-      // since the ledger's own default is 100_000.
+      // The correct production setting, and it must not be refused — an
+      // operator pushed away from an explicit zero would unset the variable
+      // instead, which is the state this guard exists to prevent.
       assert.doesNotThrow(() =>
         assertStartupConfig({ ...valid(), NODE_ENV: "production", INITIAL_PLAYER_BALANCE: "0" }),
       );
+    });
+
+    it("does not require the variable outside production", () => {
+      // Local development must not have to set it. Compose already passes a
+      // value, but a bare `npm run dev` should still start.
+      assert.doesNotThrow(() => assertStartupConfig({ ...valid(), NODE_ENV: "development" }));
+      assert.doesNotThrow(() => assertStartupConfig(valid()));
     });
 
     it("allows INITIAL_PLAYER_BALANCE outside production", () => {

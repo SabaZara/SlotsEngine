@@ -513,42 +513,43 @@ The tests reflect this: the keying test runs against `/public/*`, where the
 difference between the two strategies is observable, with a note explaining
 why the internal route cannot show it.
 
-### H. The production balance guard covers the set case, not the unset one
+### ~~H. The production balance guard covers the set case, not the unset one~~ — fixed
 
-**Severity: medium (production only) · Effort: low**
+**Both options taken**, because each closes a different half and neither is
+sufficient alone.
 
-Found while writing the `startupGuards` tests, by asking what the guard does
-*not* refuse.
+**The ledger now defaults to 0.** `packages/ledger/src/players.ts` used to
+read `Number(process.env.INITIAL_PLAYER_BALANCE ?? 100_000)`, which
+contradicted the comment directly above it and defeated the guard next door:
+`assertStartupConfig` refused a *positive* value in production, so the one
+configuration it pushed an operator toward — leaving the variable unset —
+was the one that still handed 100,000 minor units to every new player. The
+safe direction for a money default is the one where forgetting to configure
+it costs nothing.
 
-`assertStartupConfig` refuses `INITIAL_PLAYER_BALANCE` in production when it
-is set to a positive value — correctly, since that grants free money to every
-new player. But `packages/ledger/src/players.ts` reads:
+**The guard now also refuses the unset case in production.** With the ledger
+defaulting to 0 that is no longer load-bearing for safety, but it makes the
+starting balance a decision someone wrote down rather than a default nobody
+examined. `INITIAL_PLAYER_BALANCE=0` is the correct production setting and
+passes; absent or empty refuses with a message saying so.
 
-```ts
-const INITIAL_BALANCE = Number(process.env.INITIAL_PLAYER_BALANCE ?? 100_000);
-```
+Local development is unchanged: `infra/docker-compose.yml` already passes
+`${INITIAL_PLAYER_BALANCE:-100000}` explicitly, and `e2e:spin` passes against
+the rebuilt stack.
 
-So **unsetting** the variable does not give a zero starting balance — it gives
-100,000 minor units, the development default, and the guard is satisfied. The
-one configuration the guard forces you toward in production is the one that
-still hands out free money. Passing the guard requires setting it explicitly
-to `0`, which nothing states and nothing checks.
+The value is also now read **per call** rather than captured at module load
+(so behaviour cannot depend on import order), floored to an integer, and
+clamped to 0 for a negative or non-numeric setting — a `NaN` balance written
+by `$setOnInsert` would make every later comparison false, leaving a player
+unable to bet and unable to be seen as having nothing.
 
-The module comment above that line already says the right thing ("in a real
-deployment … this default would be zero"), so this is a default that
-contradicts its own documented intent rather than an unconsidered one.
+Verified against real production containers, both directions: `NODE_ENV=production`
+with the variable absent refuses to boot with the intended message, and with
+`INITIAL_PLAYER_BALANCE=0` it passes the guard and proceeds to connect.
 
-Options:
-- **Default to 0 and let development set it explicitly.** The safe direction:
-  a missing value grants nothing, and `infra/docker-compose.yml` already
-  passes `${INITIAL_PLAYER_BALANCE:-100000}`, so local behaviour is unchanged.
-- **Guard the unset case too** — refuse to boot in production unless the
-  variable is explicitly present, whatever its value.
-
-Not done here because it is a behaviour change on the money path rather than
-a test, and it deserves its own commit with a real-stack check. The tests
-added for the guard pin the current behaviour, including the deliberate
-acceptance of an explicit `0`.
+Three test suites now set `INITIAL_PLAYER_BALANCE` explicitly at the top of
+the file, because a player must be funded to spin at all — which is a better
+statement of the precondition than inheriting it from a global default.
 
 ### G. A real finding from writing this list
 
