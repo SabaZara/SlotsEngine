@@ -263,27 +263,50 @@ Worth noting this is the same finding the review made about the reference
 architecture's encryption key — a fair characterisation there, and it
 applies here too.
 
-### 5. Bonus session rows are never reaped
-**Severity: low · Effort: low**
+### ~~5. Bonus session rows are never reaped~~ — archival policy shipped
 
-The correctness half of this is fixed (F12): `stepBonus` now checks the
-deadline on every read, so an expired session is refused whether or not
-`sweepAbandonedSessions` has run. Expiry is a property of the data, not of
-a process being alive.
+The correctness half was already fixed (F12): `stepBonus` checks the deadline
+on every read, so expiry is a property of the data rather than of a process
+being alive. What remained was housekeeping — resolved and abandoned sessions
+accumulating forever.
 
-**The TTL index this item originally proposed was the wrong fix**, and the
-reasoning is worth keeping. A TTL *deletes* the row — but `abandoned` is a
-meaningful state, not garbage: a player returning to a timed-out bonus gets
-a precise 410 `bonus_session_abandoned` ("that bonus round timed out"). Had
-the row been deleted, they would get "no such session" instead, which is
-strictly worse information on a money path. Cheaper storage is not worth a
-worse answer to a player asking where their bonus went.
+**Archival is now separate from expiry, and the separation is the whole
+point.** A TTL keyed on the session's own fifteen-minute deadline would have
+been the wrong fix, for the reason this item already recorded: `abandoned` is
+a meaningful state, not garbage. A player returning to a timed-out bonus gets
+a precise 410 `bonus_session_abandoned`; delete the row and they get "no such
+session", which is strictly worse information on a money path.
 
-What remains is genuine housekeeping: resolved and abandoned sessions
-accumulate forever. That wants an archival policy with a retention window
-long enough to answer a player dispute — a different decision from
-"expire it", and one that should be made deliberately rather than by
-setting `expireAfterSeconds`.
+So the row carries its own `archiveAfter`, set **two years out**, with a
+`expireAfterSeconds: 0` TTL index on that field alone:
+
+| | When | What it does |
+|---|---|---|
+| Abandonment | 15 min | Status change. Row stays, 410 stays precise. |
+| Archival | 730 days | Row is finally removed. |
+
+Two years is a *retention* decision, not a technical one — chosen to sit
+beyond the periods gambling regulators typically require for player-dispute
+records, and overridable per deployment via `BONUS_SESSION_RETENTION_DAYS`
+rather than by patching code. A misconfigured value falls back to the default
+rather than shortening the window: too long merely costs storage, while too
+short destroys the evidence for a dispute about money that was or was not
+paid.
+
+**One thing worth knowing, measured rather than assumed:** Mongo's TTL
+monitor only reaps a field that is a genuine BSON `Date`. An ISO *string*
+there is silently ignored — the row would live forever and nobody would
+notice for two years. Confirmed against real MongoDB (the Date row was
+reaped, the string and absent rows survived) and now pinned by a conformance
+test.
+
+Rows predating this change have no `archiveAfter` and are therefore never
+reaped, which is the safe direction: the deploy that adds the index does not
+delete history.
+
+Verified against the live stack: the index exists on the real database, a
+newly created session is stamped `Date +730 days`, and `applySchemas` applies
+cleanly to the existing database (the F2 check).
 
 ### ~~6. The load check's bonus race depends on a seeded fixture~~ — surfaced
 

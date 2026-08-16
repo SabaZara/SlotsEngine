@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { beforeEach, describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
 import { REFERENCE_GAME } from "@slots-engine/math-engine";
 import type { GameDefinition } from "@slots-engine/shared-types";
 import { fakeMongo } from "../testing/fakeMongo.js";
@@ -321,5 +321,107 @@ describe("sweepAbandonedSessions", () => {
     const future = Date.now() + 10 * 60 * 60 * 1000;
     assert.equal(await sweepAbandonedSessions(ctx.db, future), 1);
     assert.equal(await sweepAbandonedSessions(ctx.db, future), 0);
+  });
+});
+
+describe("archival retention (docs/TODO.md item 5)", () => {
+  /**
+   * The distinction this closes: **archival is not expiry.**
+   *
+   * A TTL keyed on the session's own fifteen-minute deadline would delete a
+   * row the moment it timed out — and `abandoned` is a meaningful state, not
+   * garbage. A player returning to a timed-out bonus gets a precise 410
+   * ("that bonus round timed out"); delete the row and they get "no such
+   * session", which is strictly worse information on a money path.
+   *
+   * So the row carries a separate `archiveAfter` far beyond its own
+   * lifetime, long enough to answer a dispute about money that was or was
+   * not paid.
+   */
+  let ctx: ReturnType<typeof setup>;
+  const originalRetention = process.env.BONUS_SESSION_RETENTION_DAYS;
+
+  beforeEach(() => {
+    ctx = setup();
+    delete process.env.BONUS_SESSION_RETENTION_DAYS;
+  });
+
+  afterEach(() => {
+    if (originalRetention === undefined) delete process.env.BONUS_SESSION_RETENTION_DAYS;
+    else process.env.BONUS_SESSION_RETENTION_DAYS = originalRetention;
+  });
+
+  const storedSession = async () =>
+    (await ctx.db.collection("bonusSessions").findOne({ roundId: "round-1" })) as Record<string, unknown>;
+
+  it("stamps archiveAfter as a Date, not a string", async () => {
+    // Mongo's TTL monitor only reaps a genuine BSON date. An ISO string is
+    // silently ignored, so the row would live forever and nobody would
+    // notice for two years — verified against real Mongo in the conformance
+    // suite, not taken from the documentation.
+    await startBonus(ctx.db, ctx.client, GAME, startInput("wheel", "round-1"));
+
+    assert.ok((await storedSession()).archiveAfter instanceof Date, "archiveAfter must be a Date");
+  });
+
+  it("defaults to a two-year window", async () => {
+    // A retention decision rather than a technical one: chosen to sit beyond
+    // the periods gambling regulators typically require for player-dispute
+    // records.
+    const before = Date.now();
+    await startBonus(ctx.db, ctx.client, GAME, startInput("wheel", "round-1"));
+
+    const archiveAfter = (await storedSession()).archiveAfter as Date;
+    const days = (archiveAfter.getTime() - before) / (24 * 60 * 60 * 1000);
+
+    assert.ok(days > 729 && days < 731, `expected ~730 days, got ${days.toFixed(1)}`);
+  });
+
+  it("keeps the row far beyond the fifteen-minute abandonment deadline", async () => {
+    // The property that makes this archival rather than expiry. If these two
+    // were the same number, an abandoned session would vanish and a
+    // returning player would be told it never existed.
+    await startBonus(ctx.db, ctx.client, GAME, startInput("wheel", "round-1"));
+
+    const session = await storedSession();
+    const createdAt = Date.parse(session.createdAt as string);
+    const archiveAfter = (session.archiveAfter as Date).getTime();
+
+    assert.ok(
+      archiveAfter - createdAt > 15 * 60 * 1000 * 100,
+      "retention must be orders of magnitude longer than the abandonment window",
+    );
+  });
+
+  it("honours a per-deployment retention override", async () => {
+    // An operator whose licence demands a different window sets an
+    // environment variable rather than patching code.
+    process.env.BONUS_SESSION_RETENTION_DAYS = "1095";
+    const before = Date.now();
+    await startBonus(ctx.db, ctx.client, GAME, startInput("wheel", "round-1"));
+
+    const archiveAfter = (await storedSession()).archiveAfter as Date;
+    const days = (archiveAfter.getTime() - before) / (24 * 60 * 60 * 1000);
+
+    assert.ok(days > 1094 && days < 1096, `expected ~1095 days, got ${days.toFixed(1)}`);
+  });
+
+  it("falls back to the default for a misconfigured window rather than shortening it", async () => {
+    // The direction matters: too long merely costs storage, while too short
+    // destroys the evidence for a dispute about money. A typo must never
+    // silently mean "delete immediately".
+    for (const bad of ["0", "-30", "abc", ""]) {
+      const local = setup();
+      process.env.BONUS_SESSION_RETENTION_DAYS = bad;
+      const before = Date.now();
+      await startBonus(local.db, local.client, GAME, startInput("wheel", "round-1"));
+
+      const stored = (await local.db
+        .collection("bonusSessions")
+        .findOne({ roundId: "round-1" })) as Record<string, unknown>;
+      const days = ((stored.archiveAfter as Date).getTime() - before) / (24 * 60 * 60 * 1000);
+
+      assert.ok(days > 729, `BONUS_SESSION_RETENTION_DAYS='${bad}' shortened retention to ${days.toFixed(1)} days`);
+    }
   });
 });

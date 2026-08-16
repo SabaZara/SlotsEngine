@@ -286,6 +286,47 @@ describe("fakeMongo conformance with real MongoDB", () => {
     assert.deepEqual(real, fake, "the fake must sort on a projected-away field the same way Mongo does");
   });
 
+  it("reaps a TTL document only when the field is a real Date", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // Real Mongo only — `fakeMongo` models no TTL monitor, and pretending
+    // otherwise would be exactly the F1/F9 mistake of modelling the
+    // behaviour we intended rather than the one the database has.
+    //
+    // The bonus-session archival (TODO item 5) depends on this: a TTL field
+    // written as an ISO *string* is silently ignored, so the row would live
+    // forever and nobody would notice for two years. Measured rather than
+    // taken from the docs — the string and absent rows survive, the Date row
+    // is reaped.
+    //
+    // Mongo's TTL monitor runs about every 60 seconds, so this waits.
+    const collection = `ttl_conformance_${randomUUID().slice(0, 8)}`;
+    const col = realDb.collection(collection);
+    const past = new Date(Date.now() - 3_600_000);
+
+    try {
+      await col.createIndex({ archiveAfter: 1 }, { expireAfterSeconds: 0, name: "archiveAfter_ttl" });
+      await col.insertOne({ id: "date-field", archiveAfter: past });
+      await col.insertOne({ id: "string-field", archiveAfter: past.toISOString() });
+      await col.insertOne({ id: "no-field" });
+
+      let surviving: string[] = [];
+      for (let attempt = 0; attempt < 20; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 5_000));
+        surviving = (await col.find({}).toArray()).map((d) => String(d.id)).sort();
+        if (surviving.length < 3) break;
+      }
+
+      assert.deepEqual(
+        surviving,
+        ["no-field", "string-field"],
+        "only a genuine BSON Date may be reaped — a string TTL field is silently ignored",
+      );
+    } finally {
+      await col.drop().catch(() => {});
+    }
+  });
+
   it("creates a document on upsert, and updates it on the second call", async function () {
     if (!realDb) return this.skip(skipReason);
 

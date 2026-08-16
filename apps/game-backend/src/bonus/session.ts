@@ -13,6 +13,36 @@ export class BonusSessionAbandonedError extends Error {}
  * short enough that a stuck session doesn't block them forever. */
 const ABANDON_AFTER_MS = 15 * 60 * 1000;
 
+/**
+ * How long a session row is KEPT after it is created, before the TTL index
+ * on `archiveAfter` removes it. TODO item 5.
+ *
+ * Deliberately not the same thing as `ABANDON_AFTER_MS`, and the gap between
+ * them is the point. Abandonment is a *status change* fifteen minutes in —
+ * the row stays, so a player returning to a timed-out bonus gets a precise
+ * 410 ("that bonus round timed out") rather than "no such session". Archival
+ * is the row finally going away, and it must not happen while anyone could
+ * still ask about it.
+ *
+ * Two years is chosen to sit beyond the retention periods gambling
+ * regulators typically require for player-dispute records, which are
+ * commonly one year or less. It is a *retention* decision rather than a
+ * technical one, so it is a named constant with this comment attached and
+ * overridable per deployment — an operator whose licence demands longer sets
+ * `BONUS_SESSION_RETENTION_DAYS` rather than patching code.
+ *
+ * The direction of the default matters: too long merely costs storage, while
+ * too short destroys the evidence for a dispute about money that was or was
+ * not paid.
+ */
+function retentionMs(): number {
+  const days = Number(process.env.BONUS_SESSION_RETENTION_DAYS ?? 730);
+  // A misconfigured value must not shorten retention to nothing — deleting
+  // dispute evidence early is the failure that cannot be undone.
+  if (!Number.isFinite(days) || days <= 0) return 730 * 24 * 60 * 60 * 1000;
+  return days * 24 * 60 * 60 * 1000;
+}
+
 export interface StartBonusInput {
   operatorId: string;
   playerId: string;
@@ -94,7 +124,14 @@ export async function startBonus(
     ...(started.done ? { resolvedAt: new Date().toISOString() } : {}),
   };
 
-  await db.collection("bonusSessions").insertOne({ ...session });
+  await db.collection("bonusSessions").insertOne({
+    ...session,
+    // Drives the TTL index. A Date rather than an ISO string, because Mongo
+    // only reaps a TTL field that is a genuine BSON date — a string here
+    // would be silently ignored and the row would live forever, which is a
+    // failure nobody would notice for two years.
+    archiveAfter: new Date(Date.now() + retentionMs()),
+  });
 
   if (started.done && started.totalWin > 0) {
     const balanceAfter = await creditBonus(db, client, session, started.totalWin);

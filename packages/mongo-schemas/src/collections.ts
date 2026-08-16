@@ -173,6 +173,25 @@ export const COLLECTIONS: CollectionDefinition[] = [
       { keys: { roundId: 1 }, options: { unique: true, name: "roundId_unique" } },
       // Drives the abandonment sweep without a collection scan.
       { keys: { status: 1, createdAt: 1 }, options: { name: "status_age_sweep" } },
+      // Archival, NOT expiry — the distinction is the whole of TODO item 5.
+      //
+      // A TTL keyed on the session's own deadline would delete a row the
+      // moment it timed out, and `abandoned` is a meaningful state rather
+      // than garbage: a player returning to a timed-out bonus gets a precise
+      // 410 `bonus_session_abandoned` ("that bonus round timed out"). Delete
+      // the row and they get "no such session" instead, which is strictly
+      // worse information on a money path.
+      //
+      // So the TTL is driven by a SEPARATE field, `archiveAfter`, set far
+      // beyond the session's lifetime — long enough to answer a player
+      // dispute about a bonus that paid, or did not. `expireAfterSeconds: 0`
+      // means "delete when the date in the field passes", so the retention
+      // window is chosen where the row is written, not here.
+      //
+      // A session with no `archiveAfter` is never reaped, which is the safe
+      // direction: rows predating this index keep accumulating rather than
+      // vanishing on the deploy that adds it.
+      { keys: { archiveAfter: 1 }, options: { expireAfterSeconds: 0, name: "archiveAfter_ttl" } },
     ],
   },
   {
