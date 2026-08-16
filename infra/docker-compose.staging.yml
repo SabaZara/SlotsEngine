@@ -1,0 +1,85 @@
+# Staging overlay — what changes when this stack runs on a box that is not
+# a developer's laptop. Never auto-merged: compose only reads
+# `docker-compose.yml` and `docker-compose.override.yml` on its own, so this
+# file does nothing unless it is named explicitly.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.staging.yml up -d
+#
+# The deploy does not type that. It sets COMPOSE_FILE in `infra/.env`, which
+# compose reads as if the -f flags had been passed, so every `docker compose`
+# in `deploy.yml` and `rollback.yml` stays bare and none of them can drift
+# out of agreement about which files are in play. A `-f` at six call sites is
+# five opportunities for one of them to be forgotten — and the one that would
+# get forgotten is the rollback, which runs when production is already broken.
+#
+# It is called `staging` rather than `production` deliberately. Nothing here
+# has served a real player, and a file claiming otherwise makes the first
+# genuine production deploy indistinguishable from this one. Rename it when
+# that stops being true, and add a second environment then — not before.
+#
+# Two jobs, plus a restart policy:
+
+services:
+  # 1. Mongo gets NO published port.
+  #
+  # This stack runs Mongo with no authentication at all — the URI is
+  # `mongodb://mongo:27017` with no credentials anywhere — so on a box with
+  # a public address, a published port means anyone on the internet can
+  # read, write or drop every collection. Locally that mapping is right and
+  # convenient; here it is the single worst thing in the file.
+  #
+  # `!reset []` removes the base file's list rather than merging with it.
+  # Compose merges sequences by appending, so `ports: []` would leave the
+  # original mapping in place and read, wrongly, as though it had removed it.
+  #
+  # Binding to 127.0.0.1 is the obvious alternative and is NOT used. The
+  # reference repo (~/Desktop/irakli/slot-engine) shipped exactly that and
+  # recorded the result: it reliably triggered a Docker networking bug on
+  # their host where the container's own network attachment silently failed,
+  # leaving `NetworkSettings.Networks` empty and breaking every sibling's DNS
+  # resolution of `mongo` with `getaddrinfo EAI_AGAIN`. Reproduced three
+  # times across full teardown-and-recreate cycles. Omitting `ports:`
+  # entirely sidesteps that and is the better posture regardless: 127.0.0.1
+  # still means "reachable from this box", which was never needed, because
+  # `docker exec -it infra-mongo-1 mongosh` covers real operational access.
+  mongo:
+    ports: !reset []
+    restart: always
+
+  # 2. Everything else keeps its published port, and that is a decision.
+  #
+  # The internal API is signed (service-auth refuses an unsigned call with
+  # 401) and the socket checks handshake origins, so neither is naked. But
+  # defence in depth says game-backend's port should not be reachable from
+  # outside either — the comment in the base file says exactly that.
+  #
+  # It stays published anyway, for one concrete reason: `deploy.yml`'s health
+  # check curls `http://localhost:9102/health/ready` and
+  # `http://localhost:9105/health/ready` FROM THE BOX. Remove the mappings
+  # and those curls fail, the deploy reports the new release unhealthy, and
+  # the automatic rollback fires — a working deploy undone by its own
+  # verification step. That is a worse failure than the exposure it fixes,
+  # because it is silent about its real cause.
+  #
+  # The correct fix is a reverse proxy terminating TLS on 443 and routing to
+  # these services over the compose network, with the health check going
+  # through it or through `docker compose exec`. That is the reference repo's
+  # `tls-gateway`, it needs a hostname and a certificate, and both follow the
+  # box. Recorded in docs/TODO.md item E rather than half-built here.
+  #
+  # Until then a host firewall is the stopgap: allow 80/443 and the SSH port,
+  # deny 9102-9106. Stated in docs/DEPLOY.md as a step, not left implied.
+  game-backend:
+    restart: always
+
+  game-socket:
+    restart: always
+
+  backoffice-api:
+    restart: always
+
+  game-frontend:
+    restart: always
+
+  backoffice-frontend:
+    restart: always

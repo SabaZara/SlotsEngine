@@ -243,10 +243,17 @@ was read first per the routine at the top of this file:
 | No rollback | Automatic on failed health check, plus a manual workflow | This item named "no rollback path" explicitly. |
 
 What the pipeline still does **not** do is listed at the end of
-`docs/DEPLOY.md` rather than implied away: no staging tier, no zero-downtime
-deploy (blocked on item 3b — the limiters count per process), no database
-migrations, and secrets are still environment variables rather than a managed
-store (item 4).
+`docs/DEPLOY.md` rather than implied away: no second tier, no TLS or reverse
+proxy (so the app ports are firewalled rather than unpublished), no
+zero-downtime deploy (blocked on item 3b — the limiters count per process),
+no database migrations, and secrets are still environment variables rather
+than a managed store (item 4).
+
+**The box-side configuration is now written**, which was the one part of item
+1 that did not actually need a box: `infra/docker-compose.staging.yml`
+unpublishes Mongo's port and sets `restart: always`, wired in through
+`COMPOSE_FILE` in the deployed `.env`. Details and the verification in
+section E.
 
 ### 2. Branch protection is not enforced
 **Severity: medium · Effort: trivial (needs a paid plan)**
@@ -978,10 +985,56 @@ The dependency worth noticing: **3b blocks zero-downtime**, so the deploy's
 brief gap during `up -d` is not independently fixable. Both are recorded in
 `docs/DEPLOY.md`'s closing section rather than implied away.
 
-#### Two decisions waiting on the first box
+#### ~~Two decisions waiting on the first box~~ — both taken, overlay written
 
-Both are small and neither should be made unilaterally, so they are recorded
-here rather than done.
+**`infra/docker-compose.staging.yml` exists.** It was written before the box
+rather than after, because both decisions below turned out to be answerable
+without one — and the second is a security posture that must not be decided
+under time pressure on the day a box appears.
+
+What it does, and what it deliberately does not:
+
+| | Decision | Why |
+|---|---|---|
+| Mongo's port | **Unpublished** (`!reset []`) | No authentication anywhere in this stack. A public address would expose every collection. |
+| App ports 9102–9106 | **Still published**, firewall instead | `deploy.yml`'s health check curls `localhost:9102` *from the box*. Unpublishing them makes a healthy deploy fail its own verification and auto-roll-back — a worse failure, and a silent one about its cause. |
+| Restart policy | `restart: always` on all six | — |
+| Name | `staging` | See below. |
+
+**`!reset []` is load-bearing and was verified, not assumed.** Compose merges
+sequences by *appending*, so a plain `ports: []` in an overlay leaves the base
+mapping fully intact while reading exactly like a removal. Measured against
+both forms: `ports: []` still resolved to `27018:27017`, `!reset []` resolved
+to none. That is the failure this whole overlay exists to prevent, one layer
+down — a file that looks like it closed the port and did not.
+
+**The overlay is wired in through `COMPOSE_FILE`, not `-f` flags.** The deploy
+writes `COMPOSE_FILE=docker-compose.yml:docker-compose.staging.yml` into
+`infra/.env`; compose reads it as though the flags were passed, so all six
+`docker compose` invocations across `deploy.yml` and `rollback.yml` stay bare.
+A `-f` pair at six call sites is five chances to forget one, and the one that
+would get forgotten is the rollback — which runs when production is already
+broken. The one hardcoded `-f docker-compose.yml` (the failure-path log dump)
+was changed to `cd` for the same reason: it would otherwise print logs from a
+different resolved config than the one that failed.
+
+**Verified against the running stack**, since a compose change is exactly the
+kind that reads correctly and behaves otherwise:
+
+- Mongo's port refused from the host; `docker exec … mongosh` still answers,
+  which is the operational access the mapping was there for.
+- Both health checks the deploy actually runs still pass.
+- Sibling DNS intact — the reference repo's `getaddrinfo EAI_AGAIN` bug came
+  from binding `127.0.0.1` instead of omitting `ports:`, and omitting it is
+  what this does.
+- `e2e:spin` passes in full under the overlay.
+- Local dev unchanged: without `COMPOSE_FILE` the overlay is inert, and
+  27018 is open again after restoring `.env`.
+
+Still deliberately absent: **TLS and a reverse proxy.** Unpublishing the app
+ports properly (rather than firewalling them) needs a gateway terminating TLS
+and a health check that goes through it. That needs a hostname and a
+certificate, which genuinely do follow the box.
 
 **The environment should probably be called `staging`, not `production`.**
 Both workflows name a GitHub environment `production`. For a project at this
@@ -1004,9 +1057,10 @@ own network attachment silently failed, breaking sibling DNS resolution,
 reproduced three times. Omitting `ports:` entirely both sidesteps that and is
 the correct posture: `docker exec … mongosh` covers real operational access.
 
-A `docker-compose.staging.yml` overlay is the natural home for both, plus
-`restart: always`. Not written yet, because the shape should follow the box
-rather than precede it.
+Both now live in `docker-compose.staging.yml`, described above. The workflows
+still name a GitHub environment `production`; renaming that is a one-line
+change in each file and is the half that genuinely waits, since the
+environment has to be created in repository settings anyway.
 
 ### I. The internal routes' rate limit is unreachable in practice
 

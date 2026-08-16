@@ -261,6 +261,14 @@ jobs:
           REGISTRY=ghcr.io/${{ steps.registry.outputs.owner }}
           TAG=${{ github.event.workflow_run.head_sha || github.sha }}
           NODE_ENV=production
+          # Compose reads COMPOSE_FILE exactly as if these were passed as -f
+          # flags, so every `docker compose` below stays bare. That is the
+          # point: the alternative is a -f pair at six call sites, and the one
+          # that would eventually be forgotten is the rollback — which runs
+          # when production is already broken. The overlay unpublishes Mongo's
+          # port (this stack has no database authentication) and sets
+          # restart: always. See infra/docker-compose.staging.yml.
+          COMPOSE_FILE=docker-compose.yml:docker-compose.staging.yml
           SERVICE_AUTH_SECRET=${{ secrets.SERVICE_AUTH_SECRET }}
           LAUNCH_TOKEN_SECRET=${{ secrets.LAUNCH_TOKEN_SECRET }}
           BACKOFFICE_JWT_SECRET=${{ secrets.BACKOFFICE_JWT_SECRET }}
@@ -345,7 +353,11 @@ jobs:
               done
               if [ "$ok" != true ]; then
                 echo "$name never became ready"
-                docker compose -f '/opt/slots-engine/infra/docker-compose.yml' logs --tail 100 || true
+                # `cd` rather than -f: the .env in that directory carries
+                # COMPOSE_FILE, so this picks up the same overlay the deploy
+                # ran with. Naming the base file alone here would read logs
+                # from a different resolved config than the one that failed.
+                (cd /opt/slots-engine/infra && docker compose logs --tail 100) || true
                 exit 1
               fi
             done

@@ -47,6 +47,41 @@ Any Linux box with Docker and Docker Compose, reachable over SSH. It never
 compiles anything — it pulls images and runs them — so it needs no Node
 toolchain and no source checkout beyond `infra/`.
 
+**Firewall it before the first deploy, not after.** The stack publishes
+9102–9106 on the box, and those ports must not be reachable from the
+internet. Allow SSH and 80/443; deny the rest:
+
+```bash
+sudo ufw allow OpenSSH && sudo ufw allow 80 && sudo ufw allow 443 && sudo ufw --force enable
+```
+
+This is a real step, not a precaution. The internal API is signed and the
+socket checks handshake origins, so neither is naked — but the backoffice API
+is on 9105 and its login is the thing an attacker would grind. The overlay
+below removes Mongo's published port entirely, because that one has no
+authentication at all; the app ports stay published because the deploy's own
+health check curls them from the box, and a firewall is the right layer to
+close them.
+
+### 1b. The staging overlay
+
+`infra/docker-compose.staging.yml` is what makes the stack safe on a box that
+is not a laptop. Two changes: **Mongo gets no published port** (this stack
+runs it with no authentication, so a public address means anyone can read or
+drop every collection), and every service gets `restart: always`.
+
+You do not pass it by hand. The deploy writes
+`COMPOSE_FILE=docker-compose.yml:docker-compose.staging.yml` into
+`infra/.env`, and compose reads that exactly as if the `-f` flags had been
+given — so every `docker compose` in both workflows stays bare and none of
+them can disagree about which files are in play. If you run compose on the
+box manually, `cd $DEPLOY_PATH/infra` first and it applies automatically.
+
+It is called `staging` rather than `production` on purpose. Nothing here has
+served a real player yet, and a deployment history claiming production makes
+the first genuine one indistinguishable from this. Rename it when that stops
+being true.
+
 ### 2. Repository secrets
 
 `Settings → Secrets and variables → Actions → Secrets`
@@ -153,9 +188,17 @@ than quietly fetching someone else's image.
 Stated because a deploy pipeline that overstates itself is the problem item 1
 was written about.
 
-- **No staging environment.** It deploys straight to production, gated on
-  CI. For a single-box deployment that is the honest trade; a staging tier
-  would need somewhere to put it.
+- **No second tier.** There is one box, and `docker-compose.staging.yml` is
+  what it runs — the name says the deploy does not claim to be production,
+  not that a separate production tier exists behind it. Promoting a release
+  between two tiers would need somewhere to put the second one.
+- **No TLS, and no reverse proxy.** Services are reached on their published
+  ports over plain HTTP, closed off by a host firewall rather than by not
+  being bound at all. The right shape is a gateway terminating TLS on 443 and
+  routing over the compose network, which then lets the app ports be
+  unpublished the way Mongo's already is — and lets the health check go
+  through the proxy instead of `localhost:9102`. That needs a hostname and a
+  certificate, so it follows the box.
 - **No zero-downtime deploy.** `docker compose up -d` recreates changed
   containers, so there is a short gap. Real zero-downtime needs a load
   balancer and two instances per service — which is also blocked on item 3b,
