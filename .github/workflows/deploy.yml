@@ -1,0 +1,370 @@
+name: Deploy
+
+# Builds one immutable set of images per commit, then ships them.
+#
+# ## Why this is gated on CI rather than triggered by the same push
+#
+# The obvious shape — `on: push: branches: [main]` — is what the reference
+# repo uses, and it is wrong in a way that is easy to miss: it makes CI and
+# deploy two INDEPENDENT reactions to the same event. They start together,
+# so a commit whose tests are still running, or have already failed, is
+# built and shipped anyway. The gate exists but gates nothing.
+#
+# `workflow_run` waits for CI to finish and reads its conclusion, so nothing
+# is built until the suite that decides whether it is safe has passed. That
+# is the entire point of item 1 in docs/TODO.md: "CI is green" should mean
+# the thing that is green is the thing that shipped.
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  # Manual runs exist for redeploying an unchanged commit — restoring a box
+  # after a rebuild, or rolling forward again after a rollback. `ref` is
+  # deliberately absent: a manual run deploys whatever the chosen branch is
+  # at, and choosing an arbitrary commit is what `rollback.yml` is for.
+  workflow_dispatch: {}
+
+# Two deploys of different commits racing each other would leave the box in
+# whichever order finished last, which is not necessarily the newer one.
+# Never cancel in progress: interrupting a deploy halfway leaves some
+# services on the new tag and some on the old, which is worse than a queue.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Build every service image and push it to the registry, tagged by commit.
+  #
+  # Runs even when no deploy target is configured, because the build is
+  # worth having on its own: it proves the production Dockerfiles still
+  # build from a clean checkout, which the CI job does not check — CI builds
+  # with `npm run build` on the runner, not through the multi-stage image.
+  # ---------------------------------------------------------------------
+  build:
+    name: Build and push images
+    runs-on: ubuntu-latest
+    # `workflow_run` fires on failure too. Without this, a red CI run would
+    # trigger a deploy — the exact hazard this workflow's trigger exists to
+    # avoid. `workflow_dispatch` has no parent run, so it passes the check.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.workflow_run.conclusion == 'success'
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      # One failed service should not hide whether the others build.
+      fail-fast: false
+      matrix:
+        include:
+          - service: game-backend
+            dockerfile: infra/docker/service.Dockerfile
+          - service: game-socket
+            dockerfile: infra/docker/service.Dockerfile
+          - service: backoffice-api
+            dockerfile: infra/docker/service.Dockerfile
+          - service: game-frontend
+            dockerfile: infra/docker/frontend.Dockerfile
+          - service: backoffice-frontend
+            dockerfile: infra/docker/frontend.Dockerfile
+    steps:
+      # A `workflow_run` event checks out the DEFAULT branch unless told
+      # otherwise, not the commit that triggered CI. Without this ref the
+      # pipeline would build main's tip while claiming to build the commit
+      # CI passed — the two are usually the same and occasionally are not,
+      # which is the worst kind of bug to have in a deploy path.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Both Dockerfiles COPY from the repo root (`packages/`, `apps/`), so
+      # the build context is the root and the `file:` is the path within it.
+      #
+      # The frontend images bake their API addresses in at BUILD time — Vite
+      # inlines `import.meta.env` into the bundle, so these cannot be changed
+      # by an environment variable on the box. A frontend pointing at the
+      # wrong backend is therefore a rebuild, not a restart. The vars resolve
+      # empty for the three service images, which build-push-action ignores.
+      - name: Build and push ${{ matrix.service }}
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          build-args: |
+            SERVICE=${{ matrix.service }}
+            APP=${{ matrix.service }}
+            VITE_GAME_BACKEND_URL=${{ vars.PUBLIC_GAME_BACKEND_URL }}
+            VITE_GAME_SOCKET_URL=${{ vars.PUBLIC_GAME_SOCKET_URL }}
+            VITE_BACKOFFICE_API_URL=${{ vars.PUBLIC_BACKOFFICE_API_URL }}
+          push: true
+          # Tagged by commit SHA, never by branch alone. `latest` is a moving
+          # target and cannot be rolled back to; a SHA names exactly one
+          # build forever, which is what makes `rollback.yml` possible.
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/${{ matrix.service }}:${{ github.event.workflow_run.head_sha || github.sha }}
+            ghcr.io/${{ github.repository_owner }}/${{ matrix.service }}:latest
+          # Scoped per service AND per Dockerfile-arg set. The reference
+          # repo hit a real bug here worth inheriting the fix for: a shared
+          # cache scope let a build silently reuse a layer from before a
+          # build-arg existed, so an image quietly shipped without it.
+          # Including the frontend URLs in the scope means changing one
+          # forces a rebuild rather than serving a stale bundle.
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+  # ---------------------------------------------------------------------
+  # Ship the images to the box.
+  #
+  # Skipped, loudly and on purpose, when no target is configured. See the
+  # first step for why that is a real state rather than a placeholder.
+  # ---------------------------------------------------------------------
+  deploy:
+    name: Deploy to production
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    # A GitHub Environment is what makes a required-reviewer gate possible
+    # and where the deploy secrets live. It also gives the repo an
+    # deployment history page, which is the audit trail item 1 asks for.
+    environment: production
+    steps:
+      # ---------------------------------------------------------------
+      # The honest half of this pipeline.
+      #
+      # There is no server yet. Rather than commit a workflow that fails on
+      # every run — which trains everyone to ignore a red X — this checks
+      # for the deploy secrets and stops cleanly when they are absent,
+      # saying exactly what is missing.
+      #
+      # It does NOT pass silently: the summary states that nothing shipped.
+      # A pipeline that reports success without deploying is the failure
+      # mode item 1 describes ("CI is green proves less than it sounds
+      # like"), and repeating it one layer down would be worse than having
+      # no deploy job at all.
+      # ---------------------------------------------------------------
+      - name: Check for a deploy target
+        id: target
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          missing=""
+          [ -z "$DEPLOY_HOST" ] && missing="$missing DEPLOY_SSH_HOST"
+          [ -z "$DEPLOY_USER" ] && missing="$missing DEPLOY_SSH_USER"
+          [ -z "$DEPLOY_KEY" ]  && missing="$missing DEPLOY_SSH_KEY"
+
+          if [ -n "$missing" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            {
+              echo "### Images built, nothing deployed"
+              echo
+              echo "Images for \`${{ github.event.workflow_run.head_sha || github.sha }}\` are in the registry and ready."
+              echo
+              echo "No deploy target is configured. Missing secrets:"
+              for s in $missing; do echo "- \`$s\`"; done
+              echo
+              echo "See \`docs/DEPLOY.md\` for what each one is and how to set it."
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning::No deploy target configured — images were built and pushed, but nothing shipped."
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v4
+        if: steps.target.outputs.configured == 'true'
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      # Key-based, not password-based. The reference repo uses `sshpass`
+      # with a password in a secret; a key is revocable without changing a
+      # human's login, cannot be shoulder-surfed, and does not end up in a
+      # process list on the runner.
+      - name: Configure SSH
+        if: steps.target.outputs.configured == 'true'
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          # Pinned, not blindly trusted. `ssh-keyscan` alone accepts whatever
+          # answers on the day, which is how a deploy lands on the wrong box.
+          # Set DEPLOY_SSH_KNOWN_HOSTS to the box's real public key.
+          if [ -n "${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}" ]; then
+            printf '%s\n' "${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          else
+            echo "::warning::DEPLOY_SSH_KNOWN_HOSTS is not set — trusting the host key on first sight."
+            ssh-keyscan -H "${{ secrets.DEPLOY_SSH_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+          fi
+          chmod 600 ~/.ssh/known_hosts
+
+      # The box needs the compose file and nothing else — it never compiles.
+      # `--delete` keeps it a mirror of the commit rather than an accumulating
+      # pile; `infra/.env` is excluded because it is written separately below
+      # and must survive a sync that does not carry it.
+      - name: Sync compose files
+        if: steps.target.outputs.configured == 'true'
+        run: |
+          rsync -az --delete \
+            --exclude '.env' \
+            -e "ssh -i ~/.ssh/deploy_key -o BatchMode=yes" \
+            ./infra/ \
+            "${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}:${{ vars.DEPLOY_PATH || '/opt/slots-engine' }}/infra/"
+
+      # Written fresh every deploy, from secrets, never committed and never
+      # rsynced from a developer's machine. Item 4 in docs/TODO.md is about
+      # where these ultimately belong (a secret manager, with rotation);
+      # this is the same storage the compose stack already expects, injected
+      # from the one place that is at least access-controlled and audited.
+      - name: Write the environment file
+        if: steps.target.outputs.configured == 'true'
+        env:
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/opt/slots-engine' }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
+            "${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}" \
+            "umask 077 && cat > $DEPLOY_PATH/infra/.env" <<EOF
+          REGISTRY=ghcr.io/${{ github.repository_owner }}
+          TAG=${{ github.event.workflow_run.head_sha || github.sha }}
+          NODE_ENV=production
+          SERVICE_AUTH_SECRET=${{ secrets.SERVICE_AUTH_SECRET }}
+          LAUNCH_TOKEN_SECRET=${{ secrets.LAUNCH_TOKEN_SECRET }}
+          BACKOFFICE_JWT_SECRET=${{ secrets.BACKOFFICE_JWT_SECRET }}
+          BOOTSTRAP_ADMIN_EMAIL=${{ vars.BOOTSTRAP_ADMIN_EMAIL }}
+          BOOTSTRAP_ADMIN_PASSWORD=${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}
+          MONGO_DB=${{ vars.MONGO_DB || 'slots_engine' }}
+          # 0 is the correct production value and the startup guard refuses
+          # anything else there — a positive default would hand every new
+          # player free money (docs/TODO.md item H).
+          INITIAL_PLAYER_BALANCE=0
+          # Never in production: it seeds a fixture whose bonus triggers on
+          # every spin. The guard in games.ts refuses it regardless, and
+          # this states the intent alongside it.
+          SEED_TEST_FIXTURES=false
+          GAME_CORS_ORIGINS=${{ vars.GAME_CORS_ORIGINS }}
+          SOCKET_ALLOWED_ORIGINS=${{ vars.SOCKET_ALLOWED_ORIGINS }}
+          BACKOFFICE_CORS_ORIGINS=${{ vars.BACKOFFICE_CORS_ORIGINS }}
+          EOF
+
+      # Records what is running BEFORE the change, so a rollback has
+      # something to name. Without this the previous tag is only discoverable
+      # from the Actions history, which is exactly when nobody wants to go
+      # looking for it.
+      - name: Record the current release
+        id: previous
+        if: steps.target.outputs.configured == 'true'
+        env:
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/opt/slots-engine' }}
+        run: |
+          previous=$(ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
+            "${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}" \
+            "cat $DEPLOY_PATH/.released 2>/dev/null || true")
+          echo "tag=${previous}" >> "$GITHUB_OUTPUT"
+          echo "Previously released: ${previous:-<nothing recorded>}"
+
+      - name: Pull and start
+        if: steps.target.outputs.configured == 'true'
+        env:
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/opt/slots-engine' }}
+          SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
+            "${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}" bash -euo pipefail -s <<EOF
+            echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+            cd '$DEPLOY_PATH/infra'
+
+            # Pull FIRST, as a separate step. If an image is missing or the
+            # registry is unreachable, this fails while the old containers
+            # are still serving traffic — rather than after they have been
+            # stopped, which would be an outage caused by the deploy tool
+            # rather than by the code.
+            docker compose pull
+
+            docker compose up -d --remove-orphans
+
+            # Only recorded after a successful start, so .released always
+            # names a release that actually ran.
+            echo '$SHA' > '$DEPLOY_PATH/.released'
+
+            docker image prune -f
+          EOF
+
+      # A deploy is not finished when the containers start; it is finished
+      # when they answer. Both services expose a readiness endpoint that
+      # already gates CI's own e2e run, so the same check applies here.
+      - name: Verify the deployment is serving
+        if: steps.target.outputs.configured == 'true'
+        env:
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/opt/slots-engine' }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
+            "${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}" bash -euo pipefail -s <<'EOF'
+            for target in "game-backend|http://localhost:9102/health/ready" \
+                          "backoffice-api|http://localhost:9105/health/ready"; do
+              name="${target%%|*}"; url="${target##*|}"
+              ok=false
+              for i in $(seq 1 60); do
+                if curl -fsS "$url" >/dev/null 2>&1; then
+                  echo "$name ready after ${i}s"; ok=true; break
+                fi
+                sleep 2
+              done
+              if [ "$ok" != true ]; then
+                echo "$name never became ready"
+                docker compose -f '/opt/slots-engine/infra/docker-compose.yml' logs --tail 100 || true
+                exit 1
+              fi
+            done
+          EOF
+
+      # Rollback is AUTOMATIC on a failed health check, because the moment
+      # a deploy has broken production is the worst possible time to ask
+      # someone to find the previous tag and type it correctly.
+      #
+      # Only runs when there IS a previous release. The very first deploy has
+      # nothing to roll back to, and pretending otherwise would replace a
+      # clear "the new version is unhealthy" with a confusing failure to
+      # start an image that never existed.
+      - name: Roll back on failure
+        if: failure() && steps.previous.outputs.tag != ''
+        env:
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/opt/slots-engine' }}
+          PREVIOUS: ${{ steps.previous.outputs.tag }}
+        run: |
+          echo "::error::Deploy failed — rolling back to $PREVIOUS"
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
+            "${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}" bash -euo pipefail -s <<EOF
+            cd '$DEPLOY_PATH/infra'
+            sed -i "s/^TAG=.*/TAG=$PREVIOUS/" .env
+            docker compose pull
+            docker compose up -d --remove-orphans
+            echo '$PREVIOUS' > '$DEPLOY_PATH/.released'
+          EOF
+          {
+            echo "### Deploy failed and was rolled back"
+            echo
+            echo "Production is running \`$PREVIOUS\` again."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Summarise
+        if: success() && steps.target.outputs.configured == 'true'
+        run: |
+          {
+            echo "### Deployed"
+            echo
+            echo "- Release: \`${{ github.event.workflow_run.head_sha || github.sha }}\`"
+            echo "- Previous: \`${{ steps.previous.outputs.tag || 'none' }}\`"
+            echo "- Both services answered their readiness checks."
+          } >> "$GITHUB_STEP_SUMMARY"

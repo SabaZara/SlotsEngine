@@ -1,0 +1,141 @@
+name: Rollback
+
+# Puts production back on a named earlier release.
+#
+# `deploy.yml` already rolls back automatically when a deploy fails its
+# health check. This is for the other case, which is the more common one: a
+# deploy that started cleanly and turned out to be wrong an hour later. That
+# is not a failure any automation can detect, so it needs a human and a
+# button.
+#
+# Deliberately does NOT rebuild. The images for every released commit are
+# already in the registry, tagged by SHA, so a rollback is a pull and a
+# restart — seconds rather than the minutes a rebuild would take, and it
+# ships the exact bytes that were running before rather than a fresh build
+# of the same source. Those are not always the same thing: a base image or
+# a transitive dependency can move underneath an unchanged Dockerfile.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Commit SHA to roll back to (the full 40-character SHA, as shown in a previous Deploy run)"
+        required: true
+        type: string
+
+# Shares a concurrency group with `deploy.yml`, so a rollback and a deploy
+# can never run at once and leave the box half on each release.
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  rollback:
+    name: Roll back production
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    environment: production
+    steps:
+      - name: Check for a deploy target
+        id: target
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_SSH_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_SSH_USER }}
+          DEPLOY_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          if [ -z "$DEPLOY_HOST" ] || [ -z "$DEPLOY_USER" ] || [ -z "$DEPLOY_KEY" ]; then
+            echo "::error::No deploy target configured — see docs/DEPLOY.md."
+            exit 1
+          fi
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+
+      # Rejects a tag that is not a full SHA before touching anything.
+      # A short SHA or a branch name would resolve to *some* image, or to
+      # none, and finding out which after the containers have stopped is the
+      # wrong moment. `latest` is refused explicitly because it is the one
+      # tag that cannot mean a specific release.
+      - name: Validate the requested tag
+        run: |
+          tag='${{ inputs.tag }}'
+          if [ "$tag" = "latest" ]; then
+            echo "::error::'latest' is not a release. Give the full commit SHA of the version you want."
+            exit 1
+          fi
+          if ! printf '%s' "$tag" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "::error::'$tag' is not a full 40-character commit SHA."
+            exit 1
+          fi
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          if [ -n "${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}" ]; then
+            printf '%s\n' "${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+          else
+            ssh-keyscan -H "${{ secrets.DEPLOY_SSH_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+          fi
+          chmod 600 ~/.ssh/known_hosts
+
+      # Confirms the images exist BEFORE stopping anything. Rolling back to a
+      # tag whose images were pruned would take production down and leave it
+      # there — the one outcome a rollback must never produce.
+      - name: Verify the target images exist
+        run: |
+          echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+          for service in game-backend game-socket backoffice-api game-frontend backoffice-frontend; do
+            image="ghcr.io/${{ github.repository_owner }}/$service:${{ inputs.tag }}"
+            if ! docker manifest inspect "$image" >/dev/null 2>&1; then
+              echo "::error::$image does not exist — nothing was changed."
+              exit 1
+            fi
+            echo "found $image"
+          done
+
+      - name: Roll back
+        env:
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/opt/slots-engine' }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
+            "${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}" bash -euo pipefail -s <<EOF
+            echo '${{ secrets.GITHUB_TOKEN }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+            cd '$DEPLOY_PATH/infra'
+            sed -i "s/^TAG=.*/TAG=${{ inputs.tag }}/" .env
+            docker compose pull
+            docker compose up -d --remove-orphans
+            echo '${{ inputs.tag }}' > '$DEPLOY_PATH/.released'
+          EOF
+
+      - name: Verify it is serving
+        env:
+          DEPLOY_PATH: ${{ vars.DEPLOY_PATH || '/opt/slots-engine' }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -o BatchMode=yes \
+            "${{ secrets.DEPLOY_SSH_USER }}@${{ secrets.DEPLOY_SSH_HOST }}" bash -euo pipefail -s <<'EOF'
+            for target in "game-backend|http://localhost:9102/health/ready" \
+                          "backoffice-api|http://localhost:9105/health/ready"; do
+              name="${target%%|*}"; url="${target##*|}"
+              ok=false
+              for i in $(seq 1 60); do
+                if curl -fsS "$url" >/dev/null 2>&1; then
+                  echo "$name ready after ${i}s"; ok=true; break
+                fi
+                sleep 2
+              done
+              [ "$ok" = true ] || { echo "$name never became ready"; exit 1; }
+            done
+          EOF
+
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo "### Rolled back"
+            echo
+            echo "Production is now running \`${{ inputs.tag }}\`."
+            echo
+            echo "The commit that was rolled back FROM is still in the registry —"
+            echo "roll forward the same way once it is fixed."
+          } >> "$GITHUB_STEP_SUMMARY"

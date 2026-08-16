@@ -25,7 +25,20 @@ services:
       retries: 20
       start_period: 10s
 
+  # Every buildable service carries BOTH `image:` and `build:`.
+  #
+  # `build:` is what a developer uses — `docker compose up --build` compiles
+  # from source and tags the result as `image:`, so local behaviour is
+  # unchanged. `image:` is what a deploy uses: with REGISTRY and TAG set,
+  # `docker compose pull` fetches the exact images CI built for one commit
+  # and `up -d` runs them without the box ever compiling anything.
+  #
+  # The defaults matter. `slots-engine/<service>:local` is a name no registry
+  # serves, so a `pull` without REGISTRY set fails loudly instead of quietly
+  # fetching someone else's image, and a local build cannot be mistaken for a
+  # released one when reading `docker images`.
   game-backend:
+    image: ${REGISTRY:-slots-engine}/game-backend:${TAG:-local}
     build:
       context: ..
       dockerfile: infra/docker/service.Dockerfile
@@ -63,6 +76,7 @@ services:
       start_period: 15s
 
   game-socket:
+    image: ${REGISTRY:-slots-engine}/game-socket:${TAG:-local}
     build:
       context: ..
       dockerfile: infra/docker/service.Dockerfile
@@ -92,6 +106,7 @@ services:
         condition: service_healthy
 
   backoffice-api:
+    image: ${REGISTRY:-slots-engine}/backoffice-api:${TAG:-local}
     build:
       context: ..
       dockerfile: infra/docker/service.Dockerfile
@@ -123,6 +138,7 @@ services:
         condition: service_healthy
 
   backoffice-frontend:
+    image: ${REGISTRY:-slots-engine}/backoffice-frontend:${TAG:-local}
     build:
       context: ..
       dockerfile: infra/docker/frontend.Dockerfile
@@ -136,6 +152,7 @@ services:
         condition: service_started
 
   game-frontend:
+    image: ${REGISTRY:-slots-engine}/game-frontend:${TAG:-local}
     build:
       context: ..
       dockerfile: infra/docker/frontend.Dockerfile

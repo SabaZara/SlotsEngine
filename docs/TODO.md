@@ -97,16 +97,73 @@ existed matters more than the fix, and that reasoning is easy to lose.
 
 ## Open
 
-### 1. No deploy pipeline — CI verifies, nothing ships
-**Severity: high (process) · Effort: medium**
+### ~~1. No deploy pipeline — CI verifies, nothing ships~~ — built, and waiting on a host
 
-`ci.yml` builds, typechecks, tests and runs three end-to-end suites, and
-then stops. There is no deploy job, no environment, no rollback path. The
-gate the review asked for exists; the thing it is supposed to gate does
-not.
+**The pipeline exists.** `deploy.yml` builds five images and pushes them
+tagged by commit SHA; `rollback.yml` puts production back on a named earlier
+release. Full setup in `docs/DEPLOY.md`.
 
-This is deliberate for now — there is nowhere to deploy to — but it means
-"CI is green" currently proves less than it sounds like it does.
+**The design decision that mattered.** `deploy.yml` triggers on
+`workflow_run` — waiting for CI to *finish* and reading its conclusion —
+rather than on `push` alongside CI. The `push` form is the obvious shape, and
+it is what the reference repo uses; it is also subtly wrong, because it makes
+CI and deploy two independent reactions to the same event. They start
+together, so a commit whose tests are still running, or have already failed,
+gets built and shipped anyway. **The gate exists and gates nothing** — which
+is this item's own complaint, reintroduced one layer down. The `build` job
+additionally checks the parent run's conclusion, since `workflow_run` fires
+on failure too.
+
+**What is deliberately still missing: the host.** No deploy secrets are
+configured, so the deploy job builds, pushes, and then stops with a warning
+annotation and a summary naming exactly which secrets are absent. It does
+**not** fail — a workflow red on every run trains everyone to ignore a red X,
+and the first genuine failure then goes unnoticed. It does **not** pass
+silently either, which would be this item's complaint a third time.
+
+Building on every commit earns its place regardless: it proves the production
+Dockerfiles still build from a clean checkout, which CI does not check. CI
+builds with `npm run build` on the runner, never through the multi-stage
+image.
+
+**Verified against a real registry rather than by reading the YAML.** A local
+`registry:2` was stood up, all five images built with the exact build args
+and context the workflow uses, and pushed. Then the local stack was torn down
+and **every local image deleted**, so anything that started had to have been
+pulled. `docker compose pull` + `up -d` brought the stack up from the
+registry alone, both services answered their readiness checks, and
+`e2e:spin` passed end to end against it. `docker inspect` confirmed the
+containers were running the SHA-tagged images, not local builds.
+
+Rollback was tested the same way: a second release was pushed under a
+different tag, deployed, and rolled back — the container moved from the new
+tag to the old and came up healthy. The pre-flight guard was tested in both
+directions, finding all five real images and refusing a tag that was never
+built, which is what stops a rollback taking production down and leaving it
+there.
+
+**Compose changed to make any of this possible.** Every buildable service now
+carries `image:` alongside `build:`. `build:` is unchanged for local work;
+`image:` is what a deploy runs. The default `slots-engine/<service>:local` is
+a name no registry serves, so a `pull` without `REGISTRY` set fails loudly
+instead of quietly fetching someone else's image, and a local build cannot be
+mistaken for a released one in `docker images`. Confirmed that
+`up -d --build` still behaves exactly as before.
+
+**Three deliberate departures from the reference repo's `deploy.yml`**, which
+was read first per the routine at the top of this file:
+
+| Theirs | Here | Why |
+|---|---|---|
+| `sshpass` with a password secret | SSH key | Revocable without changing a human's login; never in a process list on the runner. |
+| `ssh-keyscan` at deploy time | Pinned `DEPLOY_SSH_KNOWN_HOSTS`, with a warning when absent | `keyscan` trusts whatever answers on the day, which is how a deploy lands on the wrong box. |
+| No rollback | Automatic on failed health check, plus a manual workflow | This item named "no rollback path" explicitly. |
+
+What the pipeline still does **not** do is listed at the end of
+`docs/DEPLOY.md` rather than implied away: no staging tier, no zero-downtime
+deploy (blocked on item 3b — the limiters count per process), no database
+migrations, and secrets are still environment variables rather than a managed
+store (item 4).
 
 ### 2. Branch protection is not enforced
 **Severity: medium · Effort: trivial (needs a paid plan)**
@@ -783,19 +840,28 @@ testing was extracted into `paylineGrid.ts`, `reelStrip.ts` and the two
 - **Item 3c** — `e2e:backoffice` exhausts the per-IP login limit on a second
   consecutive run and misreports it as a broken deactivation check.
 
-### E. Operational — unchanged, and the real blockers
+### E. Operational — what actually blocks going live
 
-Items 1, 2, 3b and 4 above. Ordered by what actually blocks going live:
+Ordered by what stands between the current state and a running service.
 
-1. **No deploy pipeline (item 1).** CI verifies and then stops. Still the
-   largest gap between "green" and "shipped".
-2. **Secrets in environment variables (item 4).** Fine locally, wrong for
-   production; the startup guards already refuse weak values, so what is
-   missing is storage and rotation.
+1. **A host to deploy to (item 1).** The pipeline is built, tested against a
+   real registry, and gated on CI. What is missing is a box and the six
+   secrets naming it — every one listed in `docs/DEPLOY.md`. This is now a
+   provisioning decision rather than an engineering one, and it is the only
+   thing between a green CI run and a running service.
+2. **Secrets in environment variables (item 4).** The deploy injects them
+   from GitHub Actions rather than a committed file, which is better but is
+   still not a managed store with rotation. The startup guards already refuse
+   weak values, so what is missing is storage and rotation, not validation.
 3. **Per-instance rate limits (item 3b).** Correct for one instance, wrong
-   the moment there are two.
+   the moment there are two — and it is what blocks zero-downtime deploys,
+   since those need two instances of a service running at once.
 4. **Branch protection (item 2).** Needs a paid plan; the pre-push hook
    covers the realistic case.
+
+The dependency worth noticing: **3b blocks zero-downtime**, so the deploy's
+brief gap during `up -d` is not independently fixable. Both are recorded in
+`docs/DEPLOY.md`'s closing section rather than implied away.
 
 ### I. The internal routes' rate limit is unreachable in practice
 
