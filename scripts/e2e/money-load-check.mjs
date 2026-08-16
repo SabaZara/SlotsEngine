@@ -220,46 +220,63 @@ console.log("\n3. Concurrent spins cannot overdraw the balance");
   const playerId = `load-${randomUUID().slice(0, 8)}`;
   const bigBet = 5000;
 
-  // Spend down to near-empty SEQUENTIALLY first, then race at the edge.
+  // Spend down at the largest offered bet, then race a burst at the edge.
   //
-  // The obvious version — fire a huge batch concurrently and expect some to
-  // be refused — is not a test, it is a coin flip. Wins top the balance back
-  // up, so whether the player ever goes broke depends on the RNG: one run
-  // drained in 38 spins, another finished 105 spins richer than it started.
-  // A check that passes or fails on luck is worse than no check, because a
-  // real regression is indistinguishable from an unlucky afternoon.
+  // Getting this to be a *test* rather than a coin flip took three attempts,
+  // and the dead ends are worth recording because each looks reasonable:
   //
-  // Draining first makes the interesting moment deterministic: the balance
-  // is knowingly below the cost of the concurrent burst that follows, so
-  // the time-of-check/time-of-use gap is exercised on every run.
+  // Firing a big batch and expecting some refusals depends entirely on the
+  // RNG — one run drained in 38 spins, another finished 105 spins richer
+  // than it started.
+  //
+  // Grinding the balance down first fails the same way, just later. The
+  // drain is a random walk at ~95% return: usually 24-192 spins to reach 0,
+  // but CI hit its cap at a balance of 525000 and a local run at 260000. No
+  // iteration cap makes a random walk deterministic.
+  //
+  // Betting more than the balance does not work either: bet validation runs
+  // before the funds check, so an arbitrary amount is refused as
+  // invalid_bet_amount and never reaches the money path at all. There is no
+  // route that sets a balance directly, and there should not be one.
+  //
+  // So the drain is bounded and its outcome is *reported* rather than
+  // assumed. If the player did go broke, the overdraw race is asserted in
+  // full; if the walk went the other way, the section says it skipped
+  // instead of quietly passing. A check that cannot run is not a check that
+  // succeeded.
+  const spent = [];
   let drained = await balanceOf(playerId);
-  for (let i = 0; i < 500 && drained >= bigBet; i++) {
+  for (let i = 0; i < 400 && drained >= bigBet; i++) {
     const result = await spin(playerId, { bet: bigBet });
     if (result.status !== 200) break;
+    spent.push(result);
     drained = await balanceOf(playerId);
   }
 
-  check("the player was actually spent down to under one bet", drained < bigBet, `balance ${drained}`);
+  if (drained >= bigBet) {
+    console.log(`  – the walk never went broke (balance ${drained} after ${spent.length} spins); skipping (not a failure)`);
+  } else {
+    const opening = drained;
+    // Every one of these would overdraw, since the balance is now under a
+    // single bigBet. None may be honoured, and none may take the balance
+    // below zero — the time-of-check/time-of-use gap, run CONCURRENCY wide.
+    const burst = await Promise.all(
+      Array.from({ length: CONCURRENCY }, () => spin(playerId, { bet: bigBet })),
+    );
 
-  const opening = drained;
-  // Every one of these would overdraw. At most zero should be allowed
-  // through, and none may take the balance below zero.
-  const burst = await Promise.all(
-    Array.from({ length: CONCURRENCY }, () => spin(playerId, { bet: bigBet })),
-  );
+    const resolved = burst.filter((r) => r.status === 200 && r.round);
+    const refused = burst.filter((r) => r.error === "insufficient_funds");
 
-  const resolved = burst.filter((r) => r.status === 200 && r.round);
-  const refused = burst.filter((r) => r.error === "insufficient_funds");
+    check(
+      "the unaffordable burst was refused, not partially honoured",
+      refused.length === burst.length,
+      `${resolved.length} of ${burst.length} were allowed through from a balance of ${opening}`,
+    );
 
-  check(
-    "the unaffordable burst was refused, not partially honoured",
-    refused.length === burst.length,
-    `${resolved.length} of ${burst.length} were allowed through from a balance of ${opening}`,
-  );
-
-  const final = await balanceOf(playerId);
-  check("balance never went negative", final >= 0, `final balance ${final}`);
-  check("a fully refused burst moved no money at all", final === opening, `expected ${opening}, got ${final}`);
+    const final = await balanceOf(playerId);
+    check("balance never went negative", final >= 0, `final balance ${final}`);
+    check("a fully refused burst moved no money at all", final === opening, `expected ${opening}, got ${final}`);
+  }
 }
 
 // ---------------------------------------------------------------------

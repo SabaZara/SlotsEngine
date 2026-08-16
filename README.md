@@ -348,6 +348,23 @@ make a real bug likely to surface under contention, and it says so when it
 passes. Its bonus-concurrency section skips against the bundled game, whose
 only module resolves in a single step — an honest gap, not a silent pass.
 
+**Making the overdraw section deterministic took three attempts**, and the
+dead ends are instructive because each looks reasonable. Firing a large
+batch and expecting refusals depends on the RNG: one run drained in 38
+spins, another finished 105 spins richer than it started. Grinding the
+balance down first fails the same way, just later — the drain is a random
+walk at ~95% return, and while it usually reaches zero in 24–192 spins, CI
+hit its cap at a balance of 525000. Betting more than the balance does not
+work either, because bet validation runs before the funds check, so the
+request is refused as `invalid_bet_amount` without ever reaching the money
+path.
+
+So the drain is bounded and its outcome is *reported*. If the player went
+broke, the race is asserted in full; if the walk went the other way, the
+section prints that it skipped. A check that could not run is not a check
+that passed — and the distinction is the whole reason to trust the ones
+that did.
+
 **A note on the gap between them.** Every bug found late in this project was
 found by the end-to-end runs, never the unit tests:
 
