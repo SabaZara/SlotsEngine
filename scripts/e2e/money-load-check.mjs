@@ -83,10 +83,29 @@ async function spin(playerId, { clientRequestId, bet = BET, game = GAME_ID } = {
   return { status: response.status, ...payload };
 }
 
+/**
+ * Throws rather than returning `undefined` on a failed read.
+ *
+ * This used to destructure `balance` straight off the body, so a refused
+ * request — most realistically a 429, since this script can spend the
+ * caller's whole `GAME_RATE_LIMIT` bucket on its own — silently produced
+ * `undefined`. That then flowed into section 3 as
+ * "0 of 25 were allowed through from a balance of undefined", which reads
+ * like an overdraw bug in the money path rather than a throttled HTTP call.
+ *
+ * A check that misreports its own failure mode is worse than one that
+ * stops: the first sends you looking for a bug that is not there.
+ */
 async function balanceOf(playerId) {
   const response = await call("/internal/players/balance", { operatorId: OPERATOR, playerId });
-  const { balance } = await response.json();
-  return balance;
+  const body = await response.json().catch(() => ({}));
+  if (response.status !== 200 || typeof body.balance !== "number") {
+    throw new Error(
+      `balance read failed for ${playerId}: HTTP ${response.status} ${JSON.stringify(body).slice(0, 120)}` +
+        (response.status === 429 ? "\n  (rate limited — see GAME_RATE_LIMIT; this script is a heavy single caller)" : ""),
+    );
+  }
+  return body.balance;
 }
 
 /** Runs `total` tasks with at most `limit` in flight, so the pressure is

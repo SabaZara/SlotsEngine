@@ -89,6 +89,15 @@ jobs:
             # Seeds the pick-bonus fixture, without which the load check's
             # multi-step bonus race has nothing to run against and skips.
             echo "SEED_TEST_FIXTURES=true"
+            # The load check is a heavy SINGLE caller: ~400 spins plus a
+            # balance read after each, all signed as one service name, and
+            # `/internal/*` is limited per caller. At the shipped default of
+            # 600/min it exhausts its own bucket mid-run, and the failure
+            # reads like an overdraw bug in the money path rather than a
+            # throttled request. Raised for the CI stack only; the default
+            # is unchanged everywhere the limiter is the thing being
+            # trusted. The limiter itself is covered by its own tests.
+            echo "GAME_RATE_LIMIT=20000"
           } >> infra/.env
 
       - name: Start the stack
