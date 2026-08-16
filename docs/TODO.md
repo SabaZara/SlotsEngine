@@ -602,6 +602,17 @@ testing was extracted into `paylineGrid.ts`, `reelStrip.ts` and the two
   refusal tests stay unseeded deliberately: their targets are far outside any
   plausible measurement, so their verdict never depended on the draw.
 
+  **CI caught this before the fix landed, and its evidence is worse than
+  the local measurement.** Run 31965736011 failed with `measured RTP 0.8851
+  differs from target 0.95 by 0.0649` — a drift well past the 0.05 tolerance,
+  where 25 local runs of the same draft produced a minimum of 0.9062 (drift
+  0.0438) and never actually refused. So the distribution's tail is fatter
+  than a couple of dozen samples suggests, and "I ran it several times and it
+  passed" was never evidence that it would keep passing. The seeded run
+  measures 0.945715 on every execution — a drift of 0.0043, a **12x** margin
+  inside tolerance — verified byte-identical across three runs against the
+  exact draft the tests build.
+
   Worth recording that the seed passthrough is an **equivalent mutation**:
   deleting it leaves every test passing, because the seed changes only
   whether a decision repeats, not what it is. A mutation that reintroduces
