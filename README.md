@@ -255,17 +255,25 @@ that every local run had reported as green:
   passed on a retry. Build order is now explicit.
 - **`frontend.Dockerfile` built its app without its packages**, which only
   shows in an image with no `dist/` already present.
-- **The test glob was shell-dependent**, and this is the one worth
-  remembering. `packages/*/src/**/*.test.ts` matched all 15 test files under
-  zsh, but npm runs scripts under `sh` — under dash it matched 2. The
-  corrected `packages/**/*.test.ts` was still wrong, silently running 78 of
-  244 tests. Only a leading `**/` is expanded by tsx itself rather than the
-  shell, and it is now verified identical under sh, bash, dash and zsh.
+- **Test discovery was a glob**, and this is the one worth remembering. It
+  took three attempts to fix because the variable kept moving:
+  `packages/*/src/**/*.test.ts` matched all 15 test files under zsh and 2
+  under dash — npm runs scripts under `sh`, so coverage depended on the
+  machine. `packages/**/*.test.ts` silently ran 78 of 244. And no pattern at
+  all works on the Node 20 this project pins, because Node's runner only
+  learned to expand globs in 22 — which is why the first two "verified"
+  fixes still failed: they were tested on Node 24.
+
+  Discovery now happens in `scripts/run-tests.mjs`, which walks the tree and
+  hands tsx an explicit file list, removing both the shell and the Node
+  version from the question. Verified on Node 20 and 24, under sh, bash,
+  dash and zsh.
 
 The pattern across all three: none was a logic error, and none was
 detectable from a machine where the previous build's output was still lying
-around. The last is the sharpest — a shell-dependent glob doesn't fail, it
-reports success for a fraction of the suite.
+around and a newer Node was installed. The last is the sharpest — a
+shell-dependent glob doesn't fail, it reports success for a fraction of the
+suite.
 
 **A note on the gap between them.** Every bug found late in this project was
 found by the end-to-end runs, never the unit tests:
