@@ -1,6 +1,6 @@
 import type { Db } from "mongodb";
 import type { GameDefinition } from "@slots-engine/shared-types";
-import { REFERENCE_GAME } from "@slots-engine/math-engine";
+import { PICK_BONUS_GAME, REFERENCE_GAME } from "@slots-engine/math-engine";
 
 export class GameNotFoundError extends Error {}
 
@@ -21,7 +21,7 @@ export async function loadGameDefinition(db: Db, gameId: string): Promise<GameDe
 }
 
 /**
- * Seeds the reference game on first boot.
+ * Seeds the reference game on first boot, plus test fixtures when asked.
  *
  * Strictly non-overwriting: `$setOnInsert` means a real publish that has
  * advanced the version is never clobbered by a later restart. An
@@ -29,14 +29,34 @@ export async function loadGameDefinition(db: Db, gameId: string): Promise<GameDe
  * moment anyone published a second version.
  */
 export async function seedReferenceGame(db: Db): Promise<void> {
+  await seedGame(db, REFERENCE_GAME);
+
+  // The pick-bonus fixture is a TEST INSTRUMENT, not a game: its bonus is
+  // tuned to trigger constantly so the multi-step step race is reachable in
+  // a few spins rather than a few hundred. That makes its return
+  // meaningless, so it is seeded only behind an explicit flag and never in
+  // production — a house with a permanently-triggering bonus on the shelf
+  // is exactly the kind of thing that escapes into a real environment.
+  if (process.env.SEED_TEST_FIXTURES === "true" && process.env.NODE_ENV !== "production") {
+    await seedGame(db, PICK_BONUS_GAME);
+  }
+}
+
+/**
+ * Strictly non-overwriting: `$setOnInsert` means a real publish that has
+ * advanced the version is never clobbered by a later restart. An
+ * unconditional re-seed would fight the `gameId_version_unique` index the
+ * moment anyone published a second version.
+ */
+async function seedGame(db: Db, game: GameDefinition): Promise<void> {
   await db.collection("games").updateOne(
-    { gameId: REFERENCE_GAME.gameId },
-    { $setOnInsert: { ...REFERENCE_GAME } },
+    { gameId: game.gameId },
+    { $setOnInsert: { ...game } },
     { upsert: true },
   );
   await db.collection("gameVersions").updateOne(
-    { gameId: REFERENCE_GAME.gameId, version: REFERENCE_GAME.version },
-    { $setOnInsert: { ...REFERENCE_GAME } },
+    { gameId: game.gameId, version: game.version },
+    { $setOnInsert: { ...game } },
     { upsert: true },
   );
 }

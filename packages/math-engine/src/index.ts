@@ -6,6 +6,7 @@ export * from "./engine/bonusTrigger.js";
 export * from "./engine/spin.js";
 export * from "./engine/simulate.js";
 export * from "./engine/fixtures/reference-game.js";
+export * from "./engine/fixtures/pick-bonus-game.js";
 export * from "./bonus/types.js";
 export * from "./bonus/registry.js";
 export * from "./registry.js";

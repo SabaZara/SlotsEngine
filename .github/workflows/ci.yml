@@ -86,6 +86,9 @@ jobs:
             echo "LAUNCH_TOKEN_SECRET=ci-only-launch-secret-not-a-real-credential-0002"
             echo "BACKOFFICE_JWT_SECRET=ci-only-backoffice-secret-not-a-real-cred-0003"
             echo "BOOTSTRAP_ADMIN_PASSWORD=ci-admin-password"
+            # Seeds the pick-bonus fixture, without which the load check's
+            # multi-step bonus race has nothing to run against and skips.
+            echo "SEED_TEST_FIXTURES=true"
           } >> infra/.env
 
       - name: Start the stack

@@ -38,6 +38,9 @@ services:
       SERVICE_AUTH_SECRET: ${SERVICE_AUTH_SECRET}
       LAUNCH_TOKEN_SECRET: ${LAUNCH_TOKEN_SECRET}
       INITIAL_PLAYER_BALANCE: ${INITIAL_PLAYER_BALANCE:-100000}
+      # Seeds the pick-bonus test fixture. Never set in production — the
+      # guard in games.ts refuses it there regardless.
+      SEED_TEST_FIXTURES: ${SEED_TEST_FIXTURES:-false}
       GAME_CORS_ORIGINS: ${GAME_CORS_ORIGINS:-http://localhost:9104}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       NODE_ENV: ${NODE_ENV:-development}

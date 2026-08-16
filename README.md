@@ -345,8 +345,29 @@ unique index is the guarantee.
 
 What the check does not do is prove the absence of a race. It is written to
 make a real bug likely to surface under contention, and it says so when it
-passes. Its bonus-concurrency section skips against the bundled game, whose
-only module resolves in a single step — an honest gap, not a silent pass.
+passes.
+
+Its bonus section races the **multi-step `pick` module**, which needs a game
+the reference cannot provide — `reference-5x3` carries `wheel`, which
+resolves entirely at `start`, so there is no second step to race.
+`pick-bonus-5x3` exists for this: a fixture with a 100% trigger rate and a
+nine-tile, one-blank round, seeded only when `SEED_TEST_FIXTURES=true` and
+refused outright in production, because a permanently-triggering bonus is
+exactly the sort of thing that escapes into a real environment.
+
+That section also corrected an assumption worth recording. The obvious
+assertion — *exactly one concurrent step returns 200* — is wrong. Several
+callers can read the same `stepIndex` before any of them writes, so more
+than one claim can legitimately succeed against different indexes; the
+extras are then refused by the module, because the tile is already
+revealed. The claim and the module's own state check are two layers of one
+guard. What must never happen is the tile being **evaluated twice**, so
+that is what the check asserts. Removing the atomic claim takes accepted
+steps from 2 to 10 and the check fails — while the recorded win stays
+correct, because the pick module decides its layout at `start`. Belt and
+braces, both observed doing their job.
+
+A running list of what is still open is in [docs/TODO.md](docs/TODO.md).
 
 **Making the overdraw section deterministic took three attempts**, and the
 dead ends are instructive because each looks reasonable. Firing a large

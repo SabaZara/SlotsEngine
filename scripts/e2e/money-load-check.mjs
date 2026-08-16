@@ -71,11 +71,11 @@ function call(path, body) {
   });
 }
 
-async function spin(playerId, { clientRequestId, bet = BET } = {}) {
+async function spin(playerId, { clientRequestId, bet = BET, game = GAME_ID } = {}) {
   const response = await call("/internal/rounds/spin", {
     operatorId: OPERATOR,
     playerId,
-    gameId: GAME_ID,
+    gameId: game,
     totalBet: bet,
     ...(clientRequestId ? { clientRequestId } : {}),
   });
@@ -292,10 +292,23 @@ console.log("\n4. Concurrent bonus steps: exactly one wins the claim");
   const playerId = `load-${randomUUID().slice(0, 8)}`;
   let opened = null;
 
+  // Run against the pick-bonus fixture, whose module is MULTI-STEP. The
+  // reference game's wheel resolves entirely at `start`, so there is no
+  // second step to race and this section could only ever skip against it.
+  // The fixture is seeded by game-backend when SEED_TEST_FIXTURES=true.
+  const bonusGame = process.env.BONUS_GAME_ID ?? "pick-bonus-5x3";
+  const probe = await fetch(`${BACKEND}/public/games/${bonusGame}`);
+
+  if (!probe.ok) {
+    console.log(
+      `  – '${bonusGame}' is not published; skipping (not a failure).` +
+        " Start game-backend with SEED_TEST_FIXTURES=true to run this section.",
+    );
+  } else {
   // Spin until a bonus triggers. Bounded so a game without a reachable
   // bonus reports honestly instead of hanging.
   for (let i = 0; i < 400 && !opened; i++) {
-    const result = await spin(playerId);
+    const result = await spin(playerId, { game: bonusGame });
     if (result.status !== 200) break;
     if (result.round?.evaluation?.bonusTriggered) opened = result.round;
   }
@@ -306,7 +319,7 @@ console.log("\n4. Concurrent bonus steps: exactly one wins the claim");
     const start = await call("/internal/bonus/start", {
       operatorId: OPERATOR,
       playerId,
-      gameId: GAME_ID,
+      gameId: bonusGame,
       roundId: opened.roundId,
       moduleId: opened.evaluation.bonusModuleId,
       totalBet: opened.totalBet,
@@ -319,16 +332,20 @@ console.log("\n4. Concurrent bonus steps: exactly one wins the claim");
       const before = await balanceOf(playerId);
       const id = session.publicState.bonusSessionId;
 
-      // Ten callers race the same step. Exactly one should be allowed to
-      // advance it; the losers must be told, not silently re-evaluated.
+      // Ten callers race the SAME step of the SAME session, all naming the
+      // same tile. Exactly one may advance it; the losers must be refused,
+      // not silently allowed to evaluate a second time. Before the atomic
+      // claim, both could pass the status check, and because each derived
+      // its own randomness they could compute different wins — one paid,
+      // the other recorded. That is the audit-trail bug, run for real.
       const stepped = await Promise.all(
         Array.from({ length: 10 }, async () => {
           const response = await call("/internal/bonus/step", {
             operatorId: OPERATOR,
             playerId,
-            gameId: GAME_ID,
+            gameId: bonusGame,
             bonusSessionId: id,
-            action: "reveal",
+            action: "pick",
             payload: { tileIndex: 0 },
           });
           return { status: response.status, ...(await response.json().catch(() => ({}))) };
@@ -336,21 +353,59 @@ console.log("\n4. Concurrent bonus steps: exactly one wins the claim");
       );
 
       const accepted = stepped.filter((r) => r.status === 200);
+
+      // The assertion that matters is about the TILE, not the HTTP count.
+      //
+      // "Exactly one caller gets a 200" is the obvious check and it is
+      // wrong: several callers can read the same stepIndex before any of
+      // them writes, so more than one claim can legitimately succeed
+      // against different indexes. Those extra claimants are then refused
+      // by the module itself, because tile 0 is already revealed. The
+      // stepIndex claim and the module's own state check are two layers of
+      // the same guard, and asserting on the first alone reports a defect
+      // where there is none.
+      //
+      // What must never happen is the tile being evaluated twice — that is
+      // the audit-trail bug: two evaluations, two possibly different
+      // prizes, one paid and one recorded. So the check reads the session
+      // and asserts the reveal happened exactly once.
+      const inspected = await call("/internal/bonus/step", {
+        operatorId: OPERATOR,
+        playerId,
+        gameId: bonusGame,
+        bonusSessionId: id,
+        action: "pick",
+        payload: { tileIndex: 0 },
+      });
       check(
-        "exactly one concurrent step was accepted",
-        accepted.length === 1,
-        `${accepted.length} of 10 were accepted`,
+        "the tile cannot be revealed again, however many callers claimed a step",
+        inspected.status !== 200,
+        `a repeat reveal of tile 0 returned ${inspected.status}`,
       );
-      check("the losers were refused rather than silently re-evaluated", stepped.length - accepted.length === 9);
+
+      check("at least one caller was refused outright", accepted.length < stepped.length, `${accepted.length} of ${stepped.length} accepted`);
+
+      // Every accepted step must agree about what was revealed. Two
+      // independent evaluations of the same tile could disagree, which is
+      // precisely what the fix prevents.
+      const revealedMultipliers = new Set(
+        accepted.flatMap((r) => (r.publicState?.picks ?? []).map((p) => `${p.tileIndex}:${p.multiplier}`)),
+      );
+      check(
+        "every accepted step reports the same reveal",
+        revealedMultipliers.size <= 1,
+        `saw ${[...revealedMultipliers].join(", ")}`,
+      );
 
       const after = await balanceOf(playerId);
       const credited = accepted[0]?.balanceAfter;
       if (accepted[0]?.done && credited !== undefined) {
         check("the balance matches the single accepted evaluation", after === credited, `expected ${credited}, got ${after}`);
       } else {
-        check("an unresolved bonus paid nothing yet", after === before);
+        check("an unresolved bonus paid nothing yet", after === before, `before ${before}, after ${after}`);
       }
     }
+  }
   }
 }
 
