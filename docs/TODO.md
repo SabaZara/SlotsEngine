@@ -282,6 +282,154 @@ only behind a flag and refused in production.
 
 ---
 
+## Remaining work, in the order I would do it
+
+A full sweep of what is left, taken from the codebase rather than from
+memory: every source file was checked for a sibling test, and modules with
+no direct test were then checked for indirect coverage through the route
+suites. Sizes are real line counts.
+
+The short version: **the money path, the identity boundary and the schema
+layer are now covered.** What remains is mostly the surfaces around them —
+boot guards, the admin auth hook, the frontend, and the operational gaps
+that were always known.
+
+### A. Untested and genuinely uncovered — do these first
+
+These have no direct test AND no meaningful indirect coverage.
+
+| Module | Lines | Why it matters |
+|---|---:|---|
+| `game-backend/src/startupGuards.ts` | 45 | **Highest value left.** Refuses to boot on a missing or weak secret, on `SERVICE_AUTH_SECRET === LAUNCH_TOKEN_SECRET`, and on `INITIAL_PLAYER_BALANCE` being set in production — that last one grants free money to every new player. Zero tests: `assertStartupConfig` appears in no test file. A guard nobody has watched refuse is a guard nobody knows works. |
+| `backoffice-api/src/auth/middleware.ts` | 69 | The hook every admin route depends on: bearer parsing, `verifySession`, the `tokenVersion` revocation check, and role guards. `app.test.ts` touches it obliquely (one assertion mentions its error codes) but nothing tests the hook itself — notably the revocation lookup, which is the reason every request pays an extra database read. |
+| `backoffice-api/src/games/simulateClient.ts` | 66 | Runs the pre-publish simulation **in this process** (deliberately — a 100k-spin run on game-backend would stall live players). Untested, and it carries `ASSUMED_BONUS_RETURN_MULTIPLIER = 20`: a flat estimate for a triggered bonus rather than playing the module. That constant feeds `bonusRtp`, which feeds the measured RTP the publish gate compares against target — so **the number the gate trusts is part measurement, part assumption**, and nothing pins the assumption. The file says so honestly; see item G below. |
+| `game-socket/src/index.ts` | 118 | The connection lifecycle — limiter wiring, session-map cleanup on close, the `MAX_CONNECTIONS` ceiling. `session.ts`, `rateLimit.ts`, `origin.ts` and `backendClient.ts` are each well covered; the file that wires them together is not. |
+| `game-backend/src/index.ts` | 175 | Same shape: composition, the CORS delegator, the rate-limit key generator, the error handler, and the bonus-sweep interval. Every piece is tested individually; the assembly is not. Note F6 and F7 were both *assembly* bugs. |
+
+### B. Covered indirectly, worth direct tests
+
+Real logic reachable only through route tests today, so a failure names a
+route rather than the rule that broke.
+
+| Module | Lines | Gap |
+|---|---:|---|
+| `backoffice-api/src/auth/users.ts` | 135 | Role changes and deactivation both bump `tokenVersion` — the mechanism that makes a demotion take effect immediately instead of up to eight hours later. Exercised through `/v1/users` route tests; the invariant deserves its own. |
+| `backoffice-api/src/games/drafts.ts` | 131 | `blankDraft`, `saveDraft`, `draftFromPublished`. This session found that `draftFromPublished` returns no `status` field and that publishing does not clear the draft — both discovered by a test failing, neither written down anywhere. |
+| `backoffice-api/src/games/publish.ts` | 131 | The RTP gate is well covered through routes (and closes the review's finding #2). The versioning and audit-write paths are not directly tested. |
+| `backoffice-api/src/auth/passwords.ts` | 73 | scrypt hashing and verification. One indirect reference. Worth pinning the format and that verification is constant-time-ish, since a rewrite here is easy to get subtly wrong. |
+| `game-backend/src/routes/*.ts` | ~250 | `rounds`, `bonus`, `simulate`, `public`, `launchTokens`, `serviceAuth`. Well exercised by the three e2e suites, which is real coverage — but e2e failures are slow and name a flow, not a branch. |
+| `shared-types/src/money.ts` | 84 | `splitIntegerEvenly` and friends. Referenced widely, tested directly nowhere. The "no minor unit created or lost" property is exactly the kind of thing a property test would pin cheaply. |
+| `shared-types/src/rbac.ts` | 65 | Role definitions and permission sets. Zero direct references in tests. A wrong entry here is a privilege bug that looks like a config typo. |
+
+### C. Frontend — untouched this whole session
+
+`game-frontend` and `backoffice-frontend` have **12 source files and 2 test
+files** between them. Nothing in this session went near them. The review's
+assessment was that the frontend is sound (no client-side money
+calculation, `sessionStorage` rather than `localStorage`, a clean XSS
+surface), so this is a coverage gap rather than a known-defect list — but
+it is the largest single untested area remaining.
+
+Worth checking specifically, since the review looked at a *different*
+codebase's frontend and these findings may not transfer:
+
+- The client never computes a win amount, only renders what the server sent.
+- Token handling on reconnect: a stored session token must never substitute
+  for a missing launch token.
+- The socket client's behaviour when the server closes with 1013 (busy) or
+  refuses the handshake with 403 — both now reachable, neither exercised.
+
+### D. Test-infrastructure debt
+
+- **`fakeMongo` is 275 lines and still not directly tested.** The
+  conformance suite now pins its agreement with real Mongo on 14
+  behaviours, which is the more valuable half — but it has grown twice this
+  session (projection support, and the F1/F9 lessons) and every unit test in
+  the repo trusts it.
+- **Item 3d** — `runRngTestSuite`'s aggregate cannot be tested without an
+  injectable RNG algorithm. Recorded above with two concrete fixes.
+- **Item 3c** — `e2e:backoffice` exhausts the per-IP login limit on a second
+  consecutive run and misreports it as a broken deactivation check.
+
+### E. Operational — unchanged, and the real blockers
+
+Items 1, 2, 3b and 4 above. Ordered by what actually blocks going live:
+
+1. **No deploy pipeline (item 1).** CI verifies and then stops. Still the
+   largest gap between "green" and "shipped".
+2. **Secrets in environment variables (item 4).** Fine locally, wrong for
+   production; the startup guards already refuse weak values, so what is
+   missing is storage and rotation.
+3. **Per-instance rate limits (item 3b).** Correct for one instance, wrong
+   the moment there are two.
+4. **Branch protection (item 2).** Needs a paid plan; the pre-push hook
+   covers the realistic case.
+
+### G. A real finding from writing this list
+
+**The publish gate's measured RTP is part assumption.**
+`simulateClient.ts` scores a triggered bonus at a flat
+`ASSUMED_BONUS_RETURN_MULTIPLIER = 20` rather than playing the module, and
+that figure flows into `bonusRtp` → `resultRtp` → the tolerance check that
+decides whether a game may publish.
+
+The file is admirably honest about it ("It is an assumption, and it is
+stated here rather than buried"), and the reasoning is sound: playing the
+module would conflate "is the base game's maths right" with "is the bonus
+module's maths right", and a drift in either would look identical.
+
+But the consequence is worth stating plainly, because it is not obvious
+from the publish route. **Measured on `reference-5x3`, 60k spins, varying
+only that constant:**
+
+| Assumed bonus return | Measured RTP | vs. target 0.95, tolerance ±0.05 |
+|---:|---:|---|
+| 5x | 0.9098 | **refused** — drift 0.040 is inside tolerance, but only just |
+| 10x | 0.9052 | borderline |
+| 20x (today) | 0.9518 | passes comfortably |
+| 50x | 1.0783 | **passes nothing** — drift 0.128, correctly refused |
+
+So the constant moves the gate's own input by roughly **0.17 RTP**, against
+a tolerance of 0.05. It is not a rounding detail: it is larger than the
+band it is being compared against. A game tuned to 0.95 passes or fails
+substantially on the strength of an assumption about a module the
+simulation never played.
+
+The reference game happens to land well at 20x, which is why nothing has
+surfaced this in practice.
+
+Ranked below the section-A items because it is a known, documented
+approximation rather than a defect — but it is the most substantive thing
+found while writing this list, and it was found by reading the file rather
+than by any test.
+
+Options, none free:
+- **Derive the multiplier per module** from its own configured payouts,
+  which is exact for `wheel` (it resolves at start from a fixed segment
+  set) and estimable for `pick`.
+- **Simulate the module for real** behind a flag, accepting the conflation
+  in exchange for a true number.
+- **Surface it in the publish response** so a designer sees "measured RTP
+  0.95, of which 0.12 is an estimated bonus contribution" rather than one
+  figure implying uniform confidence.
+
+### F. What I would NOT do next, and why
+
+Recorded so the reasoning is not rediscovered:
+
+- **More `math-engine` tests.** `paylines`, `matrix`, `wild`, `scatter`,
+  `bonusTrigger` and the independent cross-check are all done. `pick.ts` was
+  skipped deliberately — it already has nine tests including the concurrency
+  interleave and the prize-tile guard.
+- **Testing the fixtures** (`reference-game.ts`, `pick-bonus-game.ts`).
+  They are data. Their properties are asserted where they are used.
+- **Barrel files** (`index.ts` re-exports, 2–12 lines each). Nothing to
+  test.
+- **A Redis-backed limiter.** Scaffolding for a scale this deployment is not
+  at — see "Deliberately not doing".
+
+---
+
 ## Deliberately not doing
 
 - **Load-testing beyond one player.** The interesting races are all
