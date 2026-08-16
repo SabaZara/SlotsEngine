@@ -386,19 +386,31 @@ that were always known.
 
 These have no direct test AND no meaningful indirect coverage.
 
-**The first sweep of this section is closed** — every row below it is struck
-through. The rows at the top are a *second* sweep, run the same way (every
-source file checked for a sibling test, then for indirect coverage through a
-route suite) after the first was complete. They are what that sweep found, and
-they are ordered by what a failure would cost.
+**Both sweeps are now closed.** The lower rows are the first sweep; the upper
+five are a *second*, run the same way (every source file checked for a sibling
+test, then for indirect coverage through a route suite) after the first was
+complete, and ordered by what a failure would cost.
+
+The second sweep was worth running: five modules, **four bugs** (F22, F23, and
+items J and K), and the two most valuable finds were in the files that looked
+least interesting — a 51-line audit helper and an 81-line numerics file.
+
+A note for whoever runs the third sweep. The rule "no direct test AND no
+meaningful indirect coverage" is necessary but not sufficient — it is a
+*location* heuristic, not a severity one. It correctly flagged `audit/log.ts`,
+but the reason recorded for flagging it ("the clamp has all the usual
+off-by-one edges") was wrong about the mechanism; the actual hole was `NaN`
+defeating every comparison in the clamp at once. Expect the sweep to point at
+the right file for the wrong reason, and do not let the stated reason narrow
+what gets tested once you are in there.
 
 | Module | Lines | Why it matters |
 |---|---:|---|
 | ~~`packages/rng/src/gamma.ts`~~ | 81 | **Done, and it found item J.** Hand-implemented numerics — a Lanczos `logGamma`, a series expansion and a Lentz continued fraction — with no direct test at all, producing the p-value a regulator is handed as evidence the generator is sound. 15 tests, 7 of 8 mutations caught, checked against an exact closed form rather than against the implementation's own output. The single survivor is a documented equivalent mutant. `stats.test.ts` had been reaching this file through one caller at points where published tables stop, which is why the tail went unchecked for so long. |
 | ~~`backoffice-api/src/audit/log.ts`~~ | 51 | **Done, and it found two bugs — F22 and F23.** 22 tests, 12 of 13 mutations caught; the survivor (removing `Math.floor`) is a documented equivalent, since both the driver and the fake already truncate a fractional limit. The suspicion that put this row second — "the clamp has all the usual off-by-one edges" — was right about the location and wrong about the mechanism: the hole was not an off-by-one but `NaN` defeating every comparison in the clamp at once. Both contracts are now pinned — the swallow-and-report promise in four states, the bound in seven — plus three conformance tests for the fake/Mongo `limit` disagreement that hid F22. |
-| `packages/math-engine/src/registry.ts` | 42 | The swap point for "how a spin is evaluated". `getMathEngine` throws rather than falling back to the default, and the comment says why: quietly paying a round out under different maths than the game asked for is worse than refusing the spin. That refusal is the whole safety property and nothing tests it. Small, cheap, and on the money path. |
-| `game-backend/src/rounds/games.ts` | 62 | Resolves the game definition a round is evaluated against. Reached only through the route suites today, so a failure names a route rather than the lookup. |
-| `game-backend/src/launch/consume.ts` | 26 | Single-use launch-token consumption. `routes/misc.test.ts` covers 409-vs-401 at the HTTP boundary, so the *behaviour* is pinned; what is missing is a direct test of the claim at the level it is made. Lower priority than the rows above for exactly that reason. |
+| ~~`packages/math-engine/src/registry.ts`~~ | 42 | **Done.** 11 tests, all eight mutations caught — including the two that matter: `getMathEngine` falling back to the default instead of throwing, and `registerMathEngine` keying every engine under the default id. Both would pay a round out under mathematics the game did not ask for while looking entirely successful. Also pins that `rngAlgorithm` reaches the engine, since silently dropping it is the failure item 3d found one module over. |
+| ~~`game-backend/src/rounds/games.ts`~~ | 62 | **Done.** 14 tests, all nine mutations caught. Two claims that were only ever implied are now pinned: that `loadGameDefinition` reads **Mongo and not the compiled-in fixture** (tested with a stored document deliberately differing from the constant — if the loader ever fell back, every other test would still pass), and that `$setOnInsert` never reverts a published game to its shipped defaults on restart. The `pick-bonus-5x3` guard is covered as **two independent conditions**, since either alone is a single point of failure, plus the strictness of `=== "true"` — loosening it to a truthiness check would fire on the string `"false"`. |
+| ~~`game-backend/src/launch/consume.ts`~~ | 26 | **Done, and it closed the gap `misc.test.ts` names in its own header.** 9 tests, all seven mutations caught. The sequential replay was already covered at the HTTP boundary; what was missing is **F14's distinction** — two callers at the same instant is a different guarantee, resting on the unique index rather than on application code. Three tests now drive real concurrent consumption against real MongoDB. Verified by dropping the index: **12 of 12 callers win**, which is the F1 shape exactly. The reference's own `consume.test.ts` covers only the sequential case, so reading it would not have closed this. |
 | ~~`game-backend/src/startupGuards.ts`~~ | 45 | **Done.** 15 tests, all six mutations caught (length floor, `=== "production"` loosened to a prefix, each production guard removed, first-problem-only reporting, and the guard made a no-op). Both directions are covered — a guard that throws on everything fails the "accepts a valid environment" test. What they still cannot establish: that `main()` calls it before binding a port, which is `index.ts`'s job and untested below. |
 | ~~`backoffice-api/src/auth/middleware.ts`~~ | 69 | **Done.** 23 tests on a bare Fastify instance with probe routes, so a failure names the rule rather than a route. All 12 mutations caught — including the revocation lookup in all four of its states (version behind, version ahead, deactivated, user gone). The twelfth mutation is what surfaced F17. Still cannot establish that `buildApp` mounts the hook at all; that is `app.test.ts`'s territory. |
 | ~~`backoffice-api/src/games/simulateClient.ts`~~ | 66 | **Done.** 10 tests, all seven mutations caught — including the one that matters most, the adapter silently ceasing to pass `ASSUMED_BONUS_RETURN_MULTIPLIER` (`runSimulation` defaults it to 0, so every bonus would score nothing and a tuned game would be refused for a reason no report explains). The constant's leverage is now measured by a test rather than asserted from memory, and writing it turned up the sampling-noise figures added to item G. |
