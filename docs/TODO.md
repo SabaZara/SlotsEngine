@@ -494,12 +494,28 @@ testing was extracted into `paylineGrid.ts`, `reelStrip.ts` and the two
   `fakeMongo` behaviour with a conformance test at the moment it is added,
   which is now the practice.
 - **The fake implements only the operators this codebase happens to use.**
-  `$push`, `deleteOne` and friends are absent. Since F17 an unknown update
-  operator throws rather than being ignored, so the *silent* half of that
-  problem is closed — but a test needing one of them still has to work
-  around it (the middleware suite splices the backing array to delete a
-  document). Each addition should arrive with a conformance test, not on its
+  `$push` and friends are still absent. Since F17 an unknown update operator
+  throws rather than being ignored, so the *silent* half of that problem is
+  closed. Each addition should arrive with a conformance test, not on its
   own.
+- ~~**A test had to splice the backing array to delete a document.**~~
+  **Fixed** — `deleteOne` and `deleteMany` are implemented, pinned by three
+  conformance tests including the distinction that makes them separate
+  (`deleteOne` on a filter matching three rows removes one, not three) and
+  the empty-filter wipe that a typo produces. `middleware.test.ts` now
+  deletes through the collection API.
+
+  Worth stating why the workaround mattered rather than treating it as
+  cosmetic: reaching past the API into `raw.collection(…).all()` bypasses
+  every guarantee the API provides — the unique-index check, the document
+  copy — so the test was exercising a path **no production caller can
+  take**. The replacement was mutation-verified rather than assumed: removing
+  the `!user` term from the auth middleware's revocation check fails exactly
+  the rewritten test, so the deletion is genuinely observed and the
+  assertion still has teeth.
+
+  Nothing in production deletes anything. These exist so a test can express
+  a case honestly, which is the only reason the stand-in models anything.
 - ~~**The same silence survived on the QUERY side.**~~ **Fixed.** F17 closed
   this for update operators and the matching hole in `matches()` went
   unnoticed for the same reason it always does — nothing used it. An

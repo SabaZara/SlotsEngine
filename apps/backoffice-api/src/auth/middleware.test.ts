@@ -223,16 +223,16 @@ describe("registerAuthHook", () => {
     it("refuses a token for a user who no longer exists", async () => {
       // A deleted user's signed token must not outlive the record. The
       // token itself still verifies — only the lookup fails.
-      const { app, raw, seeded } = await setup([{}]);
+      const { app, db, seeded } = await setup([{}]);
       const token = tokenFor(seeded[0]);
 
-      // Spliced out of the fake's backing array rather than deleted through
-      // the collection API: `fakeMongo` has no `deleteOne`. Noted in the
-      // TODO's test-infrastructure section — the stand-in models the
-      // operations this codebase happens to use, which is a real limit on
-      // what any test written against it can express.
-      const users = raw.collection("users").all();
-      users.splice(0, users.length);
+      // Deleted through the collection API. This used to splice the fake's
+      // backing array directly, because `fakeMongo` had no `deleteOne` —
+      // which worked but bypassed every guarantee the API provides, so the
+      // test exercised a path no production caller can take. The stand-in
+      // now implements it, pinned against real Mongo in the conformance
+      // suite.
+      await db.collection("users").deleteMany({});
 
       const response = await app.inject({ method: "GET", url: "/v1/probe", headers: bearer(token) });
       assert.equal(response.statusCode, 401);

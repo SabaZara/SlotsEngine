@@ -937,6 +937,68 @@ describe("fakeMongo conformance with real MongoDB", () => {
     assert.equal(fake, real);
   });
 
+  /**
+   * `deleteOne` / `deleteMany`, added so a test can express "this document
+   * is gone" through the collection API.
+   *
+   * `middleware.test.ts` needed to model a user deleted while their token is
+   * still valid, and without these it reached past the API into the fake's
+   * backing array with a `splice` — which worked, but bypassed every
+   * guarantee the API provides, so the test exercised a path no production
+   * caller can take. Nothing in production deletes anything today; this
+   * exists so the test can be honest.
+   */
+  it("agrees that deleteOne removes exactly one document, even when several match", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // The distinction that makes `deleteOne` worth having separately: a
+    // filter matching three rows removes one of them, not all three.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      for (const i of [1, 2, 3]) await d.collection(collection).insertOne({ tag: "x", i });
+      const result = await d.collection(collection).deleteOne({ tag: "x" });
+      return { deleted: result.deletedCount, remaining: await d.collection(collection).countDocuments({}) };
+    });
+
+    assert.deepEqual(real, { deleted: 1, remaining: 2 });
+    assert.deepEqual(fake, real);
+  });
+
+  it("agrees that deleting a document that does not exist is not an error", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ n: 1 });
+      const result = await d.collection(collection).deleteOne({ n: 999 });
+      return { deleted: result.deletedCount, remaining: await d.collection(collection).countDocuments({}) };
+    });
+
+    assert.deepEqual(real, { deleted: 0, remaining: 1 });
+    assert.deepEqual(fake, real);
+  });
+
+  it("agrees that deleteMany removes every match, and an empty filter clears the collection", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // The empty filter is worth pinning because it is what a typo produces:
+    // `deleteMany({})` is a full wipe in both engines, not a no-op.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      for (const i of [1, 2, 3]) await d.collection(collection).insertOne({ tag: "x", i });
+      await d.collection(collection).insertOne({ tag: "y" });
+
+      const matched = await d.collection(collection).deleteMany({ tag: "x" });
+      const afterMatched = await d.collection(collection).countDocuments({});
+      const all = await d.collection(collection).deleteMany({});
+
+      return { matched: matched.deletedCount, afterMatched, all: all.deletedCount };
+    });
+
+    assert.deepEqual(real, { matched: 3, afterMatched: 1, all: 1 });
+    assert.deepEqual(fake, real);
+  });
+
   it("agrees that countDocuments honours a limit", async function () {
     if (!realDb) return this.skip(skipReason);
 

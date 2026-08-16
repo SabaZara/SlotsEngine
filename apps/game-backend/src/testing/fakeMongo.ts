@@ -405,6 +405,37 @@ class FakeCollection {
     return { matchedCount: matched, modifiedCount: modified };
   }
 
+  /**
+   * Deletes at most one matching document, as Mongo does — `deleteOne` on a
+   * filter matching three rows removes exactly one of them, not all three.
+   *
+   * Added because `middleware.test.ts` needed to model "the user was deleted
+   * while their token is still valid", and without it the test reached past
+   * the collection API into the fake's backing array with a `splice`. That
+   * works, but it bypasses every guarantee the API provides — unique index
+   * checks, the document copy — so the test was exercising a code path no
+   * production caller can take.
+   *
+   * Nothing in production deletes anything today. This exists so a test can
+   * express the case honestly, which is the stated reason the fake models
+   * anything at all.
+   */
+  async deleteOne(query: Record<string, unknown>): Promise<{ deletedCount: number }> {
+    const index = this.docs.findIndex((doc) => matches(doc, query));
+    if (index < 0) return { deletedCount: 0 };
+    this.docs.splice(index, 1);
+    return { deletedCount: 1 };
+  }
+
+  /** Deletes every matching document. An empty filter clears the
+   * collection, which is Mongo's behaviour and worth stating because it is
+   * the one filter a typo produces. */
+  async deleteMany(query: Record<string, unknown> = {}): Promise<{ deletedCount: number }> {
+    const before = this.docs.length;
+    this.docs = this.docs.filter((doc) => !matches(doc, query));
+    return { deletedCount: before - this.docs.length };
+  }
+
   /** Atomic by construction here — the match and the write happen in one
    * synchronous block, which is the property the bonus-step claim needs. */
   async findOneAndUpdate(
