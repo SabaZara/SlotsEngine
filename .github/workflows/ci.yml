@@ -123,6 +123,20 @@ jobs:
             done
           done
 
+      # The ledger's concurrency tests need a real replica set, so they skip
+      # in the unit job (which has no database) and run here instead. Without
+      # this step they would skip in CI entirely — a check that never runs
+      # is worse than one that does not exist, because it looks like cover.
+      - name: Ledger concurrency (real Mongo)
+        env:
+          # `directConnection=true`, NOT `replicaSet=rs0`. The set advertises
+          # its member as `mongo:27017` — a name that resolves inside the
+          # compose network and nowhere else — so a replicaSet URI from the
+          # host fails server selection and the tests SKIP. Verified: they
+          # skip with that URI and pass with this one.
+          MONGO_TEST_URI: mongodb://localhost:27018/?directConnection=true
+        run: npx tsx --test packages/ledger/src/wallet.concurrency.test.ts
+
       - name: Spin flow
         env:
           GAME_BACKEND_URL: http://localhost:9102

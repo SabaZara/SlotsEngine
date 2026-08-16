@@ -21,9 +21,13 @@ import {
  * **What this file cannot establish.** `fakeMongo` deliberately does not
  * model rollback: `withTransaction` runs the callback and lets a throw
  * propagate without undoing prior writes. So nothing here proves atomicity
- * across a multi-step operation — that needs a live database, and the
- * money-path load check is what covers it. What these tests do cover is
- * every decision `applyLedgerOp` makes on its own.
+ * across a multi-step operation, and the idempotency cases below are all
+ * *sequential* replays — call, then call again — which is a different thing
+ * from two callers arriving at the same instant.
+ *
+ * That half lives in `wallet.concurrency.test.ts`, which runs the same
+ * primitives against a real replica set. Read the two together: this file
+ * proves the logic, that one proves the guarantee.
  */
 
 const OPERATOR = "op-1";
