@@ -30,7 +30,7 @@ needs a decision rather than code.**
   | Found while fixing another | 1 | F2 |
 
   The 9 and the 8 are the load-bearing rows, and they say different things.
-  **Writing a file's first test found a bug 9 times across 55 test files** —
+  **Writing a file's first test found a bug 9 times across 57 test files** —
   roughly one in six, which is the argument for covering a module at all
   rather than covering an already-covered one more deeply. **Running the real
   stack found 8**, and no amount of test-writing substitutes for it: every
@@ -41,10 +41,16 @@ needs a decision rather than code.**
   is not a criticism of them — a test that never fails is doing its job as a
   regression guard — but it does mean the suite's value here has been in the
   *writing*, and its value from here on is in the *guarding*.
-- **1096 tests**, of which 48 are conformance cases run against real MongoDB.
+- **1121 tests**, of which 48 are conformance cases run against real MongoDB.
 - **Sections A, B and C are closed** — no source module with meaningful
   logic is without a direct test. The React components are the deliberate
   exception, recorded in section C.
+- **A third sweep has been run** (section A2), filtered differently: not
+  "uncovered file" but **imported by many test files, asserted by none**.
+  Two matched, both tiny and both load-bearing — the logger's redaction and
+  the seed generator. It produced no F-row and one finding worth more than a
+  bug: a predictable seed and a secure one produce **indistinguishable
+  output**, so seven output tests passed against a clock-derived seed.
 - **The deploy pipeline is built and green** (item 1). It builds five images
   per commit and stops, honestly, at the point where a server would be.
 
@@ -260,7 +266,7 @@ section E.
 
 GitHub requires Pro for branch protection on a private repo, so CI reports
 but cannot block a merge. A `pre-push` hook covers the realistic case
-locally (build, typecheck, 557 tests, ~40s), and is skippable with
+locally (build, typecheck, the full unit suite, ~40s), and is skippable with
 `--no-verify` by design.
 
 Options: GitHub Pro at $4/month, make the repo public, or accept it. See
@@ -624,6 +630,84 @@ environment and a component testing library, neither of which this repo has
 — a deliberate stopping point rather than an oversight. The logic worth
 testing was extracted into `paylineGrid.ts`, `reelStrip.ts` and the two
 `api.ts` files, all of which are now covered.
+
+### ~~A2. The third sweep~~ — run, and it found the limit of output testing
+
+Section A left a note for whoever ran the third sweep: the rule "no direct
+test AND no meaningful indirect coverage" is a **location** heuristic, not a
+severity one, and it points at the right file for the wrong reason. That held
+again, in a new way — see the survivor below.
+
+The sweep was run the same way as the first two, then filtered differently.
+The filename rule alone flagged 37 files, nearly all of them either covered
+through a route suite or genuinely data. The useful filter turned out to be
+**imported by many test files, asserted by none** — a shape the first two
+sweeps did not look for, because it does not show up as an uncovered file.
+
+Two modules matched, both tiny, both load-bearing:
+
+| Module | Lines | Imported by | Asserted by |
+|---|---:|---:|---:|
+| `packages/logging/src/index.ts` | 55 | 24 test files | 0 |
+| `packages/rng/src/seed.ts` | 14 | 25 test files | 0 |
+
+**`logging` — 17 tests, all 6 mutations caught.** `redact` is a security
+control wearing the costume of a formatting option: launch tokens, session
+tokens and round **seeds** pass through these services constantly, and this
+codebase stores a seed precisely because a round is a deterministic function
+of it. A seed in a log file is enough to replay or predict outcomes, held
+indefinitely by whatever aggregator scrapes the logs.
+
+One structural change was needed to make the test meaningful. The redact
+paths are now exported as `REDACT` and the factory spreads them, because a
+test that **restates** the list passes even if `createLogger` stops applying
+it — which is the one failure the list exists to prevent. That mutation
+(deleting `redact:` entirely) is caught by exactly one test: the one that
+runs the real factory in a child process and reads its stdout. Worth
+recording why that shape was needed — pino resolves its destination at
+construction and writes to fd 1 directly, so monkey-patching
+`process.stdout.write` captures nothing (the first attempt did exactly that
+and read back an empty string), and Node exposes no `dup2` to redirect the
+descriptor in-process.
+
+Also pinned: a real limit rather than a hoped-for behaviour. `*.token` is a
+**single** wildcard level, so a token nested two deep is **not** redacted.
+The test asserts the leak, so the file states the limit instead of implying
+safety it does not provide.
+
+The reference repo has **no redaction at all** in its equivalent file, so
+there was no counterpart suite to read and nothing upstream validating this
+list. This is one of the few places this codebase is ahead of it.
+
+Verified live, since a change to `logging` touches every service: the
+production containers were rebuilt and a seed, token and sessionToken logged
+from **inside** the running `game-backend` all came back `[redacted]` with
+`gameId` intact — which also exercises the `NODE_ENV=production` transport
+branch that a unit test deliberately does not.
+
+**`seed` — 8 tests, and the eighth exists because of a mutation that
+survived.** This is the sweep's real finding, and it is a lesson about
+testing rather than a bug:
+
+> **A predictable seed and a secure one produce indistinguishable output.**
+
+Replacing the body with `sha256(Date.now() + Math.random())` — a seed anyone
+can recompute from the approximate time — **passed all seven output tests.**
+Measured, not reasoned: the maximum shared prefix over 200 consecutive pairs
+was 1 character, identical to a real CSPRNG, because the hash destroys the
+sequential structure of its input. Length, charset, uniqueness, byte
+coverage and per-bit balance all pass, because they are checks on *shape*.
+
+Predictability is a property of the **source**, so the source is the only
+thing that can be pinned. The eighth test asserts the module draws from
+`crypto.randomBytes(32)` and contains no `Math.random`, `Date.now` or
+`hrtime`. Both mutations are caught now.
+
+This generalises past this file: any test that samples output can only ever
+establish that a generator *looks* right. For anything whose security rests
+on unpredictability, the assertion has to reach the source. The statistical
+suite in `packages/rng` tests the generator a seed drives; it could not have
+caught this either.
 
 ### D. Test-infrastructure debt
 

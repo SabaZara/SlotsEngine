@@ -2,8 +2,11 @@
 #
 # Runs the fast half of the CI gate before anything leaves the machine.
 #
-# Scope is deliberate. This runs build, typecheck and the 244 unit tests —
-# roughly 40 seconds. It does NOT run the Docker end-to-end suites, which
+# Scope is deliberate. This runs build, typecheck and the full unit suite —
+# roughly 40 seconds. The count is deliberately not written here: it moves
+# every time a test is added, and a stale number in a comment is worse than
+# no number, because it reads as a claim about what just ran.
+# It does NOT run the Docker end-to-end suites, which
 # take around three minutes: a hook slow enough to be resented is a hook
 # that gets bypassed, and a bypassed hook protects nothing. CI owns the
 # e2e runs, and CI is not in a hurry.

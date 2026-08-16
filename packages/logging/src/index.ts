@@ -22,6 +22,26 @@ function prettyTransportAvailable(): boolean {
 }
 
 /**
+ * Exported so a test can assert against the list this service actually uses
+ * rather than against a copy of it. A test that restates these paths passes
+ * even if `createLogger` stops applying them entirely, which is the one
+ * failure the list exists to prevent.
+ */
+export const REDACT = {
+  paths: [
+    "token",
+    "*.token",
+    "sessionToken",
+    "*.sessionToken",
+    "seed",
+    "*.seed",
+    "req.headers.authorization",
+    "req.headers['x-service-signature']",
+  ],
+  censor: "[redacted]",
+} as const;
+
+/**
  * One logger factory for every service, so log shape stays consistent
  * across the platform.
  *
@@ -33,19 +53,7 @@ export function createLogger(service: string): Logger {
   return pino({
     name: service,
     level: process.env.LOG_LEVEL ?? "info",
-    redact: {
-      paths: [
-        "token",
-        "*.token",
-        "sessionToken",
-        "*.sessionToken",
-        "seed",
-        "*.seed",
-        "req.headers.authorization",
-        "req.headers['x-service-signature']",
-      ],
-      censor: "[redacted]",
-    },
+    redact: { paths: [...REDACT.paths], censor: REDACT.censor },
     ...(prettyTransportAvailable()
       ? { transport: { target: "pino-pretty", options: { colorize: true, translateTime: "HH:MM:ss" } } }
       : {}),

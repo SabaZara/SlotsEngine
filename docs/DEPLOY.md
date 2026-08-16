@@ -4,7 +4,7 @@ Three workflows, in the order they run:
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| `ci.yml` | every push and PR to `main` | Builds, typechecks, runs 1096 unit tests and three e2e suites against real services. |
+| `ci.yml` | every push and PR to `main` | Builds, typechecks, runs 1121 unit tests and three e2e suites against real services. |
 | `deploy.yml` | **CI finishing successfully** on `main` | Builds five images, pushes them tagged by commit SHA, ships them, verifies health, rolls back if unhealthy. |
 | `rollback.yml` | manual | Puts production back on a named earlier release. |
 
