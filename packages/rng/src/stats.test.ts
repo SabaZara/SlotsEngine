@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { describe, it } from "node:test";
-import { chiSquaredUniformity, evaluate, rollIntUniformity, runRngTestSuite, serialCorrelation } from "./stats.js";
+import {
+  aggregatePassed,
+  chiSquaredUniformity,
+  evaluate,
+  rollIntUniformity,
+  runRngTestSuite,
+  serialCorrelation,
+  type TestResult,
+} from "./stats.js";
+import { registerTestAlgorithm, type RngAlgorithmId } from "./prng.js";
 
 /**
  * Tests for the fairness machinery itself.
@@ -40,14 +49,22 @@ import { chiSquaredUniformity, evaluate, rollIntUniformity, runRngTestSuite, ser
  * being checkable at all. It closes the first mutation and a third (a
  * one-sided band, which would miss the too-even direction entirely).
  *
- * **The second mutation still survives, and is left standing knowingly.**
- * Switching `runRngTestSuite`'s aggregate from `every` to `some` breaks
- * nothing, because all three sub-tests pass on a healthy generator so the
- * two operators agree on every reachable input. Catching it needs a
- * sub-test that fails on demand, which needs an injectable algorithm in
- * `createRng` — a wider production change than a test warrants, and one
- * that should be a deliberate decision rather than a side effect. Recorded
- * as an open item in docs/TODO.md rather than hidden here.
+ * **The second mutation is now closed too.** Switching `runRngTestSuite`'s
+ * aggregate from `every` to `some` used to break nothing, because all three
+ * sub-tests pass on a healthy generator and the two operators therefore
+ * agree on every reachable input. Catching it needed a sub-test that fails
+ * on demand, which needed `createRng` to actually honour its `algorithm`
+ * parameter — it previously accepted the parameter, named it in an error
+ * message, and returned xoshiro256** regardless.
+ *
+ * That was the deliberate production change item 3d described, and it is
+ * the honest fix for the parameter having been decorative rather than a
+ * test-only contrivance. `createRng` now dispatches through a registry and
+ * *refuses* an unknown algorithm instead of silently defaulting — which
+ * matters beyond testing: a round recorded under an algorithm this build
+ * cannot construct must fail loudly at replay, because quietly substituting
+ * the default would produce a different outcome and present it as the
+ * original. See "against a deliberately broken generator" below.
  *
  * `prng.test.ts` covers the complementary half — it feeds a deliberately
  * biased source in and shows the statistic explodes. Read the two
@@ -237,16 +254,134 @@ describe("the report", () => {
     // a sub-test failed is the most misleading thing this artefact could
     // do — it is handed to a reviewer as evidence the RNG is sound.
     //
-    // Asserting `report.passed === results.every(passed)` is NOT enough on
-    // its own: with a healthy generator every sub-test passes, so `every`,
-    // `some` and a hardcoded `true` all agree. Verified by mutation —
-    // switching the implementation to `some` left that assertion green.
-    //
-    // So the conjunction is checked directly against constructed results,
-    // which is the only way to distinguish the three without a generator
-    // that fails on demand.
+    // With a healthy generator every sub-test passes, so `every`, `some`
+    // and a hardcoded `true` all agree — this assertion alone cannot
+    // distinguish them. The tests below inject a broken generator and can.
     const report = runRngTestSuite(20_000, seedFrom("aggregate"));
     assert.equal(report.passed, report.results.every((r) => r.passed));
+  });
+
+  describe("against a deliberately broken generator", () => {
+    /**
+     * Item 3d, closed.
+     *
+     * The aggregate is `results.every(r => r.passed)`, and until now nothing
+     * could tell that apart from `some` or from a hardcoded `true`: no
+     * sub-test could be made to fail on demand, because `createRng` ignored
+     * its `algorithm` parameter and chi-squared is robust enough that no
+     * draw or bin count produces a genuine failure (measured — extreme
+     * sparsity converges toward the mean, not away from it).
+     *
+     * `createRng` now honours the parameter through a registry, which is
+     * also the honest fix for the parameter having been decorative. That
+     * makes a broken generator injectable, and a report claiming success
+     * while a sub-test failed — the most misleading thing this artefact
+     * could produce — is now something a test can catch.
+     */
+    const BROKEN = "test-only-constant" as RngAlgorithmId;
+
+    /** Always returns the same value: maximally non-uniform, so every
+     * sub-test must reject it. */
+    const constantGenerator = () => () => 0.5;
+
+    it("reports the suite as failed when a sub-test fails", () => {
+      const unregister = registerTestAlgorithm(BROKEN, constantGenerator);
+      try {
+        const report = runRngTestSuite(20_000, seedFrom("broken"), BROKEN);
+
+        assert.equal(report.passed, false, "a suite containing a failed test must not report success");
+        assert.ok(
+          report.results.some((r) => !r.passed),
+          "the broken generator should have failed at least one sub-test",
+        );
+      } finally {
+        unregister();
+      }
+    });
+
+    it("fails the aggregate even when only some sub-tests fail", () => {
+      // The `every`-versus-`some` distinction stated directly: if ANY
+      // sub-test failed, the report must not claim success, whatever the
+      // others did.
+      const unregister = registerTestAlgorithm(BROKEN, constantGenerator);
+      try {
+        const report = runRngTestSuite(20_000, seedFrom("partial"), BROKEN);
+        const failed = report.results.filter((r) => !r.passed).length;
+
+        assert.ok(failed > 0, "precondition: at least one sub-test must fail");
+        assert.equal(
+          report.passed,
+          false,
+          `${failed} of ${report.results.length} sub-tests failed, so the aggregate must be false`,
+        );
+      } finally {
+        unregister();
+      }
+    });
+
+    it("still records the algorithm that produced a failing report", () => {
+      // A failed report that does not say what it tested is unusable as
+      // evidence.
+      const unregister = registerTestAlgorithm(BROKEN, constantGenerator);
+      try {
+        assert.equal(runRngTestSuite(20_000, seedFrom("broken-algo"), BROKEN).algorithm, BROKEN);
+      } finally {
+        unregister();
+      }
+    });
+
+    it("passes the healthy generator, so failure is not the only outcome", () => {
+      // Load-bearing: without this the tests above would pass against an
+      // aggregate hardcoded to `false`.
+      assert.equal(runRngTestSuite(20_000, seedFrom("healthy")).passed, true);
+    });
+  });
+
+  describe("the verdict itself, as a pure function", () => {
+    /**
+     * The other half of item 3d, and the half that finally closes the
+     * `every`-versus-`some` mutation.
+     *
+     * Injecting a broken generator (above) proves the suite *can* report a
+     * failure, but it cannot distinguish `every` from `some`: the three
+     * sub-tests share a seed and a draw stream, so any distortion big
+     * enough to fail one fails all three. That was measured across five
+     * deliberately-broken generators — a constant, an even-only integer
+     * source, a sawtooth, a repeat-every-second-draw, and two range-squeezed
+     * variants — and every one of them failed all three sub-tests.
+     *
+     * A conjunction over constructed results has no such problem, which is
+     * why `aggregatePassed` is exported.
+     */
+    const result = (passed: boolean): TestResult => ({
+      name: passed ? "ok" : "broken",
+      statistic: 1,
+      degreesOfFreedom: 1,
+      pValue: passed ? 0.5 : 0.0001,
+      passed,
+    });
+
+    it("passes only when every result passed", () => {
+      assert.equal(aggregatePassed([result(true), result(true), result(true)]), true);
+    });
+
+    it("fails when a single result failed, whatever the others did", () => {
+      // The `some` mutation dies here: with two passes and one failure,
+      // `some` returns true and `every` returns false.
+      assert.equal(aggregatePassed([result(true), result(true), result(false)]), false);
+      assert.equal(aggregatePassed([result(false), result(true), result(true)]), false);
+      assert.equal(aggregatePassed([result(true), result(false), result(true)]), false);
+    });
+
+    it("fails when every result failed", () => {
+      assert.equal(aggregatePassed([result(false), result(false), result(false)]), false);
+    });
+
+    it("passes an empty list, since there is nothing to have failed", () => {
+      // Vacuous truth, pinned so it is a decision rather than a surprise.
+      // Unreachable through `runRngTestSuite`, which always runs three.
+      assert.equal(aggregatePassed([]), true);
+    });
   });
 
   it("describes each test with its own parameters", () => {

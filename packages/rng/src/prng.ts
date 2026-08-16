@@ -113,12 +113,65 @@ function xoshiro256ss(seedBytes: Buffer): () => number {
  * sequence. Pass the algorithm stored on a historical `Round` to replay it
  * exactly as it actually happened.
  */
+/**
+ * Every algorithm this platform can construct, by the id a round records.
+ *
+ * A registry rather than an `if`, because `algorithm` used to be accepted
+ * and then ignored — `createRng` named it in an error message and always
+ * returned xoshiro256**. That made the parameter decorative, and it had a
+ * concrete cost beyond tidiness: no deliberately-broken generator could be
+ * injected, so `runRngTestSuite`'s pass/fail aggregate could not be tested
+ * at all (docs/TODO.md item 3d). A report that claimed success while a
+ * sub-test failed is the most misleading thing that artefact could produce.
+ *
+ * Adding an entry here is a deliberate act. Note the constraint in
+ * `RngAlgorithmId`'s comment: a change to seeding, scrambler or discard
+ * count needs a NEW id and must keep the old one working, or previously
+ * stored rounds stop replaying to their recorded outcome.
+ */
+const ALGORITHMS: Record<RngAlgorithmId, (seedBytes: Buffer) => () => number> = {
+  "xoshiro256ss-d16": xoshiro256ss,
+};
+
 export function createRng(seed: string, algorithm: RngAlgorithmId = DEFAULT_RNG_ALGORITHM): Rng {
+  const construct = ALGORITHMS[algorithm];
+  // Refused rather than silently defaulted. A round recorded under an
+  // algorithm this build cannot construct must fail loudly at replay:
+  // quietly substituting the default would produce a *different* outcome
+  // for a stored round and present it as the original.
+  if (!construct) {
+    throw new Error(
+      `createRng: unknown algorithm '${algorithm}'. Known: ${Object.keys(ALGORITHMS).join(", ")}`,
+    );
+  }
+
   const seedBytes = Buffer.from(seed, "hex");
   if (seedBytes.length !== 32) {
     throw new Error(`createRng: ${algorithm} requires a 32-byte (64 hex char) seed, got ${seedBytes.length} bytes`);
   }
-  return { next: xoshiro256ss(seedBytes) };
+  return { next: construct(seedBytes) };
+}
+
+/**
+ * Registers an algorithm for the duration of a test, returning a function
+ * that removes it.
+ *
+ * Exported from the package deliberately, and narrowly: it exists so a
+ * deliberately-broken generator can be injected to prove that
+ * `runRngTestSuite` actually reports a failure. Without it that aggregate is
+ * untestable, which is the whole of item 3d. It widens the production
+ * surface by one function that production never calls — the trade the TODO
+ * described, taken with eyes open, because an untestable pass/fail on a
+ * fairness report is the worse side of it.
+ */
+export function registerTestAlgorithm(id: string, construct: (seedBytes: Buffer) => () => number): () => void {
+  const registry = ALGORITHMS as Record<string, (seedBytes: Buffer) => () => number>;
+  const previous = registry[id];
+  registry[id] = construct;
+  return () => {
+    if (previous) registry[id] = previous;
+    else delete registry[id];
+  };
 }
 
 /** Random integer in [0, maxExclusive). */

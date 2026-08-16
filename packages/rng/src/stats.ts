@@ -114,6 +114,26 @@ export interface RngReport {
 }
 
 /**
+ * The report's verdict: the suite passes only if EVERY sub-test passed.
+ *
+ * Extracted as a pure function on purpose. Inline, this conjunction could
+ * not be tested — all three sub-tests pass on a healthy generator, so
+ * `every`, `some` and a hardcoded `true` agree on every input reachable
+ * through `runRngTestSuite`, and injecting a generator that fails exactly
+ * one turns out to be impractical: the three tests share a seed and a draw
+ * stream, so a distortion large enough to fail one fails all of them
+ * (measured across five deliberately-broken generators, not assumed).
+ *
+ * As a function taking constructed results it is checkable directly, which
+ * is what makes "a report claiming success while a sub-test failed" — the
+ * most misleading thing this artefact could produce — something a test can
+ * catch. This is the second of the two fixes docs/TODO.md item 3d proposed.
+ */
+export function aggregatePassed(results: TestResult[]): boolean {
+  return results.every((r) => r.passed);
+}
+
+/**
  * Runs the full suite against one fresh seed and returns a reproducible
  * report — the seed is included precisely so a reviewer can re-run it and
  * get identical numbers.
@@ -129,6 +149,6 @@ export function runRngTestSuite(draws = 1_000_000, seed: string = generateSeed()
     algorithm: algorithm ?? DEFAULT_RNG_ALGORITHM,
     generatedAt: new Date().toISOString(),
     results,
-    passed: results.every((r) => r.passed),
+    passed: aggregatePassed(results),
   };
 }

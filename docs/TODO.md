@@ -141,34 +141,36 @@ The standard mitigations, none of which are free:
 
 Worth doing before this is exposed to the public internet, not before.
 
-### 3d. `runRngTestSuite`'s aggregate cannot be tested
-**Severity: low · Effort: low, but widens production surface**
+### ~~3d. `runRngTestSuite`'s aggregate cannot be tested~~ — closed
 
-The RNG report's `passed` field is `results.every(r => r.passed)`. Changing
-that to `some` breaks no test, because all three sub-tests pass on a
-healthy generator, so the two operators agree on every input reachable
-through the exported API. A report that claimed success while a sub-test
-failed would be the most misleading thing this artefact could do, and
-nothing currently prevents it.
+**Fixed.** Both routes listed here were taken, because each closes a
+different half.
 
-The blocker is that no sub-test can be made to fail on demand.
-`createRng` takes an `algorithm` parameter but ignores it — there is only
-one implementation — so a deliberately broken generator cannot be
-injected. Chi-squared is also robust enough that no draw or bin count
-produces a genuine failure; extreme sparsity converges toward the mean
-rather than away from it, which was measured, not assumed.
+**`createRng` now honours its `algorithm` parameter.** It previously
+accepted the parameter, named it in an error message, and returned
+xoshiro256** regardless — decorative, exactly as this item said. It now
+dispatches through a registry and *refuses* an unknown algorithm rather than
+silently defaulting. That last part matters beyond testing: a round recorded
+under an algorithm this build cannot construct must fail loudly at replay,
+because quietly substituting the default would produce a different outcome
+and present it as the original. `registerTestAlgorithm` makes a
+deliberately-broken generator injectable, so the suite reporting a failure at
+all is now testable.
 
-Two ways to close it, both real changes rather than test-only ones:
+**`aggregatePassed` is extracted as a pure function**, and this is what
+actually killed the `every` → `some` mutation. Injecting a broken generator
+proves the suite *can* fail, but it cannot distinguish the two operators:
+the three sub-tests share a seed and a draw stream, so any distortion large
+enough to fail one fails all three. That was measured, not assumed — six
+deliberately-broken generators were tried (a constant, an even-only integer
+source, a sawtooth, a repeat-every-second-draw, and two range-squeezed
+variants) and every one failed all three sub-tests. A conjunction over
+constructed results has no such problem.
 
-- **Honour the `algorithm` parameter** in `createRng` and register a
-  deliberately-biased implementation for tests. Also the honest fix for the
-  parameter being decorative today.
-- **Take the results array as an argument** so the aggregate is a pure
-  function that can be handed constructed values.
-
-The narrower half of this gap is already closed: `evaluate` is exported and
-its two-sided band is tested directly against known critical values, which
-catches both an always-pass band and a one-sided one.
+All six mutations on this path are now caught, including the two this item
+existed for. Verified against the live stack: round replay still produces
+the identical seed and outcome, which was the real risk in touching
+`createRng`.
 
 ### 3c. `e2e:backoffice` can exhaust the login rate limit
 **Severity: low (test-only) · Effort: low**
