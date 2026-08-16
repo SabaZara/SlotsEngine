@@ -1,5 +1,6 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import cors from "@fastify/cors";
+import rateLimit from "@fastify/rate-limit";
 import type { Db } from "mongodb";
 import type { Logger } from "@slots-engine/logging";
 import { registerAuthHook } from "./auth/middleware.js";
@@ -15,7 +16,7 @@ import { registerHealthRoutes } from "./routes/health.js";
  * directly — the auth hook and role guards are part of what needs testing,
  * and calling a handler in isolation skips exactly those.
  */
-export function buildApp(db: Db, logger: Logger): FastifyInstance {
+export async function buildApp(db: Db, logger: Logger): Promise<FastifyInstance> {
   const app = Fastify({ logger: false, bodyLimit: 4_000_000 });
 
   // Fastify rejects a JSON content-type with an empty body as a 400 before
@@ -54,6 +55,42 @@ export function buildApp(db: Db, logger: Logger): FastifyInstance {
     .filter(Boolean);
   void app.register(cors, { origin: origins, credentials: true });
 
+  // A global ceiling, generous enough that ordinary admin work never
+  // notices it. The point is not to shape traffic — it is that an
+  // authenticated admin API with no ceiling at all can be walked by a
+  // script at whatever rate the network allows.
+  //
+  // Keyed by IP, which is the right key HERE (unlike the internal API,
+  // where every request legitimately arrives from one service) because
+  // these routes are reached directly by a browser.
+  //
+  // AWAITED, not fire-and-forget. The limiter installs an `onRoute` hook,
+  // so any route registered before it finishes is silently left unlimited
+  // — and "silently" is the problem: `void app.register(...)` here produced
+  // an app where neither the global nor the per-route limit applied at all,
+  // while every request still returned 200. Nothing failed; the protection
+  // simply was not there. That is why this function is async.
+  //
+  // Disabled when DISABLE_RATE_LIMIT is set, which the test suite does:
+  // it drives hundreds of requests through app.inject() from one synthetic
+  // address, and a limiter tripping mid-suite would look exactly like a
+  // broken route. An explicit flag rather than a NODE_ENV check, because
+  // the suite does not set NODE_ENV and a limit that happens to stay
+  // untripped is luck, not a decision.
+  if (process.env.DISABLE_RATE_LIMIT !== "true") {
+    await app.register(rateLimit, {
+      global: true,
+      max: Number(process.env.BACKOFFICE_RATE_LIMIT ?? 300),
+      timeWindow: "1 minute",
+      // 429 with a Retry-After, rather than the default 500-shaped error.
+      errorResponseBuilder: (_request, context) => ({
+        statusCode: 429,
+        error: "rate_limited",
+        message: `Too many requests. Retry in ${context.after}.`,
+      }),
+    });
+  }
+
   // Registered before the routes, so a route added later cannot
   // accidentally be public — it has to opt out via PUBLIC_PATHS.
   registerAuthHook(app, db);
@@ -71,7 +108,11 @@ export function buildApp(db: Db, logger: Logger): FastifyInstance {
     const err = rawError as { statusCode?: number; code?: string; message?: string };
     const status = err.statusCode ?? 500;
     if (status >= 400 && status < 500) {
-      return reply.code(status).send({ error: err.code ?? "bad_request", message: err.message });
+      // 429 named explicitly: the limiter's error carries no `code`, and
+      // reporting it as `bad_request` tells a client to fix its request
+      // when what it needs to do is wait.
+      const code = err.code ?? (status === 429 ? "rate_limited" : "bad_request");
+      return reply.code(status).send({ error: code, message: err.message });
     }
     logger.error({ err }, "unhandled request error");
     return reply.code(500).send({ error: "internal_error" });

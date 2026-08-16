@@ -3,9 +3,13 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { createLogger } from "@slots-engine/logging";
 import type { ClientToServerMessage, ServerToClientMessage } from "@slots-engine/shared-types";
 import { handleMessage, type Connection, type Session } from "./session.js";
+import { ConnectionLimiter } from "./rateLimit.js";
 
 const logger = createLogger("game-socket");
 const PORT = Number(process.env.PORT ?? 9003);
+/** Concurrent socket ceiling. Generous for a single instance; the point is
+ * that "unbounded" is not a number. */
+const MAX_CONNECTIONS = Number(process.env.SOCKET_MAX_CONNECTIONS ?? 5000);
 
 /**
  * **Identity lives here, keyed by connection — never in a client message.**
@@ -32,7 +36,18 @@ const httpServer = createServer((req, res) => {
 const wss = new WebSocketServer({ server: httpServer, maxPayload: 64 * 1024 });
 
 wss.on("connection", (socket: WebSocket) => {
+  // A ceiling on concurrent sockets. Message rate limiting does nothing
+  // about a client that simply opens more connections, and each one costs
+  // memory whether or not it ever authenticates.
+  if (wss.clients.size > MAX_CONNECTIONS) {
+    logger.warn({ open: wss.clients.size }, "refusing connection over the concurrent limit");
+    socket.close(1013, "server busy");
+    return;
+  }
+
   logger.info("client connected");
+
+  const limiter = new ConnectionLimiter();
 
   // Adapts a real socket to the minimal interface the decision logic needs.
   const connection: Connection = {
@@ -47,6 +62,18 @@ wss.on("connection", (socket: WebSocket) => {
       message = JSON.parse(raw.toString());
     } catch {
       connection.send({ type: "ERROR", code: "bad_json", message: "Message must be valid JSON." });
+      return;
+    }
+
+    // Checked before anything is dispatched, so a limited message costs a
+    // JSON parse and nothing else — no database call, and no money moved.
+    const verdict = limiter.check(message?.type ?? "");
+    if (!verdict.allowed) {
+      connection.send({
+        type: "ERROR",
+        code: "rate_limited",
+        message: `Too many requests. Retry in ${verdict.retryAfter}s.`,
+      });
       return;
     }
 

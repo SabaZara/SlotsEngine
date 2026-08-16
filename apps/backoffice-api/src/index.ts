@@ -39,7 +39,7 @@ async function main(): Promise<void> {
     );
   }
 
-  const app = buildApp(db, logger);
+  const app = await buildApp(db, logger);
 
   const shutdown = async (signal: string): Promise<void> => {
     logger.info({ signal }, "shutting down");

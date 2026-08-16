@@ -222,7 +222,7 @@ secrets match or `INITIAL_PLAYER_BALANCE` would hand out free money.
 npm test
 ```
 
-273 unit tests covering payout correctness, money invariants, the concurrency
+287 unit tests covering payout correctness, money invariants, the concurrency
 fixes, token verification, the identity boundary, the disclosure boundary,
 draft validation, the RTP gate, role guards, user management, the spin-timing
 maths and payline-grid editing. `npm test` runs a full typecheck first —
@@ -368,6 +368,66 @@ correct, because the pick module decides its layout at `start`. Belt and
 braces, both observed doing their job.
 
 A running list of what is still open is in [docs/TODO.md](docs/TODO.md).
+
+---
+
+## Rate limiting
+
+Three surfaces, three policies, because a single uniform limit would be
+worse than none.
+
+| Surface | Key | Default |
+|---|---|---|
+| `game-backend` `/internal/*` | the **calling service** | 600/min |
+| `game-backend` `/public/*` | client IP | 600/min |
+| `game-backend` `/health*` | — | exempt |
+| `backoffice-api` (global) | client IP | 300/min |
+| `backoffice-api` `/v1/auth/login` | client IP | **10 / 5 min** |
+| `game-socket` spins | per connection | 5/s, burst 10 |
+| `game-socket` all messages | per connection | 25/s, burst 50 |
+
+**The internal API is keyed by caller, not IP.** Every internal request
+arrives from `game-socket`, so an IP-keyed limit there would not throttle
+an abuser — it would throttle the entire platform the moment traffic was
+healthy, converting a defence into an outage.
+
+**Login is separate from the global limit**, because 300 password guesses a
+minute is a working credential-stuffing rate rather than a defence.
+
+**Health is exempt**, because a limiter able to fail a readiness probe will
+eventually take a service out of rotation for being busy.
+
+**The socket uses token buckets, not fixed windows.** A fixed window lets a
+client spend a full allowance at the end of one window and again at the
+start of the next — a burst of double the intended rate at exactly the
+moment the limiter claims to be holding the line.
+
+### Three things measurement corrected
+
+Each of these looked right and was wrong, and none would have failed
+loudly:
+
+- **Keying login by IP *and* the attempted email.** Strictly better on
+  paper — it would stop one address walking a list of accounts. But the
+  limiter runs at `onRequest`, before the body is parsed, so
+  `request.body` is undefined inside `keyGenerator` and every attempt
+  lands in one shared bucket. A *different* email was refused too, turning
+  the protection into a way for one attacker to lock out every
+  administrator.
+- **Keying internal traffic by `request.serviceCaller`.** Same cause: that
+  field is set by a `preHandler`, so it is always unset when the limiter
+  runs, and every internal call would have silently fallen back to the
+  IP key. The signed `x-service-caller` header is read directly instead.
+- **`void app.register(rateLimit, …)` in a synchronous `buildApp`.** The
+  limiter installs an `onRoute` hook, so routes registered before it
+  finishes are left unlimited. Neither the global nor the per-route limit
+  applied at all, while every request still returned 200 — nothing failed,
+  the protection simply was not there. `buildApp` is now async.
+
+A fourth was found by looking at the running app rather than the code: the
+limiter's 429 was being flattened to `internal_error` by a global error
+handler that forced every error to 500, so a limited client was told
+nothing and had no reason to back off.
 
 **Making the overdraw section deterministic took three attempts**, and the
 dead ends are instructive because each looks reasonable. Firing a large

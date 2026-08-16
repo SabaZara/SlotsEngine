@@ -11,7 +11,28 @@ import { writeAuditLog } from "../audit/log.js";
 const INVALID_CREDENTIALS = { error: "invalid_credentials" };
 
 export function registerAuthRoutes(app: FastifyInstance, db: Db): void {
-  app.post<{ Body: { email?: string; password?: string } }>("/v1/auth/login", async (request, reply) => {
+  app.post<{ Body: { email?: string; password?: string } }>("/v1/auth/login", {
+    // Login gets its own, far tighter ceiling. The global limit is sized
+    // for ordinary admin work and is useless here: 300 password guesses a
+    // minute is a working credential-stuffing rate, not a defence.
+    //
+    // Keyed by IP alone, deliberately. Keying by IP *and* the attempted
+    // email looks stronger — it would stop one address walking a list of
+    // accounts — but it does not work: the rate limiter runs before the
+    // body is parsed, so `request.body` is undefined inside keyGenerator.
+    // Measured, not assumed: every attempt then lands in one shared bucket
+    // and a *different* email is refused too, which turns the protection
+    // into a way for one attacker to lock out every administrator.
+    //
+    // Per-account throttling belongs after parsing, tracked against the
+    // user record rather than the request — see docs/TODO.md.
+    config: {
+      rateLimit: {
+        max: Number(process.env.LOGIN_RATE_LIMIT ?? 10),
+        timeWindow: "5 minutes",
+      },
+    },
+  }, async (request, reply) => {
     const { email, password } = request.body ?? {};
     if (!email || !password) return reply.code(400).send({ error: "email and password are required" });
 

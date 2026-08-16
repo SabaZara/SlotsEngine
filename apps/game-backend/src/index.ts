@@ -1,5 +1,6 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
+import rateLimit from "@fastify/rate-limit";
 import { createLogger } from "@slots-engine/logging";
 import { applySchemas, connectMongo } from "@slots-engine/mongo-schemas";
 import { loadServiceSecret } from "@slots-engine/service-auth";
@@ -59,6 +60,52 @@ async function main(): Promise<void> {
     },
   });
 
+  // Rate limiting, keyed by SURFACE rather than uniformly by IP.
+  //
+  // The two surfaces here need opposite treatment, and applying one policy
+  // to both would be worse than applying none:
+  //
+  // `/public/*` is read by player browsers, so the client IP is a real
+  // key and a per-IP ceiling is meaningful.
+  //
+  // `/internal/*` is reached only by game-socket, so EVERY request shares
+  // one source address. An IP-keyed limit there does not throttle an
+  // abuser — it throttles the entire platform the moment traffic is
+  // healthy, turning a defence into an outage.
+  //
+  // So internal traffic is keyed by the CALLER HEADER, read straight off
+  // the request. Note it is deliberately not `request.serviceCaller`, the
+  // value the service-auth hook sets: the limiter runs at `onRequest` and
+  // that hook is a `preHandler`, so the field is always still unset here.
+  // Measured, not assumed — the first version of this used it and would
+  // have silently keyed every internal call by IP, which is precisely the
+  // outage described above.
+  //
+  // An unsigned request can of course put anything in that header, but it
+  // is refused by service-auth moments later regardless; the header is
+  // being used to separate healthy internal traffic into its own bucket,
+  // not to make a trust decision. The per-player ceiling that would stop
+  // one abusive account belongs in the socket, where identity is known.
+  //
+  // Health is exempt outright: a limiter that can fail a readiness probe
+  // will eventually take a service out of rotation for being busy.
+  await app.register(rateLimit, {
+    global: true,
+    max: Number(process.env.GAME_RATE_LIMIT ?? 600),
+    timeWindow: "1 minute",
+    keyGenerator: (request) => {
+      const caller = request.headers["x-service-caller"];
+      const name = Array.isArray(caller) ? caller[0] : caller;
+      return name ? `svc:${name}` : `ip:${request.ip}`;
+    },
+    allowList: (request) => (request.url ?? "").startsWith("/health"),
+    errorResponseBuilder: (_request, context) => ({
+      statusCode: 429,
+      error: "rate_limited",
+      message: `Too many requests. Retry in ${context.after}.`,
+    }),
+  });
+
   // Registered before the routes so no internal route can ever be reached
   // unsigned, including one added later by someone who forgets this exists.
   registerServiceAuth(app, serviceSecret, logger);
@@ -71,10 +118,27 @@ async function main(): Promise<void> {
   registerSimulateRoutes(app, db);
 
   app.setErrorHandler((err, _request, reply) => {
+    // A client error is the client's to act on, and flattening it to 500
+    // destroys the only signal it has. The rate limiter is the case that
+    // proved this: it raises a 429 carrying a Retry-After, and this handler
+    // was rewriting it into an opaque `internal_error` — so a limited
+    // client learned nothing and had no reason to back off, which is most
+    // of the point of limiting it.
+    const clientError = err as { statusCode?: number; code?: string; message?: string };
+    const status = clientError.statusCode ?? 500;
+    if (status >= 400 && status < 500) {
+      // 429 is named explicitly: the limiter raises an error carrying no
+      // `code`, so it would otherwise be reported as a generic
+      // `bad_request` — technically a 4xx, but it tells a client to fix its
+      // request rather than to slow down, which is the opposite of useful.
+      const code = clientError.code ?? (status === 429 ? "rate_limited" : "bad_request");
+      return reply.code(status).send({ error: code, message: clientError.message });
+    }
+
     // Log the detail, return nothing revealing: an internal error message
     // can disclose schema and code structure to a caller.
     logger.error({ err }, "unhandled request error");
-    reply.code(500).send({ error: "internal_error" });
+    return reply.code(500).send({ error: "internal_error" });
   });
 
   // In-process interval, appropriate at this scale: the sweep is a

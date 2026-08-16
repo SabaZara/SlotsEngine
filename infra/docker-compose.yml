@@ -42,6 +42,9 @@ services:
       # guard in games.ts refuses it there regardless.
       SEED_TEST_FIXTURES: ${SEED_TEST_FIXTURES:-false}
       GAME_CORS_ORIGINS: ${GAME_CORS_ORIGINS:-http://localhost:9104}
+      # Requests per minute, keyed by service caller for /internal and by
+      # IP for /public. Health is exempt.
+      GAME_RATE_LIMIT: ${GAME_RATE_LIMIT:-600}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       NODE_ENV: ${NODE_ENV:-development}
     ports:
@@ -70,6 +73,13 @@ services:
       GAME_BACKEND_URL: http://game-backend:9002
       SERVICE_AUTH_SECRET: ${SERVICE_AUTH_SECRET}
       LAUNCH_TOKEN_SECRET: ${LAUNCH_TOKEN_SECRET}
+      # Per-connection token buckets: spins are limited tightly because
+      # each is a transaction; other messages get an anti-flood ceiling.
+      SOCKET_SPIN_RATE: ${SOCKET_SPIN_RATE:-5}
+      SOCKET_SPIN_BURST: ${SOCKET_SPIN_BURST:-10}
+      SOCKET_MSG_RATE: ${SOCKET_MSG_RATE:-25}
+      SOCKET_MSG_BURST: ${SOCKET_MSG_BURST:-50}
+      SOCKET_MAX_CONNECTIONS: ${SOCKET_MAX_CONNECTIONS:-5000}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       NODE_ENV: ${NODE_ENV:-development}
     ports:
@@ -90,6 +100,9 @@ services:
       MONGO_DB: ${MONGO_DB:-slots_engine}
       BACKOFFICE_JWT_SECRET: ${BACKOFFICE_JWT_SECRET}
       BACKOFFICE_CORS_ORIGINS: ${BACKOFFICE_CORS_ORIGINS:-http://localhost:9106}
+      BACKOFFICE_RATE_LIMIT: ${BACKOFFICE_RATE_LIMIT:-300}
+      # Login gets a far tighter ceiling than ordinary admin traffic.
+      LOGIN_RATE_LIMIT: ${LOGIN_RATE_LIMIT:-10}
       BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-admin@example.com}
       BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}

@@ -1,3 +1,7 @@
+// The suite drives hundreds of requests from one synthetic address; the
+// limiter is a production concern and would only make this flaky.
+process.env.DISABLE_RATE_LIMIT = "true";
+
 import assert from "node:assert/strict";
 import { before, beforeEach, describe, it } from "node:test";
 import type { FastifyInstance } from "fastify";
@@ -23,7 +27,7 @@ const logger = createLogger("backoffice-api-test");
 
 async function setup() {
   const { db, raw } = fakeMongo();
-  const app = buildApp(db as never, logger);
+  const app = await buildApp(db as never, logger);
   await app.ready();
 
   const designer = await createUser(db as never, {

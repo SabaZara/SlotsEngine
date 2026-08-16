@@ -1,3 +1,7 @@
+// The suite drives hundreds of requests from one synthetic address; the
+// limiter is a production concern and would only make this flaky.
+process.env.DISABLE_RATE_LIMIT = "true";
+
 import assert from "node:assert/strict";
 import { before, beforeEach, describe, it } from "node:test";
 import { createLogger } from "@slots-engine/logging";
@@ -16,7 +20,7 @@ const GOOD_PASSWORD = "a-long-enough-password";
 
 async function setup() {
   const { db, raw } = fakeMongo();
-  const app = buildApp(db as never, logger);
+  const app = await buildApp(db as never, logger);
   await app.ready();
 
   const admin = await createUser(db as never, {

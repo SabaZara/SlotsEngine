@@ -21,6 +21,8 @@ existed matters more than the fix, and that reasoning is easy to lose.
 | F3 | Workspace build ran alphabetically — `apps/` compiled before the `packages/` they import. 87 type errors on a clean checkout, invisible locally behind stale `dist/`. | CI, first run. |
 | F4 | Test discovery glob was shell- and Node-version-dependent: 15 files under zsh, 2 under dash, and no glob form works on Node 20. It reported success while running a fraction of the suite. | CI. Took three attempts to fix; the first two were "verified" on Node 24. |
 | F5 | `game-socket` had no tests at all — 405 lines on the service that decides who a player is. | The review. Now 29 tests, each verified by mutation. |
+| F6 | `void app.register(rateLimit, …)` in a synchronous factory left **every** route unlimited — the plugin's `onRoute` hook had not installed yet. No error; requests just returned 200 with no protection. | Flooding the running service and finding the limit never fired. |
+| F7 | game-backend's error handler forced every error to 500, flattening the limiter's 429 into `internal_error` — a limited client was told nothing and had no reason to back off. | Same flood; the status code was wrong. |
 
 ---
 
@@ -42,22 +44,38 @@ This is deliberate for now — there is nowhere to deploy to — but it means
 
 GitHub requires Pro for branch protection on a private repo, so CI reports
 but cannot block a merge. A `pre-push` hook covers the realistic case
-locally (build, typecheck, 273 tests, ~23s), and is skippable with
+locally (build, typecheck, 287 tests, ~25s), and is skippable with
 `--no-verify` by design.
 
 Options: GitHub Pro at $4/month, make the repo public, or accept it. See
 the note in the README about why public is the wrong trade here.
 
-### 3. No rate limiting anywhere
-**Severity: high before any internet-facing deployment · Effort: medium**
+### 3. Per-account login throttling
+**Severity: medium · Effort: medium**
 
-Neither `game-socket` nor either HTTP service limits request rate. A
-single client can open unlimited sockets, and the internal API — though
-signed — has no throttle. The load check happily drove 25 concurrent spins
-at one player, which is exactly what an abuser would do.
+Rate limiting now exists on all three surfaces (see the README table), but
+login is limited **per IP only**. An attacker distributing attempts across
+many addresses still gets 10 guesses per address against one account.
 
-The money path is *correct* under that load, which is what the load check
-established. It is not *protected* from it.
+The obvious fix — keying by IP *and* email — does not work at the limiter
+layer: it runs before body parsing, so the email is not available, and
+every attempt collapses into one shared bucket that lets one attacker lock
+out every administrator. Measured, not assumed.
+
+Per-account throttling therefore belongs *after* parsing, tracked against
+the user record: a failed-attempt counter with a lockout window, which also
+gives the audit log something useful to record.
+
+### 3b. Rate limits are per-instance, held in memory
+**Severity: medium before horizontal scaling · Effort: low**
+
+Every limiter here counts in the process's own memory. Two instances behind
+a load balancer means an effective limit of double the configured value,
+and a restart clears every counter. Fine for one instance; wrong the moment
+there are two.
+
+`@fastify/rate-limit` supports a Redis store, which is the standard answer.
+The socket's token buckets would need the same treatment.
 
 ### 4. `game-socket` does not check the WebSocket origin
 **Severity: medium · Effort: low**
