@@ -79,23 +79,40 @@ export function verifySession(token: string): SessionPayload | null {
   }
   if (expected.length !== provided.length || !timingSafeEqual(expected, provided)) return null;
 
-  let payload: SessionPayload;
+  // Deliberately `unknown` rather than `SessionPayload`: the value came off
+  // the wire, and annotating it as the type we hope for is how a cast gets
+  // mistaken for a check. The compiler now refuses to let anything read a
+  // field until the guards below have actually established the shape.
+  let payload: unknown;
   try {
     payload = JSON.parse(Buffer.from(payloadB64, "base64url").toString("utf8"));
   } catch {
     return null;
   }
 
+  // `JSON.parse` happily returns null, a number, a string or an array, and
+  // every one of those is a valid JSON document. Without this line, a
+  // payload of literal `null` reached the field checks below and threw a
+  // TypeError on `payload.userId` — which the middleware does not catch, so
+  // a *correctly signed* junk token produced a 500 instead of a 401.
+  //
+  // Signed junk is reachable by anyone who can obtain any token from this
+  // service, and the wrong status code is the smaller half: a verifier
+  // whose failure mode is "throw" fails open in whatever code path forgets
+  // to catch it. Refuse anything that is not an object, first.
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return null;
+  const claims = payload as Record<string, unknown>;
+
   if (
-    typeof payload.userId !== "string" ||
-    typeof payload.email !== "string" ||
-    !Array.isArray(payload.roles) ||
-    typeof payload.tokenVersion !== "number" ||
-    typeof payload.exp !== "number"
+    typeof claims.userId !== "string" ||
+    typeof claims.email !== "string" ||
+    !Array.isArray(claims.roles) ||
+    typeof claims.tokenVersion !== "number" ||
+    typeof claims.exp !== "number"
   ) {
     return null;
   }
-  if (Date.now() > payload.exp) return null;
+  if (Date.now() > claims.exp) return null;
 
-  return payload;
+  return payload as SessionPayload;
 }
