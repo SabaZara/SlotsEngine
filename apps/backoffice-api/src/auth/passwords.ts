@@ -34,6 +34,10 @@ const COST = 2 ** 15;
 const KEY_LENGTH = 64;
 const SALT_LENGTH = 16;
 
+/** The largest N `MAX_MEM` can accommodate. A stored record naming anything
+ * higher is refused rather than passed to scrypt, which would throw. */
+const MAX_COST = 2 ** 16;
+
 function params(cost: number) {
   return { N: cost, r: BLOCK_SIZE, p: PARALLELISATION, maxmem: MAX_MEM };
 }
@@ -53,8 +57,16 @@ export async function verifyPassword(password: string, stored: string): Promise<
   const parts = stored.split("$");
   if (parts.length !== 4 || parts[0] !== "scrypt") return false;
 
+  // scrypt requires N to be a power of two, and throws "Invalid scrypt
+  // params" rather than returning if it is not — or if N is large enough to
+  // exceed maxmem. Both have to be refused *before* the call, because this
+  // runs on the login path where a throw is an uncaught 500: it tells an
+  // attacker that this particular account exists and is broken, which is
+  // exactly the F13 failure shape.
   const cost = Number(parts[1]);
-  if (!Number.isInteger(cost) || cost <= 0) return false;
+  if (!Number.isInteger(cost) || cost <= 1) return false;
+  if ((cost & (cost - 1)) !== 0) return false;
+  if (cost > MAX_COST) return false;
 
   let salt: Buffer;
   let expected: Buffer;
@@ -64,10 +76,19 @@ export async function verifyPassword(password: string, stored: string): Promise<
   } catch {
     return false;
   }
-  if (salt.length === 0 || expected.length === 0) return false;
+  if (salt.length === 0) return false;
+
+  // Deriving `expected.length` bytes made a truncated hash verify: shorten
+  // the stored digest to one byte and scrypt derives one byte, which
+  // matches roughly one guess in 256. Measured before the fix — an
+  // arbitrary password verified against a 1-byte hash after 274 guesses.
+  // The stored length is attacker-controlled input the moment anyone can
+  // write to the user record, so the required length is fixed here rather
+  // than read from the record.
+  if (expected.length !== KEY_LENGTH) return false;
 
   // The cost comes from the stored record, not the constant above, so
   // raising COST later leaves existing passwords verifiable.
-  const derived = await scrypt(password, salt, expected.length, params(cost));
-  return derived.length === expected.length && timingSafeEqual(derived, expected);
+  const derived = await scrypt(password, salt, KEY_LENGTH, params(cost));
+  return timingSafeEqual(derived, expected);
 }
