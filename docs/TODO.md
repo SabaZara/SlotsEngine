@@ -384,8 +384,19 @@ that were always known.
 
 These have no direct test AND no meaningful indirect coverage.
 
+**The first sweep of this section is closed** — every row below it is struck
+through. The rows at the top are a *second* sweep, run the same way (every
+source file checked for a sibling test, then for indirect coverage through a
+route suite) after the first was complete. They are what that sweep found, and
+they are ordered by what a failure would cost.
+
 | Module | Lines | Why it matters |
 |---|---:|---|
+| ~~`packages/rng/src/gamma.ts`~~ | 81 | **Done, and it found item J.** Hand-implemented numerics — a Lanczos `logGamma`, a series expansion and a Lentz continued fraction — with no direct test at all, producing the p-value a regulator is handed as evidence the generator is sound. 15 tests, 7 of 8 mutations caught, checked against an exact closed form rather than against the implementation's own output. The single survivor is a documented equivalent mutant. `stats.test.ts` had been reaching this file through one caller at points where published tables stop, which is why the tail went unchecked for so long. |
+| `backoffice-api/src/audit/log.ts` | 51 | Both halves are untested and both have real logic. `writeAuditLog` promises *never to throw into the caller's path* — a publish must not roll back because its audit write failed — and that swallow-and-report contract has nothing pinning it; a future refactor removing the `try` would be invisible until a failing Mongo took down a publish. `readAuditLog` builds a filter field by field, clamps `limit` into `[1, 500]`, and strips `_id` on the way out. The `_id` strip is F16/F21's exact shape for the third time, and the clamp has all the usual off-by-one edges. This is the tamper-evidence log; it deserves better than indirect coverage through routes that never exercise a clamp boundary. |
+| `packages/math-engine/src/registry.ts` | 42 | The swap point for "how a spin is evaluated". `getMathEngine` throws rather than falling back to the default, and the comment says why: quietly paying a round out under different maths than the game asked for is worse than refusing the spin. That refusal is the whole safety property and nothing tests it. Small, cheap, and on the money path. |
+| `game-backend/src/rounds/games.ts` | 62 | Resolves the game definition a round is evaluated against. Reached only through the route suites today, so a failure names a route rather than the lookup. |
+| `game-backend/src/launch/consume.ts` | 26 | Single-use launch-token consumption. `routes/misc.test.ts` covers 409-vs-401 at the HTTP boundary, so the *behaviour* is pinned; what is missing is a direct test of the claim at the level it is made. Lower priority than the rows above for exactly that reason. |
 | ~~`game-backend/src/startupGuards.ts`~~ | 45 | **Done.** 15 tests, all six mutations caught (length floor, `=== "production"` loosened to a prefix, each production guard removed, first-problem-only reporting, and the guard made a no-op). Both directions are covered — a guard that throws on everything fails the "accepts a valid environment" test. What they still cannot establish: that `main()` calls it before binding a port, which is `index.ts`'s job and untested below. |
 | ~~`backoffice-api/src/auth/middleware.ts`~~ | 69 | **Done.** 23 tests on a bare Fastify instance with probe routes, so a failure names the rule rather than a route. All 12 mutations caught — including the revocation lookup in all four of its states (version behind, version ahead, deactivated, user gone). The twelfth mutation is what surfaced F17. Still cannot establish that `buildApp` mounts the hook at all; that is `app.test.ts`'s territory. |
 | ~~`backoffice-api/src/games/simulateClient.ts`~~ | 66 | **Done.** 10 tests, all seven mutations caught — including the one that matters most, the adapter silently ceasing to pass `ASSUMED_BONUS_RETURN_MULTIPLIER` (`runSimulation` defaults it to 0, so every bonus would score nothing and a tuned game would be refused for a reason no report explains). The constant's leverage is now measured by a test rather than asserted from memory, and writing it turned up the sampling-noise figures added to item G. |
@@ -521,6 +532,21 @@ testing was extracted into `paylineGrid.ts`, `reelStrip.ts` and the two
   the suite still green. Fixtures now carry a valid salt and a full 64-byte
   digest so the named field is the only thing wrong. Worth checking wherever
   a suite tests refusals by handing over obviously-junk input.
+- **Two arrangements of the same mathematics are a free oracle.** Item J was
+  found by diffing `gamma.ts` against the reference's copy — same methods,
+  different composition — and noticing that ours reaches the upper tail
+  through two subtractions from 1 where theirs reaches it directly. Neither
+  file has a test, so no suite could have caught it; but running both on the
+  same inputs gives a differential check that needs no table of expected
+  values and no independent implementation. Cheap wherever the reference has
+  a counterpart of a *pure* function, and it costs one `diff`.
+- **A test suite can be honest about its inputs and still leave a gap.**
+  `stats.test.ts` says plainly that it compares against standard chi-squared
+  table values rather than its own output, which is the right discipline and
+  is why it is trustworthy. Published tables stop around p ≈ 0.001, so the
+  discipline itself confined the file to the range where `gamma.ts` is
+  correct. The gap was not sloppiness — it was the boundary of a good method,
+  and finding it needed a different method rather than more care.
 - **Item 3d** — `runRngTestSuite`'s aggregate cannot be tested without an
   injectable RNG algorithm. Recorded above with two concrete fixes.
 - **Item 3c** — `e2e:backoffice` exhausts the per-IP login limit on a second
@@ -568,6 +594,91 @@ is the internal API's front-line defence, and it is not; service-auth is.
 The tests reflect this: the keying test runs against `/public/*`, where the
 difference between the two strategies is observable, with a note explaining
 why the internal route cannot show it.
+
+### ~~J. The RNG report cannot express a p-value below ~1e-16~~ — fixed
+
+**Severity: low (reporting fidelity — no verdict was affected) · Effort: low**
+
+Found by reading `gamma.ts` against its counterpart in the reference repo,
+which is the routine at the top of this file working as intended. The two
+implementations are the same mathematics arranged differently, and the
+arrangement here loses precision in the tail.
+
+`upperRegularizedGamma(s, x)` returns `1 - lowerRegularizedGamma(s, x)`, and
+in the far tail `lowerRegularizedGamma` is itself `1 - upperContinuedFraction`.
+So a small p-value is subtracted from 1 **twice**. The continued fraction
+computes it accurately, and then both subtractions throw the accuracy away:
+once `p` is below the spacing of doubles near 1 (~1.1e-16), `1 - (1 - p)`
+collapses to `0`. The reference's `chiSquarePValue` returns the continued
+fraction directly and has no such floor.
+
+Measured, comparing the two arrangements on identical inputs:
+
+| df | χ² | Ours | Correct |
+|---:|---:|---|---|
+| 10 | 50 | 2.669083e-7 | 2.669083e-7 |
+| 10 | 100 | **0** | 5.449702e-17 |
+| 10 | 400 | **0** | 9.413292e-80 |
+| 255 | 1000 | **0** | 9.378477e-89 |
+| 255 | 2000 | **0** | 6.879590e-268 |
+
+Everything above ~1e-16 agrees to ten significant figures, so this is purely
+a tail effect. Resolution degrades before the floor is reached, too: between
+1e-10 and zero at df=10, this arrangement can represent **2,070 distinct
+p-values** where the direct one represents 13,184.
+
+**No verdict is wrong, and that is the reason this is ranked low rather than
+as an `F` row.** `passed` is `pValue > 0.005 && pValue < 0.995`, and `0` fails
+that band exactly as `1e-17` does. Checked exhaustively rather than argued:
+**54,374 (df, χ²) pairs across df ∈ {9, 10, 99, 255} produced zero pass/fail
+disagreements** between the two arrangements. The upper end is unaffected —
+near `p = 1` the subtraction is harmless, and both agree to full precision.
+
+What is actually lost is the *evidence*. A report is meant to let a reviewer
+see how badly a generator failed, and `pValue: 0` cannot distinguish "failed
+by a hair beyond the floor" from "failed by 250 orders of magnitude". It also
+reads as a computed zero, which no continuous distribution ever genuinely
+produces — an alert reviewer would rightly ask whether the number means
+anything at all. For an artefact whose whole purpose is being checked by
+someone external, that is the wrong failure mode even when the verdict is
+right.
+
+**Fixed as described.** `upperRegularizedGamma` is now the primitive —
+continued fraction when `x >= s + 1`, `1 - series` otherwise — and
+`lowerRegularizedGamma` is defined in terms of it rather than the reverse.
+Neither numerical method changed; only which one is reached without a
+subtraction. The series branch still subtracts, but there Q is near 1 where
+the spacing of doubles is ~1e-16 *relative*, which is harmless.
+
+The precision loss has not been eliminated so much as **moved to the
+direction where it does not matter**: `lowerRegularizedGamma` now carries it,
+and for a very small Q the value of P genuinely is 1 to within double
+precision. Nothing reports a p-value through P, and this is recorded in the
+source so a later reader does not "fix" it back.
+
+`gamma.test.ts` is new — 15 tests, 7 of 8 mutations caught. The expected tail
+values come from an **exact closed form** for integer `s`
+(Q(s,x) = e^-x · Σ x^k/k!, summed in log space), which shares no code path
+with the implementation and never forms `1 - p`, so it stays accurate exactly
+where the implementation was suspected. Reverting the fix is caught. The one
+survivor — deleting `logGamma`'s reflection branch — is an equivalent mutant
+and is explained in the file header rather than left silent: this Lanczos
+coefficient set is accurate below 0.5 unaided (worst disagreement 1.7e-15),
+and `s = df/2 ≥ 0.5` means chi-squared cannot reach that branch at all.
+
+**A false "survived" along the way**, worth recording because section D warns
+about exactly this and it still happened: the first mutation run reported the
+reflection branch as surviving, but the `perl` regex had not matched and the
+file was unmodified. A mutation that was never applied and a mutation that
+was applied and survived are indistinguishable in a pass/fail count. Every
+survivor now gets a `grep` confirming the edit landed before it is believed.
+
+Verified through the real public API, not just the unit under test: a healthy
+200k-draw report is unchanged (p = 0.28–0.90, all passing), and a failing
+generator now reports 5.449702e-17 and 9.413292e-80 where both previously
+printed `0`. The full suite is green at 986 tests, and `stats.test.ts` and
+`prng.test.ts` are unaffected — checked after `npm run build:packages`, since
+`stats.ts` reaches this file through the built `dist/`.
 
 ### ~~H. The production balance guard covers the set case, not the unset one~~ — fixed
 

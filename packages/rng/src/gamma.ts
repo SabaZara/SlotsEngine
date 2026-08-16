@@ -67,15 +67,53 @@ function upperContinuedFraction(s: number, x: number): number {
   return Math.exp(-x + s * Math.log(x) - logGamma(s)) * h;
 }
 
-/** Lower regularized incomplete gamma P(s, x) = γ(s,x)/Γ(s). */
-export function lowerRegularizedGamma(s: number, x: number): number {
-  if (x < 0 || s <= 0) throw new Error(`lowerRegularizedGamma requires s > 0 and x >= 0, got s=${s} x=${x}`);
-  if (x === 0) return 0;
-  return x < s + 1 ? lowerSeries(s, x) : 1 - upperContinuedFraction(s, x);
+function assertDomain(s: number, x: number, name: string): void {
+  if (x < 0 || s <= 0) throw new Error(`${name} requires s > 0 and x >= 0, got s=${s} x=${x}`);
 }
 
-/** Upper regularized incomplete gamma Q(s, x) = 1 - P(s, x). This is the
- * chi-squared survival function once s = df/2 and x = statistic/2. */
+/**
+ * Upper regularized incomplete gamma Q(s, x) = Γ(s,x)/Γ(s). This is the
+ * chi-squared survival function once s = df/2 and x = statistic/2, and it
+ * is the p-value the certification report publishes.
+ *
+ * **This is the primitive, and `lowerRegularizedGamma` is defined in terms
+ * of it — not the reverse.** The direction matters and used to be the other
+ * way round, which cost the report every p-value below ~1e-16 (TODO item J).
+ * When the continued fraction is the accurate method, returning it directly
+ * preserves that accuracy; reaching it as `1 - (1 - Q)` does not. Doubles
+ * are spaced ~2.2e-16 apart just below 1, so any Q smaller than that
+ * collapses to exactly 0 the moment it is subtracted from 1 — the true value
+ * is computed correctly and then thrown away by the arithmetic that reports
+ * it. Measured before the change: df=10 at χ²=400 returned 0 where the true
+ * probability is 9.4e-80.
+ *
+ * No verdict was ever wrong (`passed` is a band around 0.005, and 0 fails it
+ * exactly as 1e-17 does), but a report whose whole purpose is to be checked
+ * by an outside reviewer must not print a computed 0 that no continuous
+ * distribution can actually produce.
+ */
 export function upperRegularizedGamma(s: number, x: number): number {
-  return 1 - lowerRegularizedGamma(s, x);
+  assertDomain(s, x, "upperRegularizedGamma");
+  if (x === 0) return 1;
+  // Each method is used only where it converges: the series below s + 1,
+  // the continued fraction at or above it. Only the series branch needs a
+  // subtraction, and there Q is near 1, where the spacing of doubles is
+  // ~1e-16 relative — harmless.
+  return x < s + 1 ? 1 - lowerSeries(s, x) : upperContinuedFraction(s, x);
+}
+
+/**
+ * Lower regularized incomplete gamma P(s, x) = γ(s,x)/Γ(s).
+ *
+ * The complement of the above, and it carries the loss of precision that
+ * `upperRegularizedGamma` used to: for a very small Q, P is 1 to within
+ * rounding and cannot express the difference. That is inherent to the
+ * quantity rather than to this arrangement — a cumulative probability
+ * indistinguishable from 1 *is* 1 in double precision — and it is the
+ * harmless direction, because nothing here reports a p-value through P.
+ */
+export function lowerRegularizedGamma(s: number, x: number): number {
+  assertDomain(s, x, "lowerRegularizedGamma");
+  if (x === 0) return 0;
+  return x < s + 1 ? lowerSeries(s, x) : 1 - upperContinuedFraction(s, x);
 }
