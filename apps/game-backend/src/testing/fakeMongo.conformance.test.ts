@@ -571,6 +571,67 @@ describe("fakeMongo conformance with real MongoDB", () => {
     assert.equal(real, 3, "both engines truncate 3.7 to 3");
   });
 
+  /**
+   * The query-operator equivalent of F17, which closed the same hole on the
+   * update side.
+   *
+   * An unrecognised query operator used to fall through to `actual ===
+   * expected`, comparing the document's value against the operator OBJECT,
+   * which is never equal — so the fake returned zero documents where Mongo
+   * returns some. Measured before the fix: `{ n: { $gte: 5 } }` matched 0 in
+   * the fake and 2 in Mongo; `$lte`, `$in` and `$exists` the same.
+   *
+   * That is the worse of the two failure directions, because zero results
+   * reads as data rather than as an error. The fake now throws, and this
+   * test pins BOTH halves: that Mongo really does support these, and that
+   * the fake refuses them loudly rather than answering wrongly.
+   */
+  it("refuses a query operator it does not implement, rather than matching nothing", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    const collection = `c_${randomUUID().slice(0, 8)}`;
+    for (const n of [1, 5, 10]) await realDb.collection(collection).insertOne({ n });
+
+    const fake = fakeMongo();
+    for (const n of [1, 5, 10]) await fake.db.collection(collection).insertOne({ n });
+
+    for (const [operator, query, expectedMatches] of [
+      ["$gte", { n: { $gte: 5 } }, 2],
+      ["$lte", { n: { $lte: 5 } }, 2],
+      ["$in", { n: { $in: [1, 10] } }, 2],
+      ["$exists", { n: { $exists: true } }, 3],
+    ] as const) {
+      // Real Mongo supports it and returns documents...
+      const real = await realDb.collection(collection).find(query as never).toArray();
+      assert.equal(real.length, expectedMatches, `Mongo should match ${expectedMatches} for ${operator}`);
+
+      // ...so the fake must NOT quietly answer zero.
+      await assert.rejects(
+        async () => fake.db.collection(collection).find(query as never).toArray(),
+        new RegExp(`does not implement query operator.*\\${operator}`),
+        `${operator} must throw rather than silently matching nothing`,
+      );
+    }
+  });
+
+  it("still matches a plain nested object as an equality query", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // The refusal above must not overshoot. A query value that is an
+    // ordinary subdocument is a legitimate equality match, not a malformed
+    // operator expression, and both engines must treat it the same way.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ grid: { reels: 5, rows: 3 } });
+      const hit = await d.collection(collection).find({ grid: { reels: 5, rows: 3 } }).toArray();
+      const miss = await d.collection(collection).find({ grid: { reels: 3, rows: 3 } }).toArray();
+      return { hit: hit.length, miss: miss.length };
+    });
+
+    assert.deepEqual(real, { hit: 1, miss: 0 });
+    assert.deepEqual(fake, real, "a subdocument equality match must behave identically");
+  });
+
   it("agrees that countDocuments honours a limit", async function () {
     if (!realDb) return this.skip(skipReason);
 

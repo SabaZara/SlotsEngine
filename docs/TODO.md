@@ -500,6 +500,33 @@ testing was extracted into `paylineGrid.ts`, `reelStrip.ts` and the two
   around it (the middleware suite splices the backing array to delete a
   document). Each addition should arrive with a conformance test, not on its
   own.
+- ~~**The same silence survived on the QUERY side.**~~ **Fixed.** F17 closed
+  this for update operators and the matching hole in `matches()` went
+  unnoticed for the same reason it always does — nothing used it. An
+  unrecognised query operator fell through to `actual === expected`,
+  comparing a document's value against the operator *object*, which is never
+  equal. Measured against real Mongo: `{ n: { $gte: 5 } }` matched **0** in
+  the fake and **2** in Mongo, and `$lte`, `$in` and `$exists` the same.
+  Worse than the update-side silence, because zero results reads as *data*
+  rather than as an error — a test asserting "no matches" would have passed
+  for entirely the wrong reason. Unsupported operators now throw, naming
+  themselves.
+- ~~**And the fake could not match a subdocument at all.**~~ **Fixed**, found
+  by the test written to prove the refusal above did not overshoot.
+  `{ grid: { reels: 5, rows: 3 } }` matched nothing, because `===` on two
+  structurally identical objects compares references. Mongo compares
+  structurally, so this was F16's family once more. Now compared via
+  `JSON.stringify`, which is deliberately **order-sensitive on keys** —
+  Mongo's actual rule for subdocument equality. Deep equality would have been
+  *more* permissive than the database, which is the direction that hides
+  bugs.
+- **Both of the above were latent, and that is the point.** Neither operator
+  nor subdocument query appears anywhere in this codebase today, so no test
+  could have failed. They were found by *asking what the fake does with input
+  it has never seen*, which is now the third distinct way this stand-in has
+  disagreed with Mongo (F16/F21 permissive, F22 restrictive, these two
+  silent). The lesson is that auditing a stand-in against its own callers
+  finds nothing — it has to be audited against the thing it stands in for.
 - **A fixture that is already minimal cannot test an allowlist.**
   `toPublicView` maps each bonus module down to `moduleId` and `params`.
   Both shipped fixtures happen to have exactly those two fields, so

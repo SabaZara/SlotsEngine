@@ -38,11 +38,45 @@ function get(doc: Doc, path: string): unknown {
   return path.split(".").reduce<unknown>((acc, part) => (acc as Record<string, unknown> | undefined)?.[part], doc);
 }
 
+/**
+ * Query operators this fake implements. Anything else throws rather than
+ * being silently ignored.
+ *
+ * The same treatment F17 gave update operators, and for the same reason —
+ * but the query side is worse, because the silent failure looks like data.
+ * An unrecognised operator used to fall through to `actual === expected`,
+ * comparing a document's value against the operator *object* itself, which
+ * is never equal. So `{ n: { $gte: 5 } }` matched **nothing** while real
+ * Mongo returned two documents (measured, not assumed). A test asserting
+ * "no results" would pass, and a test asserting on results would fail
+ * against correct code — F16's confusion and F17's silence at once.
+ *
+ * None of these are used in this codebase today, which is exactly the state
+ * `$unset` was in before F17: latent until the first test needs one, and
+ * then costing an afternoon. Adding an operator here should arrive with a
+ * conformance test, per the practice in docs/TODO.md section D.
+ */
+const SUPPORTED_QUERY_OPERATORS = new Set(["$lt", "$gt", "$ne"]);
+
 function matches(doc: Doc, query: Record<string, unknown>): boolean {
   return Object.entries(query).every(([key, expected]) => {
     const actual = get(doc, key);
-    if (expected && typeof expected === "object" && !Array.isArray(expected)) {
+    if (expected && typeof expected === "object" && !Array.isArray(expected) && !(expected instanceof Date)) {
       const ops = expected as Record<string, unknown>;
+      const operators = Object.keys(ops).filter((k) => k.startsWith("$"));
+
+      // Only refuse when the object actually looks like an operator
+      // expression. A plain nested object is a legitimate equality match
+      // against a subdocument, and must not be mistaken for a bad query.
+      const unsupported = operators.filter((op) => !SUPPORTED_QUERY_OPERATORS.has(op));
+      if (unsupported.length > 0) {
+        throw new Error(
+          `fakeMongo does not implement query operator(s) ${unsupported.join(", ")} on '${key}'. ` +
+            `Implement it in matches() and pin it with a conformance test — do NOT let it match silently, ` +
+            `which is how it would return zero documents where Mongo returns some.`,
+        );
+      }
+
       if ("$lt" in ops) return (actual as number | string) < (ops.$lt as number | string);
       if ("$gt" in ops) return (actual as number | string) > (ops.$gt as number | string);
       // Mongo's `$ne` matches documents where the field is absent, which is
@@ -54,6 +88,22 @@ function matches(doc: Doc, query: Record<string, unknown>): boolean {
     // Matching a scalar against an array field tests membership — how
     // `roles: "super_admin"` finds a user whose `roles` array contains it.
     if (Array.isArray(actual) && !Array.isArray(expected)) return actual.includes(expected);
+
+    // Mongo compares a subdocument or array query value STRUCTURALLY, and
+    // `===` compares references — so `{ grid: { reels: 5, rows: 3 } }`
+    // matched nothing here while Mongo matched the document (measured).
+    // Same family as F16/F21: the stand-in disagreeing with the database on
+    // a query nothing happened to run yet.
+    //
+    // Mongo's real rule for subdocument equality is order-sensitive on keys,
+    // which JSON.stringify happens to reproduce for documents built the same
+    // way. That is a narrower guarantee than deep equality and it is the
+    // right one to model — a fake that ignored key order would be MORE
+    // permissive than Mongo, which is the direction that hides bugs.
+    if (expected !== null && typeof expected === "object") {
+      return JSON.stringify(actual) === JSON.stringify(expected);
+    }
+
     return actual === expected;
   });
 }
