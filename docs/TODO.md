@@ -306,7 +306,7 @@ These have no direct test AND no meaningful indirect coverage.
 |---|---:|---|
 | ~~`game-backend/src/startupGuards.ts`~~ | 45 | **Done.** 15 tests, all six mutations caught (length floor, `=== "production"` loosened to a prefix, each production guard removed, first-problem-only reporting, and the guard made a no-op). Both directions are covered — a guard that throws on everything fails the "accepts a valid environment" test. What they still cannot establish: that `main()` calls it before binding a port, which is `index.ts`'s job and untested below. |
 | ~~`backoffice-api/src/auth/middleware.ts`~~ | 69 | **Done.** 23 tests on a bare Fastify instance with probe routes, so a failure names the rule rather than a route. All 12 mutations caught — including the revocation lookup in all four of its states (version behind, version ahead, deactivated, user gone). The twelfth mutation is what surfaced F17. Still cannot establish that `buildApp` mounts the hook at all; that is `app.test.ts`'s territory. |
-| `backoffice-api/src/games/simulateClient.ts` | 66 | Runs the pre-publish simulation **in this process** (deliberately — a 100k-spin run on game-backend would stall live players). Untested, and it carries `ASSUMED_BONUS_RETURN_MULTIPLIER = 20`: a flat estimate for a triggered bonus rather than playing the module. That constant feeds `bonusRtp`, which feeds the measured RTP the publish gate compares against target — so **the number the gate trusts is part measurement, part assumption**, and nothing pins the assumption. The file says so honestly; see item G below. |
+| ~~`backoffice-api/src/games/simulateClient.ts`~~ | 66 | **Done.** 10 tests, all seven mutations caught — including the one that matters most, the adapter silently ceasing to pass `ASSUMED_BONUS_RETURN_MULTIPLIER` (`runSimulation` defaults it to 0, so every bonus would score nothing and a tuned game would be refused for a reason no report explains). The constant's leverage is now measured by a test rather than asserted from memory, and writing it turned up the sampling-noise figures added to item G. |
 | `game-socket/src/index.ts` | 118 | The connection lifecycle — limiter wiring, session-map cleanup on close, the `MAX_CONNECTIONS` ceiling. `session.ts`, `rateLimit.ts`, `origin.ts` and `backendClient.ts` are each well covered; the file that wires them together is not. |
 | `game-backend/src/index.ts` | 175 | Same shape: composition, the CORS delegator, the rate-limit key generator, the error handler, and the bonus-sweep interval. Every piece is tested individually; the assembly is not. Note F6 and F7 were both *assembly* bugs. |
 
@@ -454,6 +454,29 @@ simulation never played.
 
 The reference game happens to land well at 20x, which is why nothing has
 surfaced this in practice.
+
+**A second measurement, from writing `simulateClient.test.ts`:** the
+simulation is unseeded, so each run is an independent sample and two runs of
+the *same* configuration differ. Measured on `reference-5x3`:
+
+| Spins | Run-to-run spread, multiplier unchanged |
+|---:|---:|
+| 20,000 | **0.0512** |
+| 60,000 | ~0.0148 |
+| 100,000 | ~0.0196 |
+
+At the 100k the publish gate actually uses, sampling noise is roughly 0.02
+against a tolerance of ±0.05 — so noise alone consumes about **40% of the
+tolerance budget** before the bonus assumption is considered at all. The two
+sources compound: a game near the edge of tolerance can pass or fail on
+which sample it drew, and re-running a refused publish may simply succeed.
+
+That makes a third option worth listing alongside the ones above:
+
+- **Seed the simulation** so a publish decision is reproducible. A designer
+  who is refused should be able to re-run and get the same answer, and a
+  stored report should be checkable later. This is independent of the bonus
+  assumption and probably cheaper than either fix for it.
 
 Ranked below the section-A items because it is a known, documented
 approximation rather than a defect — but it is the most substantive thing
