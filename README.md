@@ -402,6 +402,58 @@ client spend a full allowance at the end of one window and again at the
 start of the next — a burst of double the intended rate at exactly the
 moment the limiter claims to be holding the line.
 
+## Which origins may connect
+
+Every browser-reachable surface names its origins explicitly, and none of
+them accepts `*`.
+
+| Surface | Setting | Applies to |
+|---|---|---|
+| `game-backend` `/public/*` | `GAME_CORS_ORIGINS` | CORS, that one route only |
+| `backoffice-api` | `BACKOFFICE_CORS_ORIGINS` | CORS, global |
+| `game-socket` handshake | `SOCKET_ALLOWED_ORIGINS` | WebSocket `verifyClient` |
+
+The socket was the odd one out: a `WebSocketServer` with no `verifyClient`
+accepts a handshake from a page on any domain, so the service that owns the
+identity boundary was the one taking the most permissive position. It now
+refuses a disallowed origin with a `403` at the handshake — before a
+connection object, a rate limiter or a session-map entry exists.
+
+**This is defence in depth, not authentication.** Connecting has never
+proved anything; identity comes from a signed launch token at `JOIN`. What
+the check buys is that a page on another domain cannot open a socket inside
+a logged-in player's browser and sit there attempting messages.
+
+**A missing `Origin` header is allowed, deliberately.** Only browsers send
+one, and a page cannot forge it — which is precisely what makes the check
+worth anything. Server-side clients (the e2e scripts, the load check, any
+`ws` caller) send none at all. Refusing them would break every legitimate
+non-browser client while stopping no attacker, since anything that can omit
+the header can equally set it to an allowed value. An origin check
+constrains browsers, the only clients that cannot lie about it; treating a
+blank `Origin` as hostile would be the appearance of a stricter rule with
+none of the effect.
+
+**Comparison is exact, on scheme, host and port.** Suffix matching is the
+usual shortcut and the usual hole — `endsWith("example.com")` also accepts
+`notexample.com`, which an attacker can register in an afternoon. The host
+is lowercased because RFC 6454 says it is case-insensitive, but the value
+is parsed and rebuilt rather than string-mangled, so `null` (what a
+sandboxed or `file://` document sends) and anything unparseable are refused
+rather than compared.
+
+**Production refuses to boot without an allowlist**, in the same spirit as
+the other startup guards, and `*` is rejected outright rather than honoured
+— a socket has no preflight, so `*` is not a relaxed policy but the absence
+of one, and it should be spelled that way by leaving the variable unset
+outside production.
+
+Verified against a running server rather than only in unit tests: an
+allowed origin connects, `https://evil.example` and the lookalike
+`http://localhost:9104.evil.test` are both refused `403`, a wrong port on
+an allowed host is refused, an uppercase host is accepted, and a client
+sending no `Origin` connects.
+
 ### Three things measurement corrected
 
 Each of these looked right and was wrong, and none would have failed

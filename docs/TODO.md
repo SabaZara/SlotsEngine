@@ -23,6 +23,7 @@ existed matters more than the fix, and that reasoning is easy to lose.
 | F5 | `game-socket` had no tests at all — 405 lines on the service that decides who a player is. | The review. Now 29 tests, each verified by mutation. |
 | F6 | `void app.register(rateLimit, …)` in a synchronous factory left **every** route unlimited — the plugin's `onRoute` hook had not installed yet. No error; requests just returned 200 with no protection. | Flooding the running service and finding the limit never fired. |
 | F7 | game-backend's error handler forced every error to 500, flattening the limiter's 429 into `internal_error` — a limited client was told nothing and had no reason to back off. | Same flood; the status code was wrong. |
+| F8 | `game-socket` accepted a WebSocket handshake from any origin — the service that owns the identity boundary held the most permissive position of the three, while both HTTP surfaces named their origins explicitly. Now refused with `403` at `verifyClient`. | Working down this list. 23 tests, each verified by mutation, plus a live handshake check against a running server. |
 
 ---
 
@@ -44,7 +45,7 @@ This is deliberate for now — there is nowhere to deploy to — but it means
 
 GitHub requires Pro for branch protection on a private repo, so CI reports
 but cannot block a merge. A `pre-push` hook covers the realistic case
-locally (build, typecheck, 287 tests, ~25s), and is skippable with
+locally (build, typecheck, 310 tests, ~25s), and is skippable with
 `--no-verify` by design.
 
 Options: GitHub Pro at $4/month, make the repo public, or accept it. See
@@ -77,16 +78,7 @@ there are two.
 `@fastify/rate-limit` supports a Redis store, which is the standard answer.
 The socket's token buckets would need the same treatment.
 
-### 4. `game-socket` does not check the WebSocket origin
-**Severity: medium · Effort: low**
-
-`WebSocketServer` is constructed with no `verifyClient` and no origin
-allowlist, so any page on any domain can open a socket and attempt a JOIN.
-A launch token is still required, so this is not an authentication hole —
-but it removes a cheap layer, and the HTTP services already take the
-opposite position (`GAME_CORS_ORIGINS` is explicit and never `*`).
-
-### 5. Secrets live in environment variables
+### 4. Secrets live in environment variables
 **Severity: medium · Effort: medium-high**
 
 `SERVICE_AUTH_SECRET`, `LAUNCH_TOKEN_SECRET` and `BACKOFFICE_JWT_SECRET`
@@ -99,7 +91,7 @@ Worth noting this is the same finding the review made about the reference
 architecture's encryption key — a fair characterisation there, and it
 applies here too.
 
-### 6. Bonus sessions are swept, not expired by the database
+### 5. Bonus sessions are swept, not expired by the database
 **Severity: low · Effort: low**
 
 `sweepAbandonedSessions` runs on a 5-minute interval inside `game-backend`
@@ -111,7 +103,7 @@ being alive.
 The sweep is idempotent and tested, so this is robustness, not
 correctness.
 
-### 7. The load check's bonus race depends on a seeded fixture
+### 6. The load check's bonus race depends on a seeded fixture
 **Severity: low · Effort: low**
 
 Section 4 needs `pick-bonus-5x3`, which is only seeded when
@@ -127,7 +119,7 @@ reading a local run as complete.
 
 ## Open (accepted)
 
-### 8. A passing load check is evidence, not proof
+### 7. A passing load check is evidence, not proof
 **Accepted — inherent, not fixable**
 
 The load check drives real concurrency against real Mongo and asserts
@@ -141,7 +133,7 @@ watching it fail — removing the atomic bonus claim takes accepted steps
 from 2 to 10; dropping the idempotency index produced 12 rounds and 12
 charges for one `clientRequestId`.
 
-### 9. The overdraw section can skip
+### 8. The overdraw section can skip
 **Accepted — the alternatives are worse**
 
 Draining a balance is a random walk at ~95% return. Three approaches were
@@ -150,7 +142,7 @@ the last fails because bet validation precedes the funds check). The
 current version bounds the drain and reports whether it ran, so a skip is
 visible rather than a silent pass. Observed: ran in 5 of 6 local runs.
 
-### 10. `reference-5x3` cannot exercise a multi-step bonus
+### 9. `reference-5x3` cannot exercise a multi-step bonus
 **Accepted — solved by fixture, not by changing the reference game**
 
 Its `wheel` module resolves at `start`. Rather than distort a game tuned

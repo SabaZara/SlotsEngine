@@ -80,6 +80,9 @@ services:
       SOCKET_MSG_RATE: ${SOCKET_MSG_RATE:-25}
       SOCKET_MSG_BURST: ${SOCKET_MSG_BURST:-50}
       SOCKET_MAX_CONNECTIONS: ${SOCKET_MAX_CONNECTIONS:-5000}
+      # Handshake origin allowlist. Falls back to the same value the HTTP
+      # surface uses, so the two cannot drift apart by accident.
+      SOCKET_ALLOWED_ORIGINS: ${SOCKET_ALLOWED_ORIGINS:-${GAME_CORS_ORIGINS:-http://localhost:9104}}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       NODE_ENV: ${NODE_ENV:-development}
     ports:

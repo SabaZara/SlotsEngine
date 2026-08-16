@@ -4,6 +4,7 @@ import { createLogger } from "@slots-engine/logging";
 import type { ClientToServerMessage, ServerToClientMessage } from "@slots-engine/shared-types";
 import { handleMessage, type Connection, type Session } from "./session.js";
 import { ConnectionLimiter } from "./rateLimit.js";
+import { assertOriginPolicy, isOriginAllowed, loadOriginPolicy } from "./origin.js";
 
 const logger = createLogger("game-socket");
 const PORT = Number(process.env.PORT ?? 9003);
@@ -24,6 +25,11 @@ const MAX_CONNECTIONS = Number(process.env.SOCKET_MAX_CONNECTIONS ?? 5000);
  */
 const sessions = new Map<Connection, Session>();
 
+// Read and validated before anything binds a port, so a misconfigured
+// service fails visibly at boot rather than serving with no origin check.
+const originPolicy = loadOriginPolicy();
+assertOriginPolicy(originPolicy);
+
 const httpServer = createServer((req, res) => {
   if (req.url === "/health") {
     res.writeHead(200, { "content-type": "application/json" });
@@ -33,7 +39,23 @@ const httpServer = createServer((req, res) => {
   res.writeHead(404).end();
 });
 
-const wss = new WebSocketServer({ server: httpServer, maxPayload: 64 * 1024 });
+const wss = new WebSocketServer({
+  server: httpServer,
+  maxPayload: 64 * 1024,
+  // Refused at the handshake, so a rejected browser never reaches
+  // `connection` and never costs a limiter, a session entry or a socket.
+  // `ws` answers a false verdict with 401 and closes.
+  verifyClient: ({ origin }, done) => {
+    if (isOriginAllowed(origin, originPolicy)) {
+      done(true);
+      return;
+    }
+    // Logged because a burst of these is a signal worth seeing: it means a
+    // page somewhere is pointing at this socket.
+    logger.warn({ origin }, "refusing websocket handshake from disallowed origin");
+    done(false, 403, "Forbidden origin");
+  },
+});
 
 wss.on("connection", (socket: WebSocket) => {
   // A ceiling on concurrent sockets. Message rate limiting does nothing
