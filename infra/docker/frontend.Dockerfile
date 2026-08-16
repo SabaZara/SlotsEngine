@@ -21,6 +21,11 @@ COPY packages ./packages
 COPY apps ./apps
 
 RUN npm ci --ignore-scripts
+
+# Workspace packages first. Both frontends import @slots-engine/shared-types,
+# which resolves through its built dist/*.d.ts — building the app alone fails
+# with "cannot find module" on a clean checkout, where no dist/ yet exists.
+RUN npm run build:packages
 RUN npm run build -w apps/$APP
 
 FROM nginx:1.27-alpine AS runtime
