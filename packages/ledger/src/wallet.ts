@@ -90,6 +90,13 @@ async function applyLedgerOp(
   // cash-in is a legitimate way for a player to come into existence; a
   // debit never upserts, because the check above already requires an
   // existing player with sufficient funds.
+  //
+  // That makes `type === "credit"` unobservable today rather than
+  // load-bearing: flipping it to `upsert: true` breaks no test, because a
+  // debit can never reach here without a player. It is kept as a second
+  // statement of the same rule — if the funds check above is ever narrowed
+  // or moved, this is what stops a debit quietly conjuring a player with a
+  // negative balance. Deliberately not "simplified" away.
   const updated = await db.collection("players").findOneAndUpdate(
     { operatorId: input.operatorId, playerId: input.playerId },
     { $inc: { balance: delta }, $set: { updatedAt: new Date() } },
