@@ -127,6 +127,15 @@ jobs:
       # in the unit job (which has no database) and run here instead. Without
       # this step they would skip in CI entirely — a check that never runs
       # is worse than one that does not exist, because it looks like cover.
+      # Schema and index application, against the real database. F1, F2 and
+      # F9 all originated here, and all three are disagreements between the
+      # schema declared and the one Mongo builds — invisible to any
+      # in-memory stand-in by construction.
+      - name: Schema application (real Mongo)
+        env:
+          MONGO_TEST_URI: mongodb://localhost:27018/?directConnection=true
+        run: npx tsx --test packages/mongo-schemas/src/collections.test.ts
+
       # Guards the stand-in every other unit test trusts. If it drifts from
       # real Mongo, a green suite stops meaning anything — which is how F1
       # and F9 both reached production.
