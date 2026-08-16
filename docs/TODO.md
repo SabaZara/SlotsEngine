@@ -41,7 +41,7 @@ needs a decision rather than code.**
   is not a criticism of them — a test that never fails is doing its job as a
   regression guard — but it does mean the suite's value here has been in the
   *writing*, and its value from here on is in the *guarding*.
-- **1129 tests**, of which 50 are conformance cases run against real MongoDB.
+- **1138 tests**, of which 50 are conformance cases run against real MongoDB.
 - **Sections A, B and C are closed** — no source module with meaningful
   logic is without a direct test. The React components are the deliberate
   exception, recorded in section C.
@@ -631,6 +631,29 @@ environment and a component testing library, neither of which this repo has
 testing was extracted into `paylineGrid.ts`, `reelStrip.ts` and the two
 `api.ts` files, all of which are now covered.
 
+**The spin animation is on the covered side of that line**, which is worth
+saying explicitly because "renderer.ts is untested" reads as though it were
+not. Every timing decision lives in `reelStrip.ts` — `reelStateAt`, the two
+easing curves, `blurAmount`, `totalSpinDurationMs` — under 19 tests, leaving
+`renderer.ts` with canvas calls and no arithmetic worth asserting.
+
+The property that matters is pinned: **reel state is a pure function of
+elapsed time**, so a dropped frame cannot desync the reels, and the
+left-to-right settle order holds regardless of when frames land. Also
+covered: the spin-to-settle handoff is continuous, reels land on an exact
+symbol boundary, and nothing scrolls backwards except the deliberate settle
+overshoot.
+
+The reference repo's animation subsystem is much larger — designer-authored
+spin and symbol animation *templates*, edited in the backoffice and stored
+per game (`spinAnimationTemplates`, `symbolAnimationTemplates`, and a
+`game-renderer` package with sprite-sheet handling). None of that exists
+here and none of it is planned: this frontend is a **reference client** that
+exists to prove the protocol and the money path, not a production skin. The
+animation it has is the amount needed to show that a settled server result
+can be revealed convincingly, and its timing maths is tested to the same
+standard as the rest of the repo.
+
 ### ~~A2. The third sweep~~ — run, and it found the limit of output testing
 
 Section A left a note for whoever ran the third sweep: the rule "no direct
@@ -708,6 +731,32 @@ establish that a generator *looks* right. For anything whose security rests
 on unpredictability, the assertion has to reach the source. The statistical
 suite in `packages/rng` tests the generator a seed drives; it could not have
 caught this either.
+
+### ~~A3. The bonus registry's write side~~ — closed
+
+The same filter that found A2's two modules — **exported and named by no
+test** — had two more hits once it was run over `math-engine` specifically:
+`registerBonusModule` and `listBonusModules`. `bonus.test.ts` covers the two
+shipped modules and `deriveStepRng`, and reaches the registry only through
+`getBonusModule`, so the write side had nothing on it.
+
+9 tests, all 5 mutations caught. The one this exists for is keying every
+module under a fixed id: it is `registerMathEngine`'s failure exactly, one
+directory over, and it means a bonus **pays out under the mathematics of a
+different module** while looking entirely successful — the wheel's payouts
+credited to a pick round is a wrong number, not a crash.
+
+Two other properties are now pinned that were only ever implied: the shipped
+pair is registered as an **import side effect** of `registry.ts` (nothing
+else does it), and `listBonusModules` returns a fresh array rather than the
+live keys — F18's shape, where handing back internal state by reference made
+a privilege escalation reachable through the function meant to produce a safe
+copy.
+
+Also recorded deliberately: re-registering the same id **replaces** rather
+than refusing. That is what keeps the bottom-of-file registration idempotent
+if the module is imported twice, and it is now a decision someone has to see
+a test fail to change.
 
 ### D. Test-infrastructure debt
 
