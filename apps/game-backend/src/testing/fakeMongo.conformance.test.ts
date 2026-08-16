@@ -501,6 +501,76 @@ describe("fakeMongo conformance with real MongoDB", () => {
     assert.equal(real, true);
   });
 
+  /**
+   * F22's mechanism, pinned in both engines.
+   *
+   * This is the rare conformance case that records a **disagreement** rather
+   * than a match, because the disagreement is the finding: `readAuditLog`
+   * clamped its page size with `Math.min(Math.max(limit, 1), 500)`, and no
+   * comparison with `NaN` is ever true, so `?limit=abc` produced a `NaN`
+   * limit. Real Mongo reads that as **no limit at all** and returns the
+   * whole collection; the fake implements `limit` as `slice(0, NaN)` and
+   * returns nothing.
+   *
+   * So the stand-in was not merely different here, it was different in the
+   * direction that hides the bug — a test would have shown an empty page
+   * while production served an unbounded scan. Same family as F16/F17/F21,
+   * and the reason the fix belongs in the caller (which now refuses a
+   * non-finite limit) rather than in the fake.
+   *
+   * The fake is deliberately NOT changed to match. Passing `NaN` to `limit`
+   * is a caller bug in every case, and teaching the stand-in to return the
+   * whole collection for it would make the dangerous behaviour the tested
+   * one. This test exists so the difference is written down and cannot
+   * surprise anyone twice.
+   */
+  it("disagrees on a NaN limit — Mongo ignores it, the fake returns nothing", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      for (let n = 0; n < 5; n++) await d.collection(collection).insertOne({ n });
+      return d.collection(collection).find({}).limit(Number("abc")).toArray();
+    });
+
+    assert.equal(real.length, 5, "real Mongo treats a NaN limit as no limit at all");
+    assert.equal(fake.length, 0, "the fake truncates to nothing, which is the opposite failure");
+    assert.notEqual(real.length, fake.length, "if these ever agree, revisit the clamp in readAuditLog");
+  });
+
+  it("agrees that a limit of 0 means no limit, not an empty page", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // The other half of the same trap, and the reason `clampLimit` raises a
+    // sub-1 request to 1 rather than passing it through: `?limit=0` reads
+    // like "give me nothing" and Mongo hears "give me everything".
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      for (let n = 0; n < 5; n++) await d.collection(collection).insertOne({ n });
+      return (await d.collection(collection).find({}).limit(0).toArray()).length;
+    });
+
+    assert.equal(real, 5, "Mongo treats limit(0) as unbounded");
+    assert.equal(fake, 0, "the fake slices to nothing");
+  });
+
+  it("agrees that a fractional limit truncates toward zero", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // Here the two DO agree, which is why `Math.floor` in `clampLimit` is an
+    // equivalent mutation for the documents returned. Pinned so that stays
+    // true — if either engine ever rounded up instead, the clamp's stated
+    // maximum and its real one would part company.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      for (let n = 0; n < 10; n++) await d.collection(collection).insertOne({ n });
+      return (await d.collection(collection).find({}).limit(3.7).toArray()).length;
+    });
+
+    assert.equal(fake, 3);
+    assert.equal(real, 3, "both engines truncate 3.7 to 3");
+  });
+
   it("agrees that countDocuments honours a limit", async function () {
     if (!realDb) return this.skip(skipReason);
 
