@@ -99,9 +99,26 @@ existed matters more than the fix, and that reasoning is easy to lose.
 
 ### ~~1. No deploy pipeline — CI verifies, nothing ships~~ — built, and waiting on a host
 
-**The pipeline exists.** `deploy.yml` builds five images and pushes them
-tagged by commit SHA; `rollback.yml` puts production back on a named earlier
-release. Full setup in `docs/DEPLOY.md`.
+**The pipeline exists and has run green.** `deploy.yml` builds five images
+and pushes them tagged by commit SHA; `rollback.yml` puts production back on
+a named earlier release. Full setup in `docs/DEPLOY.md`.
+
+**Confirmed on a real run** (`fe7f406`), not just locally: all five images
+are in GHCR at `ghcr.io/sabazara/<service>:fe7f406…`, the SHA matches the
+commit CI passed, and the deploy job reported success **with a warning
+annotation reading "No deploy target configured — images were built and
+pushed, but nothing shipped."** Every step that would touch a server shows as
+`skipped`. That is the intended state: green, but not claiming to have
+deployed.
+
+**The gate was exercised in both directions before it worked**, which is
+better evidence than a first-try success would have been:
+
+| Run | CI | Deploy | What it proved |
+|---|---|---|---|
+| `6102a5b` | **failed** | **skipped** | A red CI run ships nothing. |
+| `4cd752d` | passed | **failed** | The gate lets a green run through — and surfaced the lowercase bug. |
+| `fe7f406` | passed | **succeeded** | Five images pushed, deploy honestly skipped. |
 
 **The design decision that mattered.** `deploy.yml` triggers on
 `workflow_run` — waiting for CI to *finish* and reading its conclusion —
