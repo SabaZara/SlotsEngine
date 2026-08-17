@@ -8,13 +8,17 @@ import { GameBuilderScreen } from "./screens/GameBuilderScreen.js";
 import { AuditScreen } from "./screens/AuditScreen.js";
 import { UsersScreen } from "./screens/UsersScreen.js";
 import { OperatorsScreen } from "./screens/OperatorsScreen.js";
+import { ReportsScreen } from "./screens/ReportsScreen.js";
+import { SupportScreen } from "./screens/SupportScreen.js";
 
 type Route =
   | { name: "games" }
   | { name: "game"; gameId: string }
   | { name: "audit" }
   | { name: "users" }
-  | { name: "operators" };
+  | { name: "operators" }
+  | { name: "reports" }
+  | { name: "support" };
 
 export function App() {
   const [user, setUser] = useState<SessionUser | null>(null);
@@ -54,6 +58,12 @@ export function App() {
   const canViewOperators =
     user.roles.includes("operations") || user.roles.includes("viewer") || user.roles.includes("super_admin");
   const canManageOperators = user.roles.includes("operations") || user.roles.includes("super_admin");
+  // Reading the money and looking a player up are the same permission as
+  // viewing operators, and for the same reason: reconciling a statement and
+  // answering "what happened to my spin" are ordinary finance and support
+  // work, and neither response carries a credential. The API draws the line
+  // in the same place, so no nav item here can lead to a 403.
+  const canReadMoney = canViewOperators;
 
   const logout = async () => {
     // Revokes every token issued to this user, not just this tab's — a
@@ -97,6 +107,8 @@ export function App() {
           {navItem("Games", route.name === "games" || route.name === "game", () => setRoute({ name: "games" }))}
           {canManageUsers && navItem("Users", route.name === "users", () => setRoute({ name: "users" }))}
           {canViewOperators && navItem("Operators", route.name === "operators", () => setRoute({ name: "operators" }))}
+          {canReadMoney && navItem("Reports", route.name === "reports", () => setRoute({ name: "reports" }))}
+          {canReadMoney && navItem("Support", route.name === "support", () => setRoute({ name: "support" }))}
           {canAudit && navItem("Audit", route.name === "audit", () => setRoute({ name: "audit" }))}
         </nav>
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 12 }}>
@@ -119,6 +131,8 @@ export function App() {
         )}
         {route.name === "users" && <UsersScreen currentUserId={user.userId} />}
         {route.name === "operators" && <OperatorsScreen canManage={canManageOperators} />}
+        {route.name === "reports" && <ReportsScreen />}
+        {route.name === "support" && <SupportScreen />}
         {route.name === "audit" && <AuditScreen />}
       </main>
     </div>

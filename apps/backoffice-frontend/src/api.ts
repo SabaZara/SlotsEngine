@@ -103,6 +103,74 @@ export interface ManagedUser extends SessionUser {
  * that displays a secret it can fetch on demand — would be a redesign to
  * undo, not a patch.
  */
+export interface ReportQuery {
+  operatorId?: string;
+  playerId?: string;
+  from?: string;
+  to?: string;
+  format?: string;
+}
+
+/** One ledger movement as a report returns it. `amount` and `balanceAfter`
+ * are integer minor units, like every money value in this system. */
+export interface ReportTransaction {
+  transactionId: string;
+  operatorId: string;
+  playerId: string;
+  roundId?: string;
+  type: "debit" | "credit";
+  amount: number;
+  balanceAfter: number;
+  status: string;
+  createdAt: string;
+}
+
+export interface ReportPage {
+  transactions: ReportTransaction[];
+  count: number;
+  hasMore: boolean;
+  /** Present only when there is another page — see the route's note on why
+   * a caller loops on its presence rather than comparing counts. */
+  nextCursor?: string;
+}
+
+export interface ReportSummary {
+  staked: number;
+  paidOut: number;
+  net: number;
+  debitCount: number;
+  creditCount: number;
+}
+
+export interface SupportLookup {
+  player: { operatorId: string; playerId: string; balance: number };
+  recentTransactions: ReportTransaction[];
+  recentRounds: Array<{
+    roundId: string;
+    gameId: string;
+    gameVersion: number;
+    totalBet: number;
+    seed: string;
+    rngAlgorithm: string;
+    status: string;
+    createdAt: string;
+  }>;
+  truncated: { transactions: boolean; rounds: boolean };
+  limit: number;
+}
+
+/** Builds a query string, omitting anything empty — an empty `from=` would
+ * otherwise reach the server as a value to parse rather than as an absent
+ * filter. */
+function reportQueryString(params: object): string {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== "") query.set(key, String(value));
+  }
+  const rendered = query.toString();
+  return rendered ? `?${rendered}` : "";
+}
+
 export interface ManagedOperator {
   operatorId: string;
   name: string;
@@ -305,6 +373,52 @@ export const api = {
       method: "POST",
       body: { password },
     }),
+
+  reportTransactions: (params: ReportQuery & { limit?: number; cursor?: string }) =>
+    request<ReportPage>(`/v1/reports/transactions${reportQueryString(params)}`),
+
+  reportSummary: (params: ReportQuery) => request<ReportSummary>(`/v1/reports/summary${reportQueryString(params)}`),
+
+  /**
+   * Fetches the CSV as text rather than as JSON.
+   *
+   * A separate function because `request()` always parses the response as
+   * JSON — handing it a CSV would throw on the first comma. And it cannot
+   * be a plain `<a href>`: the route requires a bearer token, and a link
+   * carries no headers, so the browser would be sent an unauthenticated
+   * request and get a 401 page in a new tab. The token cannot go in the
+   * query string either — that is the one place credentials must never be,
+   * since URLs reach referrer headers, proxy logs and browser history.
+   *
+   * So the file is fetched with the header and turned into a blob the page
+   * downloads itself.
+   */
+  reportTransactionsCsv: async (params: ReportQuery): Promise<{ csv: string; truncated: boolean }> => {
+    const response = await fetch(`${BASE_URL}/v1/reports/transactions${reportQueryString({ ...params, format: "csv" })}`, {
+      headers: { ...(sessionToken ? { authorization: `Bearer ${sessionToken}` } : {}) },
+    });
+
+    if (!response.ok) {
+      if (response.status === 401 && sessionToken) {
+        sessionToken = null;
+        onSessionLost?.();
+      }
+      throw new ApiError(response.status, "export_failed", `the export failed (${response.status})`, {});
+    }
+
+    return {
+      csv: await response.text(),
+      // The server sets this when it hit the export ceiling. Read here so
+      // the screen can warn — a truncated financial export that looks
+      // complete is the failure this whole signal exists to prevent.
+      truncated: response.headers.get("x-truncated") === "true",
+    };
+  },
+
+  supportLookup: (operatorId: string, playerId: string) =>
+    request<SupportLookup>(
+      `/v1/support/players/${encodeURIComponent(operatorId)}/${encodeURIComponent(playerId)}`,
+    ),
 
   listOperators: () => request<{ operators: ManagedOperator[] }>("/v1/operators"),
 

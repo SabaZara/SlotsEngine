@@ -97,7 +97,7 @@ non-decisions rather than gaps; section O names each and why.
   is not a criticism of them — a test that never fails is doing its job as a
   regression guard — but it does mean the suite's value here has been in the
   *writing*, and its value from here on is in the *guarding*.
-- **1850 tests** (1739 unit + 111 component), of which 53 are conformance
+- **1886 tests** (1753 unit + 133 component), of which 53 are conformance
   cases run against real MongoDB, 111 are React component tests, and a
   further 45 run against real MongoDB directly — 15 schema/index cases, 27
   integration-API cases, and 3 ledger concurrency cases. Counted from a
@@ -909,6 +909,59 @@ was actually won. The report is not wrong about what *moved*; it cannot
 answer "what was won" without a field the ledger does not write.
 Deliberately not inferred here — categorising a credit is a money-path
 change and belongs in its own work, not guessed at by a report.
+
+### ~~14. The reports API had no UI, and support had no lookup~~ — both shipped
+
+**The first half is a defect I introduced.** Item 13's reporting routes
+were built, mutation-verified and confirmed against live data — and were
+reachable only by `curl`. That is **F24's shape for the third time in this
+repo**, and the third time is the point: it happened while the TODO already
+carried two write-ups of exactly this pattern, one of them mine from the
+same week. Naming the pattern is evidently not the same as avoiding it.
+
+What makes it recur is that the API feels finished. Every check this repo
+values — mutation-verified, real stack, honest blind spots — passes on a
+route with no caller. The question that catches it is not a testing
+question at all: *who opens this, and from where?*
+
+Shipped:
+
+- **`GET /v1/support/players/:operatorId/:playerId`** — balance, last 50
+  transactions, last 50 rounds, in one round trip. 14 tests, **9 of 9
+  mutations caught**. Read-only by design: correcting a balance is a ledger
+  movement and belongs on the money path with an idempotency key, not on a
+  support screen.
+- **`ReportsScreen`** — filters, totals, paging, CSV download. 13 tests.
+- **`SupportScreen`** — the lookup, with the seed shown so "was that spin
+  fair" is answerable without a developer. 9 tests.
+- **8 of 8 screen mutations caught**, including rendering raw minor units,
+  paging replacing instead of appending, a truncated export reported as
+  fine, and a failed search leaving the previous player on screen.
+
+**Three details worth keeping:**
+
+- **The CSV download could not be a link.** The route needs a bearer token
+  and a link carries no headers, so an `<a href>` would send an
+  unauthenticated request and open a 401 in a new tab. Putting the token in
+  the query string is worse — that is the one place credentials must never
+  go. It is fetched with the header and turned into a blob.
+- **`formatMoney` in `shared-types` adds no currency symbol**, unlike the
+  player client's own. Found by a test asserting `"$123.45"` against a
+  correct screen rendering `"123.45"`. The code was right; the expectation
+  was wrong, and the docstring says so plainly.
+- **Two test files failed on colliding fixture values** — the same amount
+  used for a row and a total, so `getByText` matched two elements and threw
+  for a reason unrelated to the behaviour under test. Same lesson as item
+  13's fixture bug, one layer over: *a fixture value should identify
+  exactly one place on screen.*
+
+**Verified in the browser against live data**, not only in tests: the
+report renders `257191.00` staked over 13,144 debits with the deposit
+caveat visible, and the lookup shows a real player's `4000.00` balance,
+four deposits with correctly progressing balances, and "this player has not
+spun" — which is true of them.
+
+---
 
 ---
 
