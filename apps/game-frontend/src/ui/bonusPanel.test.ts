@@ -44,7 +44,7 @@
 import { after, before, beforeEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import globalJsdom from "global-jsdom";
-import { BonusPanelView } from "./bonusPanel.js";
+import { BonusPanelView, wheelGradient, wheelLabelAngle } from "./bonusPanel.js";
 
 let teardown: (() => void) | null = null;
 before(() => {
@@ -59,6 +59,21 @@ let spins: number;
 let dismissals: number;
 
 beforeEach(() => {
+  /*
+   * The previous test's view is torn down, not just abandoned.
+   *
+   * Found by the wheel tests and worth stating, because it made a passing
+   * suite lie. Every other round dismisses synchronously, so a discarded
+   * view left nothing running and replacing the DOM was enough cleanup. The
+   * wheel schedules a 3.4s reveal, so five earlier tests left five live
+   * timers that all fired during a later test's wait — each one calling the
+   * SHARED `onResolvedDismissed`, which counted 5 dismissals for one round.
+   *
+   * `hide()` clears both timers, so it is the teardown. The lesson is the
+   * repo's own: a stand-in for cleanup that works only because nothing was
+   * asynchronous stops working the moment something is.
+   */
+  view?.hide();
   document.body.innerHTML = `<div id="bonus" hidden></div>`;
   panel = document.getElementById("bonus") as HTMLElement;
   picks = [];
@@ -278,6 +293,151 @@ describe("free spins", () => {
     view.render({ ...active, view: { remaining: 2, accumulatedWin: 100 } });
 
     assert.equal(panel.querySelector(".tile"), before);
+  });
+});
+
+describe("the wheel bonus", () => {
+  /*
+   * These pin the fix for a gap that shipped: `reference-5x3` — the DEFAULT
+   * game — carries a wheel bonus, and the client drew no wheel at all. The
+   * module resolves in `start()`, so its state arrives already
+   * `status: "resolved"`, matched the resolved branch first, and the player
+   * saw a bare total. The server sends the entire segment table; the client
+   * showed a number instead of the thing that produced it.
+   *
+   * The money was right throughout, which is exactly why it went unnoticed
+   * — nothing downstream disagreed and no test failed.
+   */
+  const wheelState = { status: "resolved", totalWin: 500, view: { segmentIndex: 2, multiplier: 5, segments: [1, 2, 5, 10], totalWin: 500 } };
+  const face = (): HTMLElement | null => panel.querySelector(".wheel-face");
+
+  it("draws a wheel rather than a bare total", () => {
+    view.render(wheelState);
+
+    assert.ok(face(), "a wheel round must render a wheel face");
+    assert.ok(panel.querySelector(".wheel-pointer"), "and a pointer to read it against");
+  });
+
+  it("draws one label per segment, from the table the server sent", () => {
+    view.render(wheelState);
+
+    const labels = [...panel.querySelectorAll(".wheel-label")].map((l) => l.textContent);
+    assert.deepEqual(labels, ["×1", "×2", "×5", "×10"]);
+  });
+
+  it("rotates the face and leaves the pointer alone", () => {
+    // The artist contract: the pointer is fixed at 12 o'clock and only the
+    // face turns. A rotating pointer would still "point" somewhere and be
+    // wrong in a way that looks deliberate.
+    view.render(wheelState);
+
+    assert.match(face()?.style.transform ?? "", /rotate\(/);
+    assert.equal((panel.querySelector(".wheel-pointer") as HTMLElement).style.transform, "");
+  });
+
+  it("does not announce the prize before the wheel has stopped", () => {
+    // Saying it up front spoils the reveal the animation exists for.
+    view.render(wheelState);
+
+    assert.equal(panel.querySelector("span")?.textContent, "");
+  });
+
+  it("hides the panel by itself once the reveal has been seen", async () => {
+    /*
+     * The wheel schedules its own dismissal AFTER the spin, unlike every
+     * other resolved round which dismisses immediately. Getting this wrong
+     * strands the client: a bonus blocks the base game until it resolves,
+     * so a panel that never hands back leaves a player unable to spin.
+     */
+    view.render(wheelState);
+    assert.equal(dismissals, 0, "it must not dismiss while still spinning");
+
+    // 3400ms spin + 2600ms dwell, plus slack.
+    await new Promise((r) => setTimeout(r, 6200));
+
+    assert.equal(dismissals, 1, "the round must hand control back exactly once");
+    assert.equal(panel.hidden, true);
+  });
+
+  it("cancels a pending reveal when hidden, rather than firing into a dead panel", () => {
+    // Otherwise the timer resolves against elements that no longer exist and
+    // schedules a second dismissal — handing back to idle twice for one
+    // round.
+    view.render(wheelState);
+    view.hide();
+
+    assert.equal(panel.hidden, true);
+    assert.equal(dismissals, 0, "hiding must not itself count as a dismissal");
+  });
+
+  it("survives a wheel with a single segment", () => {
+    // Degenerate but drawable, and the case a naive `360 / length` divides
+    // badly on.
+    view.render({ status: "resolved", totalWin: 100, view: { segmentIndex: 0, multiplier: 1, segments: [1] } });
+
+    assert.ok(face());
+    assert.equal(panel.querySelectorAll(".wheel-label").length, 1);
+  });
+});
+
+describe("wheelGradient", () => {
+  it("gives every segment an equal wedge", () => {
+    const css = wheelGradient([1, 2, 3, 4]);
+
+    assert.match(css, /conic-gradient/);
+    // Four segments, so 90deg each, and the last must close the circle.
+    assert.match(css, /0deg 90deg/);
+    assert.match(css, /270deg 360deg/);
+  });
+
+  it("starts half a segment before 12 o'clock, so segment 0 is centred there", () => {
+    /*
+     * The artist contract, and the easiest thing here to get wrong by one
+     * half-segment. CSS conic gradients begin at 3 o'clock, so -90deg moves
+     * the start to the top; the extra half-segment centres segment 0 on it
+     * rather than starting it there. Without the half-step the pointer sits
+     * on a boundary between two prizes.
+     */
+    // Asserted as the property rather than as a literal, which is how the
+    // first draft of this test got it wrong: I wrote -112.5deg for a
+    // four-segment wheel, and the correct value is -135. Deriving it here
+    // means the test states the contract instead of restating an answer.
+    for (const total of [3, 4, 6, 8]) {
+      const step = 360 / total;
+      const expectedStart = -90 - step / 2;
+      assert.match(
+        wheelGradient(Array.from({ length: total }, (_, i) => i + 1)),
+        new RegExp(`from ${expectedStart}deg`),
+        `a ${total}-segment wheel must start half a segment before 12 o'clock`,
+      );
+      // The point of that offset: segment 0's CENTRE lands on 12 o'clock
+      // (-90deg from CSS's 3 o'clock origin), not its leading edge.
+      assert.equal(expectedStart + step / 2, -90);
+    }
+  });
+
+  it("gives neighbouring wedges different colours at any table length", () => {
+    // A fixed palette aliases once the table outgrows it, so two adjacent
+    // wedges come out identical and the wheel reads as one big segment.
+    const css = wheelGradient([1, 2, 3, 4, 5, 6, 7, 8]);
+    const hues = [...css.matchAll(/hsl\((\d+)/g)].map((m) => m[1]);
+    assert.equal(new Set(hues).size, 8, "every segment needs its own hue");
+  });
+
+  it("draws nothing for an empty table rather than an invalid gradient", () => {
+    assert.equal(wheelGradient([]), "transparent");
+  });
+});
+
+describe("wheelLabelAngle", () => {
+  it("spreads labels evenly around the wheel", () => {
+    assert.equal(wheelLabelAngle(0, 4), 0);
+    assert.equal(wheelLabelAngle(1, 4), 90);
+    assert.equal(wheelLabelAngle(3, 4), 270);
+  });
+
+  it("does not divide by an empty wheel", () => {
+    assert.equal(wheelLabelAngle(0, 0), 0);
   });
 });
 

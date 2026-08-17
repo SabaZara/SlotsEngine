@@ -1,5 +1,6 @@
 import { formatMoney } from "./formatMoney.js";
 import { readBonusPanel, tileClickable, type BonusPanel, type PickPanel } from "./bonusView.js";
+import { wheelFinalRotation } from "../render/wheelGeometry.js";
 
 /**
  * Draws the bonus panel, and keeps its elements between steps.
@@ -38,6 +39,71 @@ export interface BonusPanelCallbacks {
  * Long enough to read the figure, short enough not to feel stuck. */
 const RESOLVED_DWELL_MS = 2600;
 
+/** How long the wheel takes to settle. Long enough to read as a spin, short
+ * enough that it is not in the way of the next round. */
+const WHEEL_SPIN_MS = 3400;
+
+/**
+ * A wedge colour per segment.
+ *
+ * An HSL sweep rather than a fixed palette, for the reason the reference
+ * records: any fixed set of accent colours *aliases* once the table is longer
+ * than the palette, so two neighbouring wedges come out identical and the
+ * wheel reads as one big segment. A sweep is distinct at any length.
+ */
+function segmentColor(index: number, total: number): string {
+  return `hsl(${Math.round((index / total) * 360)} 62% 52%)`;
+}
+
+/**
+ * The wheel face as a CSS `conic-gradient`.
+ *
+ * Exported for testing: the wedge boundaries are arithmetic, and arithmetic
+ * that is one segment out draws a wheel whose pointer sits on the wrong
+ * colour while looking entirely plausible.
+ *
+ * Segment 0 is centred at 12 o'clock, which is the artist contract
+ * `wheelGeometry.ts` documents — so the gradient starts half a segment
+ * *before* 0, and `from -90deg` puts 0deg at the top rather than at 3
+ * o'clock, which is where CSS would otherwise begin.
+ */
+export function wheelGradient(segments: number[]): string {
+  if (segments.length === 0) return "transparent";
+  const step = 360 / segments.length;
+  const stops = segments.map((_, i) => `${segmentColor(i, segments.length)} ${i * step}deg ${(i + 1) * step}deg`);
+  return `conic-gradient(from ${-90 - step / 2}deg, ${stops.join(", ")})`;
+}
+
+/**
+ * Where each segment's label sits, as a rotation in degrees.
+ *
+ * Each label is rotated out to its wedge and then counter-rotated by the same
+ * amount, so the text stays upright while the wheel turns beneath it —
+ * otherwise the bottom half of the wheel reads upside down.
+ */
+export function wheelLabelAngle(index: number, total: number): number {
+  if (total < 1) return 0;
+  return (index / total) * 360;
+}
+
+/**
+ * One upright label per segment.
+ *
+ * `textContent`, never `innerHTML` — these values come from a module's
+ * free-form view, which is the same rule the rest of this file follows.
+ */
+function wheelLabels(segments: number[]): HTMLElement[] {
+  return segments.map((multiplier, i) => {
+    const label = document.createElement("span");
+    label.className = "wheel-label";
+    label.textContent = `×${multiplier}`;
+    const angle = wheelLabelAngle(i, segments.length);
+    // Out to the wedge, then counter-rotated so the text stays upright.
+    label.style.transform = `rotate(${angle}deg) translateY(-64px) rotate(${-angle}deg)`;
+    return label;
+  });
+}
+
 export class BonusPanelView {
   private readonly panel: HTMLElement;
   private readonly callbacks: BonusPanelCallbacks;
@@ -49,6 +115,13 @@ export class BonusPanelView {
   private detail: HTMLElement | null = null;
   private spinButton: HTMLButtonElement | null = null;
   private tileGrid: HTMLElement | null = null;
+  /** The rotating half of the wheel. The pointer is a sibling and never
+   * moves — see `buildFor`. */
+  private wheelFace: HTMLElement | null = null;
+  /** Cancels an in-flight wheel reveal. A second `render` for the same round
+   * (a reconnect replaying state, say) must not leave two animations driving
+   * one element, which would visibly fight. */
+  private wheelAnimation: ReturnType<typeof setTimeout> | null = null;
 
   /** Which layout is currently built, so it is rebuilt only on a real
    * change of module rather than on every step. */
@@ -84,10 +157,17 @@ export class BonusPanelView {
   hide(): void {
     if (this.dismissTimer) clearTimeout(this.dismissTimer);
     this.dismissTimer = null;
+    // Cleared alongside the dismissal, not instead of it: a reveal still
+    // pending here would fire against a panel whose elements are gone, and
+    // schedule a second `onResolvedDismissed` — handing the client back to
+    // idle twice, once for a round that is already over.
+    if (this.wheelAnimation !== null) clearTimeout(this.wheelAnimation);
+    this.wheelAnimation = null;
     this.panel.hidden = true;
     this.panel.replaceChildren();
     this.tiles = [];
     this.heading = this.detail = this.tileGrid = null;
+    this.wheelFace = null;
     this.spinButton = null;
     this.builtKind = null;
     this.stepInFlight = false;
@@ -138,6 +218,34 @@ export class BonusPanelView {
       return;
     }
 
+    if (model.kind === "wheel") {
+      /*
+       * Drawn in the DOM with a `conic-gradient`, not on a canvas.
+       *
+       * The reference builds this in Pixi with a `Graphics` arc per segment,
+       * which it must — its bonus views live inside the same Pixi scene as
+       * the reels. Ours is an HTML overlay already, so a canvas here would
+       * add a second rendering surface to maintain, and one that `jsdom`
+       * cannot exercise: `getContext` returns null, so every wedge would be
+       * untestable. A gradient is CSS, and CSS is inspectable.
+       *
+       * The wheel and the pointer are separate elements because only the
+       * wheel rotates — the pointer is fixed at 12 o'clock, which is the
+       * artist contract `wheelGeometry.ts` documents.
+       */
+      this.wheelFace = document.createElement("div");
+      this.wheelFace.className = "wheel-face";
+      const pointer = document.createElement("div");
+      pointer.className = "wheel-pointer";
+      pointer.setAttribute("aria-hidden", "true");
+
+      const stage = document.createElement("div");
+      stage.className = "wheel-stage";
+      stage.append(this.wheelFace, pointer);
+      this.panel.append(stage);
+      return;
+    }
+
     if (model.kind === "freeSpins") {
       this.spinButton = document.createElement("button");
       this.spinButton.className = "tile";
@@ -183,6 +291,16 @@ export class BonusPanelView {
         return;
       }
 
+      case "wheel": {
+        this.setText(this.heading, "Bonus wheel");
+        // The prize is deliberately NOT announced yet — saying it here would
+        // spoil the reveal the animation exists for. `revealWheel` fills it
+        // in when the wheel stops.
+        this.setText(this.detail, "");
+        this.revealWheel(model);
+        return;
+      }
+
       case "resolved": {
         this.setText(this.heading, "Bonus complete");
         this.setText(this.detail, formatMoney(model.totalWinMinor, this.currency));
@@ -204,6 +322,70 @@ export class BonusPanelView {
         this.setText(this.detail, "This round is being played on the server.");
       }
     }
+  }
+
+  /**
+   * Paints the wheel and runs its reveal.
+   *
+   * **A CSS transition rather than a `requestAnimationFrame` loop, and that
+   * is a fix inherited rather than rediscovered.** The reel reveal learned
+   * this the hard way: browsers throttle rAF to *zero* in a hidden tab, so a
+   * player switching away mid-spin stranded the round permanently and
+   * `shouldForceSettle` exists to recover it. A transition is driven by the
+   * compositor, so a hidden tab simply arrives at the finished state — there
+   * is nothing to strand and no recovery path to get wrong.
+   *
+   * The trade is that the exact rotation mid-flight is not readable from a
+   * test. That is acceptable *here specifically* because the number that
+   * matters is the final one, and `wheelGeometry.ts` pins that arithmetic
+   * without a DOM at all: 19 tests, including a round trip proving the
+   * settled rotation points at the segment the server chose.
+   */
+  private revealWheel(model: Extract<BonusPanel, { kind: "wheel" }>): void {
+    const face = this.wheelFace;
+    if (!face) return;
+
+    // A re-render for the same round must not leave two reveals driving one
+    // element. Cleared before anything is scheduled, not after.
+    if (this.wheelAnimation !== null) {
+      clearTimeout(this.wheelAnimation);
+      this.wheelAnimation = null;
+    }
+
+    const segments = model.segments.length > 0 ? model.segments : [model.multiplier];
+    face.style.background = wheelGradient(segments);
+    face.replaceChildren(...wheelLabels(segments));
+
+    const finalRotation = wheelFinalRotation(model.segmentIndex, segments.length);
+
+    // Snapped back to 0 with no transition first, so a second round does not
+    // animate from wherever the previous one stopped — which would travel a
+    // different distance and, worse, briefly sweep past several wrong
+    // prizes on its way.
+    face.style.transition = "none";
+    face.style.transform = "rotate(0rad)";
+    // Reading a layout property forces the reset to be committed before the
+    // transition is re-enabled. Without it the browser coalesces both writes
+    // and the wheel jumps straight to its answer.
+    void face.offsetHeight;
+
+    face.style.transition = `transform ${WHEEL_SPIN_MS}ms cubic-bezier(0.16, 1, 0.3, 1)`;
+    face.style.transform = `rotate(${finalRotation}rad)`;
+
+    this.wheelAnimation = setTimeout(() => {
+      this.wheelAnimation = null;
+      // The prize is announced only now. Saying it up front would spoil the
+      // reveal this whole method exists for.
+      this.setText(
+        this.detail,
+        `×${model.multiplier} · ${formatMoney(model.totalWinMinor, this.currency)}`,
+      );
+      if (this.dismissTimer) clearTimeout(this.dismissTimer);
+      this.dismissTimer = setTimeout(() => {
+        this.hide();
+        this.callbacks.onResolvedDismissed();
+      }, RESOLVED_DWELL_MS);
+    }, WHEEL_SPIN_MS);
   }
 
   /**

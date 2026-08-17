@@ -107,6 +107,49 @@
       .tile:disabled { opacity: 0.55; cursor: default; }
       .tile:not(:disabled):hover { border-color: var(--accent); }
 
+      /* The wheel bonus. Only `.wheel-face` rotates — the pointer is fixed
+         at 12 o'clock, which is the contract `wheelGeometry.ts` documents
+         and the reason the two are siblings rather than nested. */
+      .wheel-stage { position: relative; width: 180px; height: 180px; }
+      .wheel-face {
+        position: absolute;
+        inset: 0;
+        border-radius: 50%;
+        border: 2px solid var(--border);
+        /* `background` is set from JS as a conic-gradient built from the
+           segment table the server sent. */
+      }
+      .wheel-label {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        margin: -9px 0 0 -18px;
+        width: 36px;
+        text-align: center;
+        font-size: 13px;
+        font-weight: 700;
+        color: #06101c;
+        /* transform is set per label so the text stays upright as the wheel
+           turns beneath it. */
+      }
+      .wheel-pointer {
+        position: absolute;
+        top: -10px;
+        left: 50%;
+        margin-left: -9px;
+        width: 0;
+        height: 0;
+        border-left: 9px solid transparent;
+        border-right: 9px solid transparent;
+        border-top: 16px solid var(--accent);
+      }
+      /* A player who has asked for less motion still needs the result, so
+         the wheel lands on its segment without the spin rather than not at
+         all. */
+      @media (prefers-reduced-motion: reduce) {
+        .wheel-face { transition: none !important; }
+      }
+
       footer {
         display: flex;
         align-items: center;

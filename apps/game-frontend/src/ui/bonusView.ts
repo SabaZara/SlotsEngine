@@ -15,7 +15,7 @@
  */
 
 /** What the panel should show. `null` means the panel is hidden entirely. */
-export type BonusPanelKind = "pick" | "freeSpins" | "resolved" | "unknown";
+export type BonusPanelKind = "wheel" | "pick" | "freeSpins" | "resolved" | "unknown";
 
 export interface PickTile {
   index: number;
@@ -44,6 +44,21 @@ export interface FreeSpinsPanel {
   canSpin: boolean;
 }
 
+export interface WheelPanel {
+  kind: "wheel";
+  /** The segment the server landed on, as an index into `segments`. */
+  segmentIndex: number;
+  /** Every segment's multiplier, in wheel order. The full table is safe to
+   * send — it is already in the game definition the client can read — and it
+   * is what makes drawing real labels possible rather than blank wedges. */
+  segments: number[];
+  /** The winning segment's multiplier, as sent. Kept alongside `segments`
+   * rather than derived, so a disagreement between the two is visible to a
+   * test instead of silently resolved in the client's favour. */
+  multiplier: number;
+  totalWinMinor: number;
+}
+
 export interface ResolvedPanel {
   kind: "resolved";
   totalWinMinor: number;
@@ -53,7 +68,7 @@ export interface UnknownPanel {
   kind: "unknown";
 }
 
-export type BonusPanel = PickPanel | FreeSpinsPanel | ResolvedPanel | UnknownPanel;
+export type BonusPanel = WheelPanel | PickPanel | FreeSpinsPanel | ResolvedPanel | UnknownPanel;
 
 /** A tile whose prize is a blank — the pick round's stopping rule. */
 export const BLANK_LABEL = "✕";
@@ -88,11 +103,31 @@ function num(value: unknown, fallback = 0): number {
 export function readBonusPanel(state: RawState | null | undefined): BonusPanel {
   if (!state) return { kind: "unknown" };
 
+  const view = state.view ?? {};
+
+  /*
+   * The wheel is checked BEFORE `resolved`, and it is the one exception to
+   * the rule stated above.
+   *
+   * That rule exists to stop a settled round staying clickable. The wheel
+   * cannot violate it, because it resolves in `start()` — there is no step
+   * to take and no control to offer, so its panel is a reveal rather than an
+   * interaction. Left below the `resolved` check it matched nothing but
+   * `resolved`, and the client showed a number where the wheel should be:
+   * the server sends the whole segment table and the player was told only
+   * the total. The money was always right, which is exactly why nobody
+   * noticed.
+   *
+   * Shape, not id, like every other branch here — a view carrying
+   * `segmentIndex` and `segments` is a wheel whatever it is called.
+   */
+  if ("segmentIndex" in view && Array.isArray(view.segments)) {
+    return readWheelPanel(view, num(state.totalWin));
+  }
+
   if (state.status === "resolved") {
     return { kind: "resolved", totalWinMinor: num(state.totalWin) };
   }
-
-  const view = state.view ?? {};
 
   // Shape, not id. A view carrying `remaining` is a free-spins round.
   if ("remaining" in view) {
@@ -115,6 +150,35 @@ export function readBonusPanel(state: RawState | null | undefined): BonusPanel {
   // than rendered as an empty panel, so the caller can say something honest
   // instead of showing a blank overlay the player cannot dismiss.
   return { kind: "unknown" };
+}
+
+/**
+ * Reads a wheel's reveal out of its view.
+ *
+ * **The segment table is filtered rather than trusted wholesale.** It
+ * crosses a socket, and a non-numeric entry would render as a wedge labelled
+ * `NaNx` — or, worse, be counted in `segments.length` and shift every other
+ * wedge's angle, so the pointer would settle between two prizes. Dropping a
+ * malformed entry keeps the wheel drawable; keeping it corrupts the geometry
+ * of every segment, not just its own.
+ *
+ * `segmentIndex` is deliberately NOT clamped here. An out-of-range index is
+ * a server bug, and `wheelFinalRotation` wraps it into something drawable —
+ * but silently rewriting it at this layer would hide the disagreement from
+ * the test that checks the multiplier matches the segment landed on.
+ */
+function readWheelPanel(view: Record<string, unknown>, totalWinMinor: number): WheelPanel {
+  const segments = (view.segments as unknown[]).filter(
+    (s): s is number => typeof s === "number" && Number.isFinite(s),
+  );
+
+  return {
+    kind: "wheel",
+    segmentIndex: num(view.segmentIndex),
+    segments,
+    multiplier: num(view.multiplier),
+    totalWinMinor,
+  };
 }
 
 function readPickPanel(view: Record<string, unknown>): PickPanel {

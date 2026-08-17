@@ -41,6 +41,90 @@ describe("readBonusPanel", () => {
     assert.equal(panel.kind === "resolved" && panel.totalWinMinor, 0);
   });
 
+  describe("wheel", () => {
+    // Exactly what `wheel.start()` emits, so a change to the module's view
+    // breaks this rather than silently changing what the panel reads.
+    const view = { segmentIndex: 2, multiplier: 5, segments: [1, 2, 5, 10], totalWin: 500 };
+
+    it("draws the wheel even though the round is already resolved", () => {
+      /*
+       * The bug this closes, and the ordering is the whole fix. `wheel`
+       * resolves in `start()`, so its state arrives with
+       * `status: "resolved"` — which used to match first and render a bare
+       * total. The server sends the entire segment table and the player was
+       * shown a number instead of the thing that produced it.
+       *
+       * The money was never wrong, which is precisely why it went unnoticed:
+       * nothing downstream disagreed.
+       */
+      const panel = readBonusPanel({ status: "resolved", totalWin: 500, view });
+
+      assert.equal(panel.kind, "wheel", "a resolved wheel must still be drawn as a wheel");
+    });
+
+    it("carries the segment landed on and the whole table", () => {
+      const panel = readBonusPanel({ status: "resolved", totalWin: 500, view });
+
+      assert.equal(panel.kind === "wheel" && panel.segmentIndex, 2);
+      assert.deepEqual(panel.kind === "wheel" && panel.segments, [1, 2, 5, 10]);
+      assert.equal(panel.kind === "wheel" && panel.totalWinMinor, 500);
+    });
+
+    it("agrees with itself about which multiplier was won", () => {
+      // `multiplier` and `segments[segmentIndex]` are two statements of one
+      // fact. A client that quietly preferred one would draw a pointer at a
+      // wedge whose label contradicts the payout — the failure the whole
+      // reveal exists to avoid.
+      const panel = readBonusPanel({ status: "resolved", totalWin: 500, view });
+
+      assert.equal(panel.kind === "wheel" && panel.multiplier, 5);
+      assert.equal(
+        panel.kind === "wheel" && panel.segments[panel.segmentIndex],
+        5,
+        "the segment landed on must carry the multiplier that was paid",
+      );
+    });
+
+    it("is recognised by shape, not by a module id", () => {
+      // F24's rule at this layer: the client holds no copy of the module
+      // list. A view carrying segmentIndex and segments is a wheel whatever
+      // the server calls it.
+      const panel = readBonusPanel({ status: "active", view: { segmentIndex: 0, segments: [3] } });
+
+      assert.equal(panel.kind, "wheel");
+    });
+
+    it("drops a malformed segment rather than letting it skew every angle", () => {
+      /*
+       * Not tidiness. Segment count sets the angle of EVERY wedge, so a
+       * non-numeric entry left in place would shift all of them and settle
+       * the pointer between two prizes — a wheel that looks fine and points
+       * at the wrong thing. Dropping the bad entry keeps the rest correct.
+       */
+      const panel = readBonusPanel({
+        status: "resolved",
+        view: { segmentIndex: 0, multiplier: 2, segments: [2, "x", null, 5] },
+      });
+
+      assert.deepEqual(panel.kind === "wheel" && panel.segments, [2, 5]);
+    });
+
+    it("still resolves normally for a bonus that is not a wheel", () => {
+      // The reordering must not make `resolved` unreachable. A pick round
+      // that has settled is still a resolved panel, not a wheel.
+      const panel = readBonusPanel({ status: "resolved", totalWin: 1960, view: { tileCount: 9 } });
+
+      assert.equal(panel.kind, "resolved");
+    });
+
+    it("does not mistake a view carrying only one wheel field for a wheel", () => {
+      // Both fields are required. A future module emitting a bare
+      // `segmentIndex` should fall through rather than render half a wheel.
+      assert.notEqual(readBonusPanel({ status: "active", view: { segmentIndex: 1 } }).kind, "wheel");
+      assert.notEqual(readBonusPanel({ status: "active", view: { segments: [1, 2] } }).kind, "wheel");
+    });
+  });
+
   describe("free spins", () => {
     const view = { remaining: 7, winMultiplier: 2, accumulatedWin: 850, retriggers: 1 };
 

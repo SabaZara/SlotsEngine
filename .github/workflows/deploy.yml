@@ -57,23 +57,11 @@ jobs:
     strategy:
       # One failed service should not hide whether the others build.
       fail-fast: false
-      # Staggered rather than all five at once, and this is a fix for a real
-      # failure rather than politeness.
-      #
-      # Every matrix job downloads the same action tarballs from
-      # codeload.github.com during "Set up job" — *before* checkout, before
-      # any Docker work. Five simultaneous requests for the same archive got
-      # answered with 503 and then 429 (Too Many Requests), the runner gave
-      # up after its three internal attempts, and the job died having built
-      # nothing. Observed three runs in a row on 2026-08-17, each killing a
-      # DIFFERENT random subset of services — which is what identified it as
-      # shared infrastructure rather than one service's build.
-      #
-      # A step-level retry cannot help: actions are fetched in "Prepare all
-      # required actions", so `continue-on-error` never gets to run. The
-      # only lever inside this file is how many jobs ask at once. Three
-      # keeps most of the parallelism (roughly two waves) while cutting peak
-      # concurrent downloads by 40%.
+      # Kept after the action-download failure it was introduced for was
+      # fixed a different way (see the build step), because it is cheap and
+      # the five jobs contend for the same GHA cache backend regardless.
+      # It is NOT load-bearing: the run that followed it failed just as hard,
+      # which is what proved concurrency was never the cause.
       max-parallel: 3
       matrix:
         include:
@@ -109,49 +97,75 @@ jobs:
         id: registry
         run: echo "owner=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
-      - uses: docker/setup-buildx-action@v3
+      # The three docker/* actions this job used to pull are gone, and that
+      # is the fix for the failure that kept this pipeline red.
+      #
+      # They failed in "Set up job" — before checkout, before any build —
+      # because the runner could not download their tarballs from
+      # codeload.github.com: 503, then 429 Too Many Requests, giving up after
+      # three internal attempts. Observed across five consecutive runs on
+      # 2026-08-17, on setup-buildx-action, login-action AND
+      # build-push-action, killing a different random subset of services each
+      # time.
+      #
+      # `max-parallel: 3` was tried first, on the theory that five jobs
+      # requesting the same archive at once was the trigger. The next run
+      # disproved it: still three separate actions failing, and the ONE job
+      # that succeeded was the one that happened to run last. Concurrency was
+      # not the driver — codeload was refusing this runner broadly.
+      #
+      # The runner already ships /usr/bin/docker with buildx built in
+      # (verified in the logs of the job that did succeed), so these actions
+      # were conveniences rather than requirements. Calling the CLI directly
+      # removes the network dependency entirely instead of making it smaller,
+      # which is the difference between a fix and a better guess.
+      - name: Set up buildx
+        run: docker buildx create --use --driver docker-container
 
       - name: Log in to the registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+        # --password-stdin, never as an argument: an argument is visible in
+        # the process list of the machine running it.
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       # Both Dockerfiles COPY from the repo root (`packages/`, `apps/`), so
-      # the build context is the root and the `file:` is the path within it.
+      # the build context is the root and `--file` is the path within it.
       #
       # The frontend images bake their API addresses in at BUILD time — Vite
       # inlines `import.meta.env` into the bundle, so these cannot be changed
       # by an environment variable on the box. A frontend pointing at the
       # wrong backend is therefore a rebuild, not a restart. The vars resolve
-      # empty for the three service images, which build-push-action ignores.
+      # empty for the three service images, which the Dockerfiles ignore.
+      # Registry cache, not `type=gha`. The GHA backend needs
+      # ACTIONS_RUNTIME_TOKEN and ACTIONS_CACHE_URL, which build-push-action
+      # injected for free and a bare CLI call does not have — so `type=gha`
+      # here would fail silently and every build would be cold. A registry
+      # cache needs only the `docker login` this job already does.
+      #
+      # It stays per-service, by tag, which preserves the property the old
+      # per-service scope had and which is worth inheriting: the reference
+      # repo shipped an image built from a layer cached before a build-arg
+      # existed, and a cache shared across services is how that happens.
       - name: Build and push ${{ matrix.service }}
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ${{ matrix.dockerfile }}
-          build-args: |
-            SERVICE=${{ matrix.service }}
-            APP=${{ matrix.service }}
-            VITE_GAME_BACKEND_URL=${{ vars.PUBLIC_GAME_BACKEND_URL }}
-            VITE_GAME_SOCKET_URL=${{ vars.PUBLIC_GAME_SOCKET_URL }}
-            VITE_BACKOFFICE_API_URL=${{ vars.PUBLIC_BACKOFFICE_API_URL }}
-          push: true
+        env:
+          IMAGE: ghcr.io/${{ steps.registry.outputs.owner }}/${{ matrix.service }}
           # Tagged by commit SHA, never by branch alone. `latest` is a moving
           # target and cannot be rolled back to; a SHA names exactly one
           # build forever, which is what makes `rollback.yml` possible.
-          tags: |
-            ghcr.io/${{ steps.registry.outputs.owner }}/${{ matrix.service }}:${{ github.event.workflow_run.head_sha || github.sha }}
-            ghcr.io/${{ steps.registry.outputs.owner }}/${{ matrix.service }}:latest
-          # Scoped per service AND per Dockerfile-arg set. The reference
-          # repo hit a real bug here worth inheriting the fix for: a shared
-          # cache scope let a build silently reuse a layer from before a
-          # build-arg existed, so an image quietly shipped without it.
-          # Including the frontend URLs in the scope means changing one
-          # forces a rebuild rather than serving a stale bundle.
-          cache-from: type=gha,scope=${{ matrix.service }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+          SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          docker buildx build \
+            --file "${{ matrix.dockerfile }}" \
+            --build-arg "SERVICE=${{ matrix.service }}" \
+            --build-arg "APP=${{ matrix.service }}" \
+            --build-arg "VITE_GAME_BACKEND_URL=${{ vars.PUBLIC_GAME_BACKEND_URL }}" \
+            --build-arg "VITE_GAME_SOCKET_URL=${{ vars.PUBLIC_GAME_SOCKET_URL }}" \
+            --build-arg "VITE_BACKOFFICE_API_URL=${{ vars.PUBLIC_BACKOFFICE_API_URL }}" \
+            --tag "$IMAGE:$SHA" \
+            --tag "$IMAGE:latest" \
+            --cache-from "type=registry,ref=$IMAGE:buildcache" \
+            --cache-to "type=registry,ref=$IMAGE:buildcache,mode=max" \
+            --push \
+            .
 
   # ---------------------------------------------------------------------
   # Ship the images to the box.
