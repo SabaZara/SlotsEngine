@@ -96,7 +96,7 @@ non-decisions rather than gaps; section O names each and why.
   is not a criticism of them — a test that never fails is doing its job as a
   regression guard — but it does mean the suite's value here has been in the
   *writing*, and its value from here on is in the *guarding*.
-- **1792 tests** (1681 unit + 111 component), of which 53 are conformance
+- **1850 tests** (1739 unit + 111 component), of which 53 are conformance
   cases run against real MongoDB, 111 are React component tests, and a
   further 45 run against real MongoDB directly — 15 schema/index cases, 27
   integration-API cases, and 3 ledger concurrency cases. Counted from a
@@ -815,6 +815,69 @@ script exists because the reference shipped plaintext `apiSecret` values
 first and retrofitted encryption at v0.8.0. This repo has never had an
 unencrypted operator row — `findOperatorByKeyId` refuses one outright — so
 there is nothing to migrate.
+
+### ~~13. Money moved through the platform and nobody internal could see it~~ — reporting shipped
+
+Found by the same reference audit as item 12, looking for operator-adjacent
+things the work had missed. The reference has
+`apps/backoffice-api/src/reports/` — operator-scoped transaction reporting
+with CSV export — and this repo had **no transaction visibility in the
+backoffice at all**. An operator could be onboarded, take deposits and pay
+out winnings, and the only way to look at any of it was to query Mongo by
+hand.
+
+Shipped: `GET /v1/reports/transactions` (operator/player/date filters,
+keyset paging, CSV export) and `GET /v1/reports/summary` (staked, paid out,
+net, counts). 57 tests, **13 of 13 mutations caught**.
+
+Adapted rather than copied, and three of the changes are corrections:
+
+- **`clampLimit` refuses a non-finite value explicitly.** The reference
+  uses `Number(limitParam) || DEFAULT_LIMIT`, which conflates `abc`, `0`
+  and absent. That is **F22's exact shape** — a `NaN` reaching a clamp
+  makes every comparison false, and the Mongo driver reads a `NaN` limit as
+  *no limit at all*, so the one expression whose purpose is bounding a page
+  returns the whole collection. Here `0` clamps to 1 and garbage falls back
+  to the default, which are different answers because they are different
+  questions.
+- **A cursor cannot widen the requested range.** The reference assigns
+  `createdAtFilter.$lt = cursorDate` unconditionally alongside the range's
+  `$lte`. Here the tighter bound wins, so page two of a March report cannot
+  show April.
+- **A reversed range is refused**, rather than silently matching nothing.
+
+**Keyset paging, not `skip`.** `skip` re-reads and discards every preceding
+row, and — worse for a money report — a row written between two requests
+shifts every later page, so a transaction can appear twice or not at all. A
+cursor is stable against concurrent writes.
+
+**The CSV's row order needed its own test, and mutation testing is what
+said so.** Reversing the export query's sort survived everything: the JSON
+ordering test does not touch that code path, and nothing else looked at
+order in the file. It is not cosmetic — the export is capped and sliced
+from the end, so a reversed sort makes a truncated export drop the
+**newest** rows rather than the oldest, while still looking complete.
+
+**A fixture bug worth recording**, because the failure pointed the wrong
+way: four assertions failed on the first run, and the code was right every
+time. A second-player row had been dated inside the reported range, so it
+was a legitimate part of every operator-scoped March total. The lesson is
+narrow and reusable — *a fixture row must test one thing*; one placed to
+exercise player scoping must not also land inside a range another test
+sums.
+
+**Verified against the live stack, and the numbers were checked against an
+independent query rather than trusted**: 20 rows, 1,200 debited, 501,210
+credited, matching exactly.
+
+That check surfaced the honest limitation now pinned by its own test.
+**`paidOut` includes deposits.** The ledger records only `debit` and
+`credit` with no category, so an operator's `cash-in` is indistinguishable
+from a win: of that 501,210, five demo deposits were 500,000 and only 1,210
+was actually won. The report is not wrong about what *moved*; it cannot
+answer "what was won" without a field the ledger does not write.
+Deliberately not inferred here — categorising a credit is a money-path
+change and belongs in its own work, not guessed at by a report.
 
 ---
 
