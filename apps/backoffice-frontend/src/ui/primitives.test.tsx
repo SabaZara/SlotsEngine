@@ -41,10 +41,87 @@ import assert from "node:assert/strict";
 // installs the environment before it imports Testing Library. Importing
 // Testing Library directly here would capture an undefined `document`.
 import { cleanup, fireEvent, interact, renderComponent, screen, uninstallDom } from "../testing/renderComponent.js";
-import { Button, NumberInput, Select, TextInput } from "./primitives.js";
+import { Button, Field, NumberInput, Select, TextInput } from "./primitives.js";
 
 afterEach(() => cleanup());
 after(() => uninstallDom());
+
+describe("Field", () => {
+  /*
+   * These pin an accessibility contract that was **broken in shipped code**
+   * and that no test covered, which is why it shipped.
+   *
+   * `Field` used to wrap its children in a `<label>`. Everything inside a
+   * label becomes that control's accessible name, so a field with a hint
+   * announced as "BackgroundDrawn behind the reels. Empty means the
+   * built-in gradient." — the explanation read out as the field's identity
+   * on every focus. Worse, a wrapping label binds to exactly ONE control,
+   * and half the rows here hold several ("Grid" has reels and rows), so the
+   * label silently named the first box and left the rest anonymous.
+   *
+   * Neither failure is visible on screen, which is the whole problem: the
+   * page looked correct throughout.
+   */
+  it("names the row without swallowing its hint into the name", () => {
+    renderComponent(
+      <Field label="Background" hint="Drawn behind the reels.">
+        <TextInput label="Background" value="" onChange={() => {}} />
+      </Field>,
+    );
+
+    // The control's name is the label ALONE. Before the fix this was the
+    // label and the hint concatenated.
+    const input = screen.getByRole("textbox", { name: "Background" });
+    assert.ok(input, "the input must be findable by its label alone");
+  });
+
+  it("exposes the hint as a description rather than as part of the name", () => {
+    renderComponent(
+      <Field label="Background" hint="Drawn behind the reels.">
+        <TextInput label="Background" value="" onChange={() => {}} />
+      </Field>,
+    );
+
+    const group = screen.getByRole("group", { name: "Background" });
+    const describedBy = group.getAttribute("aria-describedby");
+    assert.ok(describedBy, "a hint must be linked as a description");
+    assert.match(
+      document.getElementById(describedBy!)?.textContent ?? "",
+      /Drawn behind the reels/,
+      "the description must resolve to the hint text",
+    );
+  });
+
+  it("groups a row holding several controls, so each is not left anonymous", () => {
+    /*
+     * The case a `<label>` cannot express at all. "Grid" is two number
+     * boxes; a wrapping label named the first and nothing named the second.
+     * A group names the row, and each control carries its own name.
+     */
+    renderComponent(
+      <Field label="Grid">
+        <TextInput label="reels" value="5" onChange={() => {}} />
+        <TextInput label="rows" value="3" onChange={() => {}} />
+      </Field>,
+    );
+
+    assert.ok(screen.getByRole("group", { name: "Grid" }), "the row itself must be named");
+    assert.ok(screen.getByRole("textbox", { name: "reels" }), "the first control needs its own name");
+    assert.ok(screen.getByRole("textbox", { name: "rows" }), "the second control must not be anonymous");
+  });
+
+  it("adds no description when there is no hint", () => {
+    // An empty `aria-describedby` pointing at nothing is worse than none:
+    // it makes a screen reader announce a dangling reference.
+    renderComponent(
+      <Field label="Name">
+        <TextInput label="Name" value="" onChange={() => {}} />
+      </Field>,
+    );
+
+    assert.equal(screen.getByRole("group", { name: "Name" }).getAttribute("aria-describedby"), null);
+  });
+});
 
 describe("Button", () => {
   it("calls its handler when clicked", async () => {

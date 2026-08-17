@@ -1,3 +1,4 @@
+import { useId } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { t } from "./tokens.js";
 
@@ -70,6 +71,33 @@ export function Card({ title, actions, children }: { title?: string; actions?: R
   );
 }
 
+/**
+ * A labelled form row.
+ *
+ * **Deliberately not a `<label>` wrapper, and it used to be one.** That
+ * older shape was wrong in two independent ways, both invisible on screen:
+ *
+ *   1. **The hint became part of the name.** Everything inside a `<label>`
+ *      is its text, so a field labelled "Background" with a hint announced
+ *      as "BackgroundDrawn behind the reels. Empty means the built-in
+ *      gradient." — the explanation read out as though it were the field's
+ *      identity, every time focus landed. A hint is *description*, and the
+ *      platform has a separate channel for that.
+ *   2. **A wrapping `<label>` binds to exactly one control.** Half the
+ *      fields here hold several — "Grid" has a reels box and a rows box,
+ *      "Bet options" has one per stake. The label silently attached to the
+ *      first, so "Grid" named the reels input and the rows input had no
+ *      name at all. No amount of hint-fixing addresses that.
+ *
+ * So the label and hint are given ids and referenced instead. `role="group"`
+ * plus `aria-labelledby` names the whole row however many controls it holds,
+ * which is the one shape that is correct for both cases rather than correct
+ * for the common one and quietly wrong for the rest.
+ *
+ * `htmlFor` is deliberately NOT used: it would require every caller to
+ * thread an id into whatever it renders, and the multi-control rows have no
+ * single element to point at.
+ */
 export function Field({
   label,
   hint,
@@ -79,14 +107,40 @@ export function Field({
   hint?: string;
   children: ReactNode;
 }) {
+  const id = useId();
+  const labelId = `${id}-label`;
+  const hintId = `${id}-hint`;
+
   return (
-    <label style={{ display: "block", marginBottom: 12 }}>
-      <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.7, color: t.muted, marginBottom: 5 }}>
+    <div
+      // `group` rather than nothing, so a row holding several controls is
+      // announced as one labelled unit. Note the row's own controls should
+      // ALSO carry their own name (see `TextInput`'s `label`): a group name
+      // is announced on entering the group, not on focusing each box.
+      role="group"
+      aria-labelledby={labelId}
+      {...(hint ? { "aria-describedby": hintId } : {})}
+      style={{ display: "block", marginBottom: 12 }}
+    >
+      <div
+        id={labelId}
+        // `aria-hidden` because this text is already consumed as the group's
+        // name via `aria-labelledby`. Without it the same words are exposed
+        // twice — once as the group name and once as loose text inside it —
+        // which reads as a stutter, and makes an accessible-name query
+        // ambiguous between the group and the input it labels.
+        aria-hidden="true"
+        style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.7, color: t.muted, marginBottom: 5 }}
+      >
         {label}
       </div>
       {children}
-      {hint && <div style={{ fontSize: 11, color: t.faint, marginTop: 4 }}>{hint}</div>}
-    </label>
+      {hint && (
+        <div id={hintId} style={{ fontSize: 11, color: t.faint, marginTop: 4 }}>
+          {hint}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -108,6 +162,7 @@ export function TextInput({
   type = "text",
   disabled,
   mono,
+  label,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -115,6 +170,16 @@ export function TextInput({
   type?: string;
   disabled?: boolean;
   mono?: boolean;
+  /**
+   * Names this specific input.
+   *
+   * Needed because `Field` names a *group* rather than a control — a row
+   * holding two number boxes ("Grid": reels and rows) has no single element
+   * its label could attach to. For a row with one input the group name is
+   * usually enough; pass this wherever the individual control needs its own
+   * name, which is every row holding more than one.
+   */
+  label?: string;
 }) {
   return (
     <input
@@ -122,6 +187,7 @@ export function TextInput({
       value={value}
       disabled={disabled}
       placeholder={placeholder}
+      {...(label ? { "aria-label": label } : {})}
       onChange={(e) => onChange(e.target.value)}
       style={{ ...inputStyle, ...(mono ? { fontFamily: t.mono } : {}) }}
     />

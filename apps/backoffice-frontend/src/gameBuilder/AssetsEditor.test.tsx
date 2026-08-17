@@ -225,7 +225,7 @@ describe("AssetsEditor", () => {
     const seen: Array<GameAssets | undefined> = [];
     renderComponent(<AssetsEditor symbols={SYMBOLS} assets={undefined} onChange={(a) => seen.push(a)} />);
 
-    fireEvent.change(screen.getByLabelText("seven"), { target: { value: "https://cdn.example.com/7.png" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "seven" }), { target: { value: "https://cdn.example.com/7.png" } });
 
     assert.deepEqual(seen.at(-1), { symbolImageUrls: { seven: "https://cdn.example.com/7.png" } });
   });
@@ -260,7 +260,7 @@ describe("AssetsEditor", () => {
       />,
     );
 
-    await interact(() => fireEvent.change(screen.getByLabelText("seven"), { target: { value: "" } }));
+    await interact(() => fireEvent.change(screen.getByRole("textbox", { name: "seven" }), { target: { value: "" } }));
 
     assert.equal(seen.at(-1), undefined, "an emptied field must remove the artwork, not store an empty string");
   });
@@ -276,16 +276,17 @@ describe("AssetsEditor", () => {
     );
 
     /*
-     * Matched as a prefix rather than as "Background", which is measured
-     * rather than guessed: `Field` renders its hint *inside* the `<label>`,
-     * so the input's accessible name is the label and the hint run
-     * together — "BackgroundDrawn behind the reels…". Every field carrying
-     * a hint behaves this way, so a screen reader announces the whole
-     * sentence as the field's name. Noted rather than fixed here: the
-     * change belongs in the shared primitive and would touch every screen
-     * in the backoffice.
+     * An EXACT match, and it used to be the prefix `/^Background/`.
+     *
+     * That workaround existed because `Field` wrapped its children in a
+     * `<label>` containing the hint, so this input's accessible name was
+     * "BackgroundDrawn behind the reels. Empty means the built-in
+     * gradient." — the explanation announced as the field's identity. The
+     * hint is now `aria-describedby` and the input carries its own
+     * `aria-label`, so the name is the label and nothing else. Asserting it
+     * exactly is what stops that regressing quietly.
      */
-    fireEvent.change(screen.getByLabelText(/^Background/), { target: { value: "https://bg.png" } });
+    fireEvent.change(screen.getByRole("textbox", { name: "Background" }), { target: { value: "https://bg.png" } });
 
     assert.deepEqual(seen.at(-1), {
       symbolImageUrls: { seven: "https://7.png" },

@@ -57,6 +57,24 @@ jobs:
     strategy:
       # One failed service should not hide whether the others build.
       fail-fast: false
+      # Staggered rather than all five at once, and this is a fix for a real
+      # failure rather than politeness.
+      #
+      # Every matrix job downloads the same action tarballs from
+      # codeload.github.com during "Set up job" — *before* checkout, before
+      # any Docker work. Five simultaneous requests for the same archive got
+      # answered with 503 and then 429 (Too Many Requests), the runner gave
+      # up after its three internal attempts, and the job died having built
+      # nothing. Observed three runs in a row on 2026-08-17, each killing a
+      # DIFFERENT random subset of services — which is what identified it as
+      # shared infrastructure rather than one service's build.
+      #
+      # A step-level retry cannot help: actions are fetched in "Prepare all
+      # required actions", so `continue-on-error` never gets to run. The
+      # only lever inside this file is how many jobs ask at once. Three
+      # keeps most of the parallelism (roughly two waves) while cutting peak
+      # concurrent downloads by 40%.
+      max-parallel: 3
       matrix:
         include:
           - service: game-backend

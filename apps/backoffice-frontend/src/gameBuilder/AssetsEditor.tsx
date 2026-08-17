@@ -105,7 +105,16 @@ function UrlField({
   const warning = assetUrlWarning(value);
   return (
     <Field label={label} hint={hint}>
-      <TextInput mono value={value} placeholder="https://…  (leave empty for none)" onChange={onChange} />
+      {/* Named on the input itself, not only via the surrounding `Field`.
+          `Field` labels a group, and a group name is not what a screen
+          reader announces when focus lands on the box. */}
+      <TextInput
+        mono
+        label={label}
+        value={value}
+        placeholder="https://…  (leave empty for none)"
+        onChange={onChange}
+      />
       {/* `warn`, not `bad`, and matching `BonusParamsForm` deliberately: both
           say the same kind of thing — this saves and publishes fine, and then
           quietly does something other than what you asked. */}
