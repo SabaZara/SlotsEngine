@@ -50,6 +50,22 @@ here passed a green suite. In order of how much they establish:
    against the live services.
 3. **Say what a test cannot establish.** Every suite here that has a known
    blind spot states it in the file header. Follow that.
+4. **Clone what you pushed.** Before treating a push as done:
+
+   ```bash
+   git clone <remote> /tmp/clonecheck && cd /tmp/clonecheck && npm install && npm run build && npm test
+   ```
+
+   The three checks above all run against the **working tree**, so none of
+   them can see a file that is missing from the *repository*. F29 is why
+   this is here: a `.gitignore` rule of bare `reports/` matched at every
+   depth and silently excluded a whole source module from the commit that
+   shipped its import. The suite, the build and the pre-push hook all
+   passed, and `main` could not build on a clean checkout. A clone is the
+   only check that runs against what other people will actually get.
+
+   Worth reading a commit's own diffstat for the same reason — "2 files
+   changed" where it should say 8 is what exposed F29.
 
 ## Conventions
 

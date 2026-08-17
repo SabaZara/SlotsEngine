@@ -167,8 +167,11 @@ So the fourth check, and the only one that would have caught it:
 
 This is what CI has always done, which is why F3 and F4 were caught there
 and not locally. F29 is the same failure reaching `main` between CI runs.
-Worth adding to `CLAUDE.md`'s verification section, which is the user's
-file to change rather than mine.
+
+**Now item 4 of the verification standard in `CLAUDE.md`**, with the exact
+command. The heading above is kept because the reasoning is the useful
+part: the rule matters less than knowing *which* class of fault the other
+three checks structurally cannot see.
 
 ---
 
