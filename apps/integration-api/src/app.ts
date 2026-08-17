@@ -5,6 +5,7 @@ import type { Logger } from "@slots-engine/logging";
 import { registerAuthHook } from "./auth/middleware.js";
 import { registerHealthRoutes } from "./routes/health.js";
 import { registerWalletRoutes } from "./routes/wallet.js";
+import { registerLimitRoutes } from "./routes/limits.js";
 import { registerLaunchRoute } from "./routes/launch.js";
 import { registerGamesRoute } from "./routes/games.js";
 
@@ -118,6 +119,7 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
 
   registerHealthRoutes(app, db);
   registerWalletRoutes(app, db, client);
+  registerLimitRoutes(app, db);
   registerLaunchRoute(app, db, { gameFrontendUrl });
   registerGamesRoute(app, db);
 

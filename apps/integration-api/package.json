@@ -19,6 +19,7 @@
     "@slots-engine/secrets": "*",
     "@slots-engine/shared-types": "*",
     "fastify": "^5.2.0",
-    "mongodb": "^6.12.0"
+    "mongodb": "^6.12.0",
+    "@slots-engine/player-limits": "*"
   }
 }

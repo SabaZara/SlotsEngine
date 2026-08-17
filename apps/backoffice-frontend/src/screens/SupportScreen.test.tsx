@@ -54,6 +54,8 @@ const LOOKUP: SupportLookup = {
       createdAt: "2026-03-15T12:00:00.000Z",
     },
   ],
+  limits: [{ period: "daily", maxStake: 61_100, maxLoss: 22_200 }],
+  limitUsage: [{ period: "daily", periodKey: "2026-03-15", staked: 33_300, won: 29_900 }],
   truncated: { transactions: false, rounds: false },
   limit: 50,
 };
@@ -199,5 +201,93 @@ describe("when the lookup fails", () => {
     await searchFor("acme", "player-2");
 
     assert.equal(screen.queryByText("1234.00"), null, "the previous player must be cleared");
+  });
+});
+
+describe("play limits", () => {
+  it("shows what the player may stake and what they have staked", async () => {
+    // The card exists so an agent can answer "I have money, why was I
+    // refused?". Both halves have to be on screen: a ceiling with no usage
+    // beside it does not answer the question.
+    const { client } = stub();
+    await mount(client);
+    await searchFor("acme", "player-1");
+
+    // 50,000 minor units formatted as money, not shown raw.
+    assert.ok(screen.getByText("611.00"), "the daily stake ceiling");
+    assert.ok(screen.getByText("333.00"), "what has been staked against it");
+  });
+
+  it("shows net loss rather than gross staked, so a winning player is not misread", async () => {
+    // Staked 30,000, won 25,000 — a net loss of 5,000, not 30,000. Showing
+    // gross would have an agent tell a player they are near a loss limit
+    // they are nowhere near.
+    const { client } = stub();
+    await mount(client);
+    await searchFor("acme", "player-1");
+
+    assert.ok(screen.getByText("34.00"), "net loss of 3,400 minor units, not the 33,300 staked");
+  });
+
+  it("flags a limit that has been reached, rather than leaving it to be spotted", async () => {
+    const { client } = stub({
+      ...LOOKUP,
+      limits: [{ period: "daily", maxStake: 30_000 }],
+      limitUsage: [{ period: "daily", periodKey: "2026-03-15", staked: 30_000, won: 0 }],
+    });
+    await mount(client);
+    await searchFor("acme", "player-1");
+
+    assert.ok(screen.getByText("reached"), "an exhausted limit is called out");
+  });
+
+  it("reads the current period's counter, not a stale one", async () => {
+    // Two counters for the same period. Showing yesterday's exhausted one
+    // would have an agent tell a player they are blocked when they are not
+    // — the counter reset overnight and nothing had to run for it to.
+    const { client } = stub({
+      ...LOOKUP,
+      limits: [{ period: "daily", maxStake: 100_000 }],
+      limitUsage: [
+        { period: "daily", periodKey: "2026-03-14", staked: 100_000, won: 0 },
+        { period: "daily", periodKey: "2026-03-15", staked: 4_400, won: 1_200 },
+      ],
+    });
+    await mount(client);
+    await searchFor("acme", "player-1");
+
+    // Staked 4,400 and won 1,200, so staked and net loss render
+    // differently — otherwise one row shows the same figure twice and
+    // the assertion cannot say which cell it matched.
+    assert.ok(screen.getByText("44.00"), "today's staked counter, not yesterday's");
+    assert.ok(screen.getByText("32.00"), "and its net loss");
+    assert.equal(screen.queryByText("reached"), null, "yesterday's exhausted limit must not read as current");
+  });
+
+  it("says plainly when a player has no limits, rather than showing an empty table", async () => {
+    const { client } = stub({ ...LOOKUP, limits: [], limitUsage: [] });
+    await mount(client);
+    await searchFor("acme", "player-1");
+
+    assert.ok(screen.getByText(/No limits set/));
+  });
+
+  it("shows a limit set today for a player who has not bet yet", async () => {
+    // No counter row exists until the first bet. Reading that as an error
+    // — or crashing on the missing row — would break the screen for every
+    // newly-limited player.
+    const { client } = stub({
+      ...LOOKUP,
+      limits: [{ period: "weekly", maxStake: 70_000 }],
+      limitUsage: [],
+    });
+    await mount(client);
+    await searchFor("acme", "player-1");
+
+    assert.ok(screen.getByText("700.00"), "the ceiling still renders");
+    // Staked and net loss both read zero, so there are two such
+    // cells — asserted as a count rather than with getByText, which
+    // throws on multiple matches.
+    assert.equal(screen.getAllByText("0.00").length, 2, "usage reads as zero rather than blank");
   });
 });

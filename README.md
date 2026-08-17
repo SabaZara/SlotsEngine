@@ -116,7 +116,7 @@ not an obstacle. See [Startup guards](#startup-guards).
 | `game-backend` | 9002 | **Money and outcomes.** The system of record |
 | `game-socket` | 9003 | Realtime relay; establishes player identity |
 | `backoffice-api` | 9005 | Authoring, validation, the publish gate, audit |
-| `integration-api` | 9006 | **The operator boundary.** Signed wallet, launch and catalogue calls |
+| `integration-api` | 9006 | **The operator boundary.** Signed wallet, launch, catalogue and player-limit calls |
 | `operator-demo` | 9008 | A reference integrator — the worked example of `docs/INTEGRATION.md` |
 | `game-frontend` | 9104 | The player's browser client (PixiJS, WebGL/WebGPU) |
 | `backoffice-frontend` | 9106 | The designer's admin UI (React) |
@@ -127,6 +127,7 @@ not an obstacle. See [Startup guards](#startup-guards).
 | `rng` | CSPRNG seeding, xoshiro256\*\*, statistical test suite |
 | `ledger` | **Money.** Debit, credit, idempotency |
 | `launch-token` | Player token signing and verification |
+| `player-limits` | **Player protection** — stake and loss ceilings per period |
 | `secrets` | **At-rest encryption** for credentials that must be recoverable |
 | `service-auth` | **Internal service-to-service HMAC** |
 | `asset-storage` | S3-compatible object storage for game artwork |
@@ -205,6 +206,35 @@ Money is **always integer minor units** — `100` means 1.00. Floats compound
 rounding error across millions of transactions, and a fractional `$inc`
 corrupts a balance silently. `InvalidAmountError` rejects a non-integer
 before any write happens.
+
+### `player-limits` — the check runs inside the transaction
+
+Stake and loss ceilings per day, week or month — the controls a licensed
+operator is required to offer. The package itself is pure: given limits,
+usage and a proposed bet, decide. No clock, no database, so a refusal is
+reproducible from its inputs, which matters when a player disputes one.
+
+**The enforcement is not here, and that is the design.** Checking limits
+*before* the spin is the intuitive implementation and it is wrong: two
+concurrent bets both read "900 of 1,000 staked", both decide 200 fits, and
+both commit. The counter is therefore advanced inside the same transaction
+as the debit (`game-backend/rounds/limits.ts`), where snapshot isolation
+does the arbitration. Measured at 20 concurrent bets against a ceiling of
+10: exactly 10 pass.
+
+**A period is a string key** (`2026-08-18`, `2026-W34`), not a pair of
+timestamps, so accumulating is an upsert-and-`$inc` needing no prior read —
+and periods reset with nothing running. Weeks are ISO weeks, because the
+naive form resets a weekly limit three days early at new year.
+
+**Loss is net**: staking 100 and winning 95 back is a loss of 5. A win
+genuinely re-opens headroom, which is the honest reading of a loss limit
+and what regulators specify.
+
+A refusal is **403, never 402** — "insufficient funds" means top up and try
+again, while this means topping up changes nothing. A client offering a
+deposit prompt against a responsible-gambling control is the worst response
+the feature could produce.
 
 ### `launch-token` — hand-rolled HMAC, not a JWT library
 
@@ -494,7 +524,7 @@ POST /v1/games/:id/publish             → validate → simulate → gate → ve
 GET  /v1/games/:id/versions            → every published version, append-only
 GET  /v1/reports/transactions          → ledger movements; ?format=csv to export
 GET  /v1/reports/summary               → staked, paid out, net for a range
-GET  /v1/support/players/:op/:player   → one player's balance, money and rounds
+GET  /v1/support/players/:op/:player   → balance, money, rounds and play limits
 GET  /v1/audit?entityId=:id            → who changed what, when
 ```
 

@@ -13,14 +13,40 @@ export class BackendError extends Error {
 
 export class InsufficientFundsError extends BackendError {}
 export class InvalidBetAmountError extends BackendError {}
+/** A player-protection ceiling refused the bet. Deliberately its own type
+ * rather than a flavour of `InsufficientFundsError`: the two need opposite
+ * responses, and a client that offers a deposit prompt here would be
+ * inviting a player past the limit they are protected by. */
+export class LimitExceededError extends BackendError {
+  constructor(
+    code: string,
+    status: number,
+    message: string | undefined,
+    readonly period: string | undefined,
+    readonly remaining: number | undefined,
+  ) {
+    super(code, status, message);
+  }
+}
 export class GameNotFoundError extends BackendError {}
 export class BonusSessionNotFoundError extends BackendError {}
 export class BonusSessionAbandonedError extends BackendError {}
 export class InvalidBonusActionError extends BackendError {}
 export class LaunchTokenAlreadyUsedError extends BackendError {}
 
-function toTypedError(code: string, status: number, message?: string): BackendError {
+/** Anything a backend error body may carry beyond code and message. Read
+ * from the parsed payload rather than re-fetched, so a field the route
+ * added is available here without a second round trip. */
+interface ErrorDetail {
+  period?: string;
+  remaining?: number;
+}
+
+function toTypedError(code: string, status: number, message?: string, detail: ErrorDetail = {}): BackendError {
   switch (code) {
+    case "stake_limit_reached":
+    case "loss_limit_reached":
+      return new LimitExceededError(code, status, message, detail.period, detail.remaining);
     case "insufficient_funds":
       return new InsufficientFundsError(code, status, message);
     case "invalid_bet_amount":
@@ -67,8 +93,16 @@ async function call<T>(path: string, body: Record<string, unknown>): Promise<T> 
   });
 
   if (!response.ok) {
-    const payload = (await response.json().catch(() => ({}))) as { error?: string; message?: string };
-    throw toTypedError(payload.error ?? "backend_error", response.status, payload.message);
+    const payload = (await response.json().catch(() => ({}))) as {
+      error?: string;
+      message?: string;
+      period?: string;
+      remaining?: number;
+    };
+    throw toTypedError(payload.error ?? "backend_error", response.status, payload.message, {
+      period: payload.period,
+      remaining: payload.remaining,
+    });
   }
 
   return (await response.json()) as T;

@@ -26,6 +26,30 @@ function shortDate(iso: string): string {
   return new Date(iso).toISOString().replace("T", " ").slice(0, 19);
 }
 
+/**
+ * The counter for a period as it stands *now*.
+ *
+ * Takes the highest `periodKey` rather than the first row returned, because
+ * the route sends recent history and a stale period must never be shown as
+ * current usage — an agent reading yesterday's exhausted daily counter
+ * would tell a player they are blocked when they are not. Keys are
+ * zero-padded, which is exactly why they compare correctly as strings.
+ *
+ * Returns zeroes when a period has no counter at all: a limit set today for
+ * a player who has not bet yet is not an error, it is an empty one.
+ */
+function currentUsage(
+  rows: Array<{ period: string; periodKey: string; staked: number; won: number }>,
+  period: string,
+): { staked: number; won: number } {
+  let latest: { periodKey: string; staked: number; won: number } | undefined;
+  for (const row of rows) {
+    if (row.period !== period) continue;
+    if (!latest || row.periodKey > latest.periodKey) latest = row;
+  }
+  return { staked: latest?.staked ?? 0, won: latest?.won ?? 0 };
+}
+
 export interface SupportApi {
   supportLookup: typeof api.supportLookup;
 }
@@ -83,6 +107,69 @@ export function SupportScreen({ client = api }: { client?: SupportApi }) {
             <p style={{ color: t.muted, fontSize: 12, marginTop: 4 }}>
               {result.player.playerId} · {result.player.operatorId}
             </p>
+          </Card>
+
+          <Card title="Play limits">
+            {/* Placed directly under the balance because it answers the
+                question a healthy balance otherwise makes unanswerable:
+                "I have money, why was I refused?" An agent without this
+                sees funds and no reason, which is how a limit working
+                correctly turns into a complaint. */}
+            {result.limits.length === 0 ? (
+              <EmptyState>No limits set. This player can stake any amount.</EmptyState>
+            ) : (
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                  <thead>
+                    <tr style={{ textAlign: "left", color: t.muted }}>
+                      <th style={cell}>Period</th>
+                      <th style={cell}>Max stake</th>
+                      <th style={cell}>Staked</th>
+                      <th style={cell}>Max loss</th>
+                      <th style={cell}>Net loss</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {result.limits.map((limit) => {
+                      const usage = currentUsage(result.limitUsage, limit.period);
+                      // Floored at zero for the same reason the server
+                      // floors it: a player who is ahead has lost nothing,
+                      // and a negative figure here reads as a credit.
+                      const lost = Math.max(0, usage.staked - usage.won);
+                      return (
+                        <tr key={limit.period} style={{ borderTop: `1px solid ${t.border}` }}>
+                          <td style={cell}>{limit.period}</td>
+                          <td style={cell}>{limit.maxStake === undefined ? "—" : formatMoney(limit.maxStake)}</td>
+                          <td style={cell}>
+                            {formatMoney(usage.staked)}
+                            {limit.maxStake !== undefined && usage.staked >= limit.maxStake && (
+                              <>
+                                {" "}
+                                <Badge tone="warn">reached</Badge>
+                              </>
+                            )}
+                          </td>
+                          <td style={cell}>{limit.maxLoss === undefined ? "—" : formatMoney(limit.maxLoss)}</td>
+                          <td style={cell}>
+                            {formatMoney(lost)}
+                            {limit.maxLoss !== undefined && lost >= limit.maxLoss && (
+                              <>
+                                {" "}
+                                <Badge tone="warn">reached</Badge>
+                              </>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+                <p style={{ color: t.muted, fontSize: 12, marginTop: 8 }}>
+                  Limits are set by the operator, not here — this screen is read-only. Usage shown is for the current
+                  period and resets on its own.
+                </p>
+              </div>
+            )}
           </Card>
 
           <Card title={`Recent transactions${result.truncated.transactions ? ` (latest ${result.limit})` : ""}`}>

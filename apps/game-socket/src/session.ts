@@ -13,6 +13,7 @@ import {
   InvalidBetAmountError,
   InvalidBonusActionError,
   LaunchTokenAlreadyUsedError,
+  LimitExceededError,
   consumeLaunchToken,
   getBalance,
   recover,
@@ -88,6 +89,35 @@ export async function resolveSessionFromToken(
   }
 
   return { ok: true, session, sessionToken: signSessionToken(session).token };
+}
+
+/**
+ * What a player is told when a limit refuses their bet.
+ *
+ * Built here rather than passed through from the backend because it is
+ * presentation, and the backend deliberately answers in codes. Two rules
+ * it follows, both deliberate:
+ *
+ * - **It names the period**, because "you have reached your limit" invites
+ *   the player to try again in a minute. "Your daily limit" tells them when
+ *   to come back, which is the honest answer and the one that stops them
+ *   retrying.
+ * - **It mentions remaining headroom only when there is some.** Saying "you
+ *   can still stake 0" is worse than saying nothing, and a smaller-bet
+ *   suggestion against an exhausted limit reads as a way around it.
+ *
+ * Amounts stay in minor units here. The client formats money for display —
+ * it knows the game's currency and this service does not, and guessing
+ * would be the USD-default bug one layer earlier.
+ */
+function limitMessage(err: LimitExceededError): string {
+  const kind = err.code === "loss_limit_reached" ? "loss" : "stake";
+  const period = err.period ?? "current";
+  const base = `You have reached your ${period} ${kind} limit.`;
+
+  return err.remaining !== undefined && err.remaining > 0
+    ? `${base} You can still bet up to ${err.remaining} this period.`
+    : base;
 }
 
 /**
@@ -173,6 +203,19 @@ export async function handleMessage(
       connection.send({ type: "BALANCE_UPDATE", balance: balanceAfter });
       await autoStartBonusIfTriggered(connection, session, round);
     } catch (err) {
+      if (err instanceof LimitExceededError) {
+        // Checked before InsufficientFundsError because the two must never
+        // be conflated: this player has money and is choosing not to be
+        // able to spend it. The message says so plainly and offers no way
+        // around it — no "top up", no "try a smaller bet" unless there is
+        // genuinely room left.
+        connection.send({
+          type: "ERROR",
+          code: err.code,
+          message: limitMessage(err),
+        });
+        return;
+      }
       if (err instanceof InsufficientFundsError) {
         connection.send({ type: "ERROR", code: "insufficient_funds", message: "Not enough balance for this bet." });
         return;

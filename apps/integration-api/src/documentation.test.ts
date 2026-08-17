@@ -47,6 +47,7 @@ function errorCodesInSource(): Set<string> {
     "routes/wallet.ts",
     "routes/launch.ts",
     "routes/games.ts",
+    "routes/limits.ts",
     "app.ts",
   ];
 
@@ -103,7 +104,24 @@ describe("the published integration document", () => {
 
     assert.ok(documented.length > 0, "the premise: the error table was found and parsed");
 
-    const phantom = documented.filter((code) => !emitted.has(code));
+    /**
+     * Codes an integrator genuinely receives that this service does not
+     * itself emit.
+     *
+     * The limit refusals are raised by `game-backend` when the player
+     * spins, not by any route here — but they reach the operator's own
+     * players, and an integrator who has just configured limits through
+     * `PUT /v1/players/limits` is exactly who needs to know what a refusal
+     * looks like. Documenting them is right; the check has to know that.
+     *
+     * Kept as a short explicit list rather than by widening the source
+     * sweep to another service, because every entry should cost someone a
+     * deliberate decision — this is the escape hatch that would otherwise
+     * quietly become "the check no longer checks anything".
+     */
+    const RAISED_ELSEWHERE = ["stake_limit_reached", "loss_limit_reached"];
+
+    const phantom = documented.filter((code) => !emitted.has(code) && !RAISED_ELSEWHERE.includes(code));
     assert.deepEqual(phantom, [], "these codes are documented but no longer emitted");
   });
 

@@ -120,6 +120,83 @@ export const COLLECTIONS: CollectionDefinition[] = [
     indexes: [{ keys: { operatorId: 1, playerId: 1 }, options: { unique: true, name: "operator_player_unique" } }],
   },
   {
+    /**
+     * The ceilings a player plays under. One document per player, holding
+     * every period's limits together — they are always read as a set (the
+     * bet decision weighs all of them), so splitting them per period would
+     * turn one lookup on the money path into three.
+     */
+    name: "playerLimits",
+    validator: {
+      $jsonSchema: {
+        bsonType: "object",
+        required: ["operatorId", "playerId", "limits"],
+        additionalProperties: true,
+        properties: {
+          operatorId: { bsonType: "string" },
+          playerId: { bsonType: "string" },
+          limits: {
+            bsonType: "array",
+            items: {
+              bsonType: "object",
+              required: ["period"],
+              properties: {
+                period: { enum: ["daily", "weekly", "monthly"] },
+                // `number`, not `int`. Every JavaScript number serialises
+                // to BSON **double**, so `int` here would reject every
+                // write and surface as a 500 on the money path — F9
+                // exactly, and it passed a full green suite because the
+                // in-memory stand-in has no validator.
+                maxStake: { bsonType: "number" },
+                maxLoss: { bsonType: "number" },
+              },
+            },
+          },
+        },
+      },
+    },
+    indexes: [
+      { keys: { operatorId: 1, playerId: 1 }, options: { unique: true, name: "operator_player_limits_unique" } },
+    ],
+  },
+  {
+    /**
+     * What a player has staked and won in one period.
+     *
+     * **Keyed by `periodKey`, one document per (player, period, key)**, so
+     * accumulating is an upsert-and-`$inc` that needs no prior read. That
+     * is what lets the limit check run inside the spin transaction: a
+     * read-then-write would let two concurrent spins both observe the same
+     * usage and both commit, which is the whole failure this design
+     * refuses.
+     */
+    name: "playerLimitUsage",
+    validator: {
+      $jsonSchema: {
+        bsonType: "object",
+        required: ["operatorId", "playerId", "period", "periodKey", "staked", "won"],
+        additionalProperties: true,
+        properties: {
+          operatorId: { bsonType: "string" },
+          playerId: { bsonType: "string" },
+          period: { enum: ["daily", "weekly", "monthly"] },
+          periodKey: { bsonType: "string" },
+          staked: { bsonType: "number" },
+          won: { bsonType: "number" },
+        },
+      },
+    },
+    indexes: [
+      {
+        // Unique because it is the upsert's target: without it, two
+        // concurrent first-bets of a period would each insert their own
+        // row and each see only its own half of the usage.
+        keys: { operatorId: 1, playerId: 1, period: 1, periodKey: 1 },
+        options: { unique: true, name: "operator_player_period_usage_unique" },
+      },
+    ],
+  },
+  {
     name: "transactions",
     validator: {
       $jsonSchema: {

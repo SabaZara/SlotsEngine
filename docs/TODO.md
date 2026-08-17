@@ -109,12 +109,12 @@ non-decisions rather than gaps; section O names each and why.
   is not a criticism of them — a test that never fails is doing its job as a
   regression guard — but it does mean the suite's value here has been in the
   *writing*, and its value from here on is in the *guarding*.
-- **1886 tests** (1753 unit + 133 component), of which 53 are conformance
-  cases run against real MongoDB, 111 are React component tests, and a
-  further 45 run against real MongoDB directly — 15 schema/index cases, 27
-  integration-API cases, and 3 ledger concurrency cases. Counted from a
-  full run rather than carried forward, because a number nobody re-measures
-  is the first thing in this file to become untrue.
+- **1951 tests** (1812 unit + 139 component), counted from a full run
+  rather than carried forward, because a number nobody re-measures is the
+  first thing in this file to become untrue. Of these, 53 are conformance
+  cases against real MongoDB, and a further 53 run against real MongoDB
+  directly — 15 schema/index cases, 27 integration-API cases, 3 ledger
+  concurrency cases, and 8 player-limit concurrency cases.
 - **Sections A, B and C are closed** — no source module with meaningful
   logic is without a direct test. **The React components are no longer the
   exception**: section C's stopping point ("needs a DOM environment and a
@@ -979,6 +979,113 @@ spun" — which is true of them.
 ---
 
 ---
+
+### ~~15. Nothing could stop a player betting~~ — player protection shipped
+
+**The first feature here chosen because the product could not be sold
+without it, rather than because a review named it.** Every finding from the
+review documents is closed and section O's reference-parity rows are done,
+so the question was genuinely open. Loss and stake limits win on one
+argument: they are legally mandatory in every regulated market (UKGC, MGA,
+SE), so their absence is not a missing feature but a blocker on the whole
+platform. This repo had already noticed twice — autoplay shipped without an
+unlimited mode specifically because "this engine has no loss limit and no
+responsible-gambling backing", flagged there as the row a non-engineer
+should revisit.
+
+**The design decision that shapes everything: the check runs *inside* the
+spin transaction.** The obvious implementation — read the usage, decide,
+then spin — is wrong in the way this repo has been bitten by twice. Two
+concurrent spins both read "900 of 1,000 staked", both decide 200 fits, and
+both commit, so a 1,000 ceiling passes 1,300. It is the reference's
+bonus-credit race and F32's tie-break one layer up, and no amount of
+checking *before* the transaction fixes it. Measured at 20 concurrent bets
+against a ceiling of 10: exactly 10 pass, and the stored counter lands on
+1,000 and never above.
+
+Four layers, each doing only what it can be correct about:
+
+| Layer | What it holds |
+|---|---|
+| `packages/player-limits` | The decision, pure — no clock, no database. 30 tests, **all 10 mutations caught** |
+| `playerLimits` / `playerLimitUsage` | Ceilings, and counters keyed by period so accumulating needs no prior read |
+| `game-backend/rounds/limits.ts` | The atomic accumulation, inside the spin transaction |
+| `integration-api` `/v1/players/limits` | Where an operator actually sets them |
+
+**A period is a string key, not a pair of timestamps**, and that is what
+makes the rest work: a counter keyed `2026-08-18` is incremented with a
+single `$inc` on a document nobody had to read first. Storing a window
+would mean reading the row to decide whether it had expired, which is the
+read-then-write this design exists to refuse. It also means periods reset
+with nothing running — no sweep, no job.
+
+Weeks are **ISO** weeks, and that is not pedantry: a naive
+`getUTCFullYear()` plus week number emits a 2027 key for 29 December 2026,
+resetting a weekly limit three days early and handing the player a fresh
+allowance. Boundaries are UTC, recorded as a decision rather than hidden,
+because a counter key written under one timezone is not comparable to one
+written under another — switching later is a migration, not an edit.
+
+**Loss is net, and a win re-opens headroom.** Staking 100 and winning 95
+back is a loss of 5; counting it as 100 would exhaust a limit twenty times
+faster than the person who set it expects. The consequence surprises people
+and is the honest reading: a winning session lowers accumulated loss. Net
+loss floors at zero, or a player up 10,000 could lose 11,000 against a
+1,000 limit.
+
+**Refused with 403, never 402.** "Insufficient funds" means top up and try
+again; this means the player has money and a ceiling, and topping up
+changes nothing. A client offering a deposit prompt against a
+responsible-gambling control is the single worst response the feature can
+produce, so the two are separate types end to end and the socket checks
+this one first.
+
+**One bug found, by a test written for something else.** Stakes are skipped
+for unlimited players — the early return that keeps the hot path free — but
+wins were recorded unconditionally, so a win created a counter holding a
+credit with no matching stake. Harmless until a limit was later added to
+that player, at which point their net loss read as negative and the
+floor-at-zero handed them a full allowance on top of winnings the counter
+never saw the cost of. The `won` update no longer upserts, so a counter
+exists if and only if the player is limited. Reverting that is a caught
+mutation.
+
+**One equivalent mutant, established by probe rather than by argument.**
+Mutating the atomic `$inc` to a read-then-`$inc` pair *inside* the
+transaction survives — probed at 20 concurrent callers, it still lets
+exactly 10 through, because snapshot isolation refuses the interleaving.
+The transaction is the guarantee; `$inc` is kept for being one round trip
+rather than two. What is **not** equivalent is dropping the session: that
+mutation lets the ceiling be exceeded and is caught.
+
+**Set through the operator API, read in the backoffice.** The casino owns
+the player relationship — the player sets limits in the operator's account
+pages and the operator pushes them here — so a backoffice screen where
+staff author limits would be the wrong primary interface. Support gets a
+read-only card instead, showing usage against each ceiling, because "I have
+money, why was I refused?" cannot be answered from a balance and a
+transaction list. Building only the backoffice half would have been F24
+again.
+
+**Verified**: 30 pure-decision tests (10/10 mutations), 8 real-Mongo
+concurrency tests including a live `spinRound` refusal, 10 operator-API
+tests, 6 support-screen tests, 2 support-route tests; `$or` of caught
+mutations across the money-path wiring (never throwing, not recording wins,
+re-introducing the upsert bug) all fail. **Against the running stack**: two
+spins allowed, the third refused `403 stake_limit_reached` with
+`remaining: 0`, the counter stopped exactly on 200, the balance untouched,
+and no round recorded for the refused spin. `e2e:spin` still passes in
+full.
+
+**Open, and deliberately so:**
+
+| What | Why not now |
+|---|---|
+| Session-time limits and reality checks | Need a session concept the socket does not currently keep — a player's connection is not their session |
+| Self-exclusion / cooling-off | Belongs with an operator-side account state, not a per-player ceiling; a limit of zero is not the same thing and must not be used as one |
+| Rolling windows ("any 24 hours") | Cannot be a keyed counter — every stake would have to be retained and re-summed per bet. Regulators specify calendar periods |
+| Operator-wide default limits | Every limit is per-player today. A default would be a second source for one fact, so it needs the precedence rule decided first |
+| A cooling-off delay on *raising* a limit | The control that stops a chasing player lifting their own ceiling mid-session. Needs a clock and an audit trail, and is the next thing worth building here |
 
 ## Open (accepted)
 

@@ -146,7 +146,7 @@ after(async () => {
 });
 
 interface SignedRequestOptions {
-  method: "GET" | "POST";
+  method: "GET" | "POST" | "PUT";
   url: string;
   body?: unknown;
   apiKeyId?: string;
@@ -702,5 +702,169 @@ describe("the game catalogue", () => {
 
     assert.equal(response.statusCode, 200);
     assert.deepEqual(response.json().games, [], "an empty entitlement is not the same as no filter");
+  });
+});
+
+describe("player protection limits", () => {
+  const LIMITED_PLAYER = "limits-player-1";
+
+  it("stores the limits an operator sets and reads them back", async function () {
+    if (!client) return this.skip(skipReason);
+
+    const limits = [
+      { period: "daily", maxStake: 10_000, maxLoss: 5_000 },
+      { period: "monthly", maxLoss: 50_000 },
+    ];
+
+    const put = await signedRequest({
+      method: "PUT",
+      url: "/v1/players/limits",
+      body: { playerId: LIMITED_PLAYER, limits },
+    });
+    assert.equal(put.statusCode, 200);
+    assert.deepEqual(put.json().limits, limits);
+
+    const get = await signedRequest({
+      method: "GET",
+      url: `/v1/players/limits?playerId=${LIMITED_PLAYER}`,
+    });
+    assert.equal(get.statusCode, 200);
+    assert.deepEqual(get.json().limits, limits);
+  });
+
+  it("replaces the whole set, so a removed period is actually gone", async function () {
+    if (!client) return this.skip(skipReason);
+
+    // F26's shape on a document that decides whether someone may bet. A
+    // `$set` would leave the monthly limit from the call above in place,
+    // and the player would keep playing under a ceiling nobody can see in
+    // the payload that supposedly replaced it.
+    const put = await signedRequest({
+      method: "PUT",
+      url: "/v1/players/limits",
+      body: { playerId: LIMITED_PLAYER, limits: [{ period: "daily", maxStake: 200 }] },
+    });
+    assert.equal(put.statusCode, 200);
+
+    const get = await signedRequest({ method: "GET", url: `/v1/players/limits?playerId=${LIMITED_PLAYER}` });
+    assert.deepEqual(get.json().limits, [{ period: "daily", maxStake: 200 }]);
+  });
+
+  it("clears every limit when given an empty array", async function () {
+    if (!client) return this.skip(skipReason);
+
+    // Removal has to be expressible, or a limit can only ever be tightened
+    // — and a player who lowered their own ceiling could never raise it
+    // back after the cooling-off period an operator applies.
+    const put = await signedRequest({
+      method: "PUT",
+      url: "/v1/players/limits",
+      body: { playerId: LIMITED_PLAYER, limits: [] },
+    });
+    assert.equal(put.statusCode, 200);
+
+    const get = await signedRequest({ method: "GET", url: `/v1/players/limits?playerId=${LIMITED_PLAYER}` });
+    assert.deepEqual(get.json().limits, []);
+  });
+
+  it("answers 200 with no limits for an unknown player, not 404", async function () {
+    if (!client) return this.skip(skipReason);
+
+    // A 404 would confirm which player ids exist to a caller enumerating
+    // them — the same disclosure rule the balance route follows.
+    const get = await signedRequest({ method: "GET", url: "/v1/players/limits?playerId=never-seen-before" });
+    assert.equal(get.statusCode, 200);
+    assert.deepEqual(get.json().limits, []);
+  });
+
+  it("keeps one operator's limits invisible to another", async function () {
+    if (!client) return this.skip(skipReason);
+
+    await signedRequest({
+      method: "PUT",
+      url: "/v1/players/limits",
+      body: { playerId: "shared-id", limits: [{ period: "daily", maxStake: 999 }] },
+    });
+
+    // Same player id, different operator. A player id is only unique within
+    // one operator, so reading across the boundary would leak — and worse,
+    // writing across it would let one operator lift another's limits.
+    const other = await signedRequest({
+      method: "GET",
+      url: "/v1/players/limits?playerId=shared-id",
+      apiKeyId: OTHER_API_KEY_ID,
+      secret: OTHER_API_SECRET,
+    });
+    assert.equal(other.statusCode, 200);
+    assert.deepEqual(other.json().limits, [], "another operator must not see these limits");
+  });
+
+  it("refuses a fractional or negative ceiling rather than storing nonsense", async function () {
+    if (!client) return this.skip(skipReason);
+
+    // A negative maxStake refuses every bet forever, which looks identical
+    // to a self-exclusion and is not one. A fractional one is not money.
+    for (const bad of [{ period: "daily", maxStake: 10.5 }, { period: "daily", maxLoss: -1 }]) {
+      const response = await signedRequest({
+        method: "PUT",
+        url: "/v1/players/limits",
+        body: { playerId: LIMITED_PLAYER, limits: [bad] },
+      });
+      assert.equal(response.statusCode, 400, JSON.stringify(bad));
+      assert.equal(response.json().error, "invalid_amount");
+    }
+  });
+
+  it("refuses an unknown period, naming the field", async function () {
+    if (!client) return this.skip(skipReason);
+
+    const response = await signedRequest({
+      method: "PUT",
+      url: "/v1/players/limits",
+      body: { playerId: LIMITED_PLAYER, limits: [{ period: "hourly", maxStake: 100 }] },
+    });
+    assert.equal(response.statusCode, 400);
+    assert.equal(response.json().error, "invalid_period");
+  });
+
+  it("refuses two entries for one period rather than silently picking one", async function () {
+    if (!client) return this.skip(skipReason);
+
+    const response = await signedRequest({
+      method: "PUT",
+      url: "/v1/players/limits",
+      body: {
+        playerId: LIMITED_PLAYER,
+        limits: [{ period: "daily", maxStake: 100 }, { period: "daily", maxStake: 900 }],
+      },
+    });
+    assert.equal(response.statusCode, 400);
+    assert.equal(response.json().error, "duplicate_period");
+  });
+
+  it("refuses a period that names no ceiling at all", async function () {
+    if (!client) return this.skip(skipReason);
+
+    // Almost always a misspelled field name. Storing it would store nothing
+    // while reporting success.
+    const response = await signedRequest({
+      method: "PUT",
+      url: "/v1/players/limits",
+      body: { playerId: LIMITED_PLAYER, limits: [{ period: "daily", maxSteak: 100 }] },
+    });
+    assert.equal(response.statusCode, 400);
+    assert.equal(response.json().error, "empty_limit");
+  });
+
+  it("requires authentication like every other operator route", async function () {
+    if (!client) return this.skip(skipReason);
+
+    const response = await signedRequest({
+      method: "PUT",
+      url: "/v1/players/limits",
+      body: { playerId: LIMITED_PLAYER, limits: [] },
+      omitHeaders: true,
+    });
+    assert.equal(response.statusCode, 401);
   });
 });

@@ -155,6 +155,11 @@ export interface SupportLookup {
     status: string;
     createdAt: string;
   }>;
+  /** What this player may stake or lose per period. Empty means unlimited.
+   * Amounts are integer minor units, like every money value here. */
+  limits: Array<{ period: string; maxStake?: number; maxLoss?: number }>;
+  /** What they have actually staked and won, per period counter. */
+  limitUsage: Array<{ period: string; periodKey: string; staked: number; won: number }>;
   truncated: { transactions: boolean; rounds: boolean };
   limit: number;
 }

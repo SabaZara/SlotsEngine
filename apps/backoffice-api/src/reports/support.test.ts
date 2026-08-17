@@ -336,3 +336,46 @@ describe("tenant scoping", () => {
     assert.equal(response.json().error, "player_not_found");
   });
 });
+
+describe("play limits on the lookup", () => {
+  it("returns the player's limits and their current usage", async function () {
+    if (!client) return this.skip(skipReason);
+
+    // Support's third question — "I have money, why was I refused?" —
+    // cannot be answered from a balance and a transaction list. Both the
+    // ceiling and the counter have to come back, or the agent sees funds
+    // and no reason for the refusal.
+    await db.collection("playerLimits").insertOne({
+      operatorId: OPERATOR,
+      playerId: PLAYER,
+      limits: [{ period: "daily", maxStake: 10_000 }],
+    });
+    await db.collection("playerLimitUsage").insertOne({
+      operatorId: OPERATOR,
+      playerId: PLAYER,
+      period: "daily",
+      periodKey: "2026-08-18",
+      staked: 7_500,
+      won: 2_000,
+    });
+
+    const body = (await lookup(OPERATOR, PLAYER, tokens.ops)).json();
+
+    assert.deepEqual(body.limits, [{ period: "daily", maxStake: 10_000 }]);
+    assert.equal(body.limitUsage.length, 1);
+    assert.equal(body.limitUsage[0].staked, 7_500);
+    assert.equal(body.limitUsage[0].won, 2_000);
+  });
+
+  it("answers with empty arrays for a player who has no limits", async function () {
+    if (!client) return this.skip(skipReason);
+
+    // Unlimited is the normal state. Omitting the fields would make the
+    // screen's rendering conditional on their presence rather than on their
+    // contents, which is a second way to be wrong.
+    const body = (await lookup(OTHER_OPERATOR, PLAYER, tokens.ops)).json();
+
+    assert.deepEqual(body.limits, []);
+    assert.deepEqual(body.limitUsage, []);
+  });
+});

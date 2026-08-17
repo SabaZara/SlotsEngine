@@ -3,6 +3,7 @@ import type { Db, MongoClient } from "mongodb";
 import { InsufficientFundsError, InvalidAmountError, ensurePlayer, getBalance } from "@slots-engine/ledger";
 import { GameNotFoundError, loadGameDefinition } from "../rounds/games.js";
 import { InvalidBetAmountError, recoverRound, spinRound } from "../rounds/service.js";
+import { LimitExceededError } from "../rounds/limits.js";
 
 interface SpinBody {
   operatorId?: string;
@@ -45,6 +46,21 @@ export function registerRoundRoutes(app: FastifyInstance, db: Db, client: MongoC
       if (err instanceof InvalidBetAmountError) return reply.code(400).send({ error: "invalid_bet_amount" });
       if (err instanceof InvalidAmountError) return reply.code(400).send({ error: "invalid_amount" });
       if (err instanceof InsufficientFundsError) return reply.code(402).send({ error: "insufficient_funds" });
+      if (err instanceof LimitExceededError) {
+        // 403, not 402. "Insufficient funds" means top up and try again;
+        // this means the player set (or was set) a ceiling and has reached
+        // it, and topping up changes nothing. Conflating the two would have
+        // a client offer a deposit prompt against a limit — the single
+        // worst response a responsible-gambling control can produce.
+        //
+        // The decision is echoed so the player can be told which limit and
+        // how much room is left, rather than only "no".
+        return reply.code(403).send({
+          error: err.decision.reason ?? "limit_exceeded",
+          period: err.decision.period,
+          remaining: err.decision.remaining,
+        });
+      }
       throw err;
     }
   });

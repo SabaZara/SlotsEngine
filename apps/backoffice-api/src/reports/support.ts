@@ -48,11 +48,10 @@ export function registerSupportRoutes(app: FastifyInstance, db: Db): void {
         return reply.code(404).send({ error: "player_not_found" });
       }
 
-      // Issued together rather than sequentially. Three round trips in
-      // series is three times the latency for data that has no ordering
-      // dependency, and this is a route someone runs while a customer is on
-      // the phone.
-      const [recentTransactions, recentRounds] = await Promise.all([
+      // Issued together rather than sequentially. Round trips in series is
+      // multiplied latency for data that has no ordering dependency, and
+      // this is a route someone runs while a customer is on the phone.
+      const [recentTransactions, recentRounds, limits, limitUsage] = await Promise.all([
         db
           .collection("transactions")
           .find({ operatorId, playerId }, { projection: { _id: 0 } })
@@ -69,12 +68,28 @@ export function registerSupportRoutes(app: FastifyInstance, db: Db): void {
           .sort({ createdAt: -1 })
           .limit(RECENT_LIMIT)
           .toArray(),
+        // "Why was I refused?" is the third question support gets, and
+        // without these two it cannot be answered from this screen at all
+        // — the agent would see a healthy balance and no reason for a
+        // refusal, which is precisely the case that becomes a complaint.
+        db.collection("playerLimits").findOne({ operatorId, playerId }, { projection: { _id: 0, limits: 1 } }),
+        db
+          .collection("playerLimitUsage")
+          .find({ operatorId, playerId }, { projection: { _id: 0, period: 1, periodKey: 1, staked: 1, won: 1 } })
+          // Newest period first per kind. Keyed strings sort
+          // chronologically because they are zero-padded, which is what
+          // that padding is for.
+          .sort({ periodKey: -1 })
+          .limit(RECENT_LIMIT)
+          .toArray(),
       ]);
 
       return reply.send({
         player,
         recentTransactions,
         recentRounds,
+        limits: (limits as { limits?: unknown } | null)?.limits ?? [],
+        limitUsage,
         // Stated rather than left for the caller to infer from the array
         // length: a list of exactly 50 is ambiguous between "that is all of
         // them" and "there are more", and a support agent reading the

@@ -199,6 +199,52 @@ them.
 Fund the player **before** launching. A player with no balance can only be
 shown an `insufficient_funds` error.
 
+### `PUT /v1/players/limits`
+
+Sets the ceilings a player plays under. **These are the responsible-gambling
+controls a licence requires**, so they belong wherever the player already
+manages their account with you — this endpoint is how that reaches us.
+
+```json
+{
+  "playerId": "p1",
+  "limits": [
+    { "period": "daily", "maxStake": 50000, "maxLoss": 20000 },
+    { "period": "monthly", "maxLoss": 200000 }
+  ]
+}
+```
+
+`period` is `daily`, `weekly` or `monthly`. Both ceilings are optional per
+period, but a period must carry at least one. Amounts are integer minor
+units, like every amount in this API.
+
+**The array replaces the whole set.** Send every limit that should apply,
+not just the one that changed — an absent period is removed, and `[]`
+clears all of them. A partial update has no safe reading ("leave alone" or
+"remove"?), so it is not offered.
+
+Two things worth knowing before you set these:
+
+- **Loss is net.** Staking 100 and winning 95 back counts as a loss of 5,
+  not 100. A winning session therefore re-opens headroom the player had
+  used, which is the standard reading and probably what your compliance
+  team expects — but confirm it, because the gross reading exhausts a limit
+  far faster.
+- **Periods are calendar periods in UTC**, and reset on their own. A daily
+  limit resets at 00:00 UTC, a weekly one on Monday (ISO weeks), a monthly
+  one on the 1st. There is no rolling "any 24 hours" window.
+
+A player who reaches a limit gets `403` on their next spin, and the game
+tells them which limit and how much room is left. **They are not shown a
+deposit prompt** — see the note on `stake_limit_reached` below.
+
+### `GET /v1/players/limits?playerId=p1`
+
+Reads them back. Returns `{ "playerId": "p1", "limits": [...] }`, with an
+empty array for a player who has none — a player with no limits is a normal
+state, not a missing one, so this is `200` rather than `404`.
+
 ---
 
 ## 5. Errors
@@ -216,6 +262,14 @@ shown an `insufficient_funds` error.
 | 400 | `invalid_request` | Check types — `amount` must be a positive integer. |
 | 400 | `must_provide_playerId_or_roundId` | A statement query needs one of the two. |
 | 402 | `insufficient_funds` | The balance is unchanged. |
+| 403 | `stake_limit_reached` | The player hit their own stake ceiling. **Do not offer a deposit** — they have money and chose a limit. The response carries `period` and `remaining`. |
+| 403 | `loss_limit_reached` | As above, against their net-loss ceiling. |
+| 400 | `invalid_player_id` | `playerId` is required and must be a non-empty string. |
+| 400 | `invalid_limits` | `limits` must be an array of objects. |
+| 400 | `invalid_period` | `period` must be `daily`, `weekly` or `monthly`. |
+| 400 | `duplicate_period` | Two entries named the same period; there is no correct way to merge them. |
+| 400 | `invalid_amount` | A ceiling must be a non-negative integer in minor units. |
+| 400 | `empty_limit` | A period named neither `maxStake` nor `maxLoss` — usually a misspelled field. |
 | 429 | `rate_limited` | 300 requests/minute per key. Honour `Retry-After`. |
 
 ---

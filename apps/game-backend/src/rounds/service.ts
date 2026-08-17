@@ -10,6 +10,7 @@ import {
   withLedgerTransaction,
 } from "@slots-engine/ledger";
 import { getMathEngine } from "@slots-engine/math-engine";
+import { LimitExceededError, recordWinAgainstLimits, stakeAgainstLimits } from "./limits.js";
 
 export interface SpinRoundInput {
   operatorId: string;
@@ -91,6 +92,26 @@ export async function spinRound(
 
   try {
     return await withLedgerTransaction(client, async (session) => {
+      // One clock reading for the whole round. Taken here rather than at
+      // each use so the stake and the win it produces land in the same
+      // period — a spin starting at 23:59:59.998 must not stake against
+      // today and pay out against tomorrow, which would leave a loss limit
+      // seeing the stake without the win.
+      const at = new Date();
+
+      // Inside the transaction, before the debit. Both halves are
+      // load-bearing: inside, because a check outside it lets two
+      // concurrent spins pass the same ceiling; before the debit, because
+      // a refused bet must leave the balance untouched, and the throw
+      // below aborts everything after it.
+      const limits = await stakeAgainstLimits(db, session, {
+        operatorId: input.operatorId,
+        playerId: input.playerId,
+        stake: input.totalBet,
+        at,
+      });
+      if (!limits.allowed) throw new LimitExceededError(limits);
+
       const debit = await debitWithinSession(db, session, {
         operatorId: input.operatorId,
         playerId: input.playerId,
@@ -113,9 +134,18 @@ export async function spinRound(
           amount: spin.evaluation.totalWin,
         });
         balanceAfter = credit.balanceAfter;
+
+        // Against the same period the stake went to, so a loss limit sees
+        // a net figure rather than only the outgoing half.
+        await recordWinAgainstLimits(db, session, {
+          operatorId: input.operatorId,
+          playerId: input.playerId,
+          won: spin.evaluation.totalWin,
+          at,
+        });
       }
 
-      const now = new Date().toISOString();
+      const now = at.toISOString();
       const round: Round = {
         roundId,
         operatorId: input.operatorId,
