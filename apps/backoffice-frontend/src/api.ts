@@ -2,6 +2,7 @@ import { REMOVABLE_DRAFT_FIELDS } from "@slots-engine/shared-types";
 import type {
   BonusModuleConfig,
   GameAssets,
+  GameTheme,
   GridSize,
   PaylinePath,
   PaylineWinRule,
@@ -31,6 +32,8 @@ export interface GameDraft {
   /** Artwork. Presentation only — see `GameAssets`. Optional at every level,
    * and absent for every game this repo ships. */
   assets?: GameAssets;
+  /** Colour identity. Presentation only. */
+  theme?: GameTheme;
   grid: GridSize;
   reelGenerationMode: ReelGenerationMode;
   reelStrips?: ReelStrip[];

@@ -1,4 +1,4 @@
-import type { GameDefinition } from "@slots-engine/shared-types";
+import { sanitizeGameTheme, type GameDefinition, type GameTheme } from "@slots-engine/shared-types";
 
 /**
  * The projection a browser is allowed to see.
@@ -49,9 +49,23 @@ export interface PublicGameView {
    * that publishes itself.
    */
   assets?: { symbolImageUrls?: Record<string, string>; backgroundUrl?: string };
+  /**
+   * Colour identity. Public for the same reason artwork is — every player
+   * sees it, so there is nothing to withhold.
+   *
+   * Typed as the shared `GameTheme` rather than re-listed field by field,
+   * which is the one deliberate departure from the allowlist rule above. It
+   * is safe here and not for `assets` because this field goes through
+   * `sanitizeGameTheme` on the way out: a key added to `GameTheme` later
+   * still cannot publish itself, because anything not in
+   * `THEME_COLOUR_KEYS` is dropped rather than copied.
+   */
+  theme?: GameTheme;
 }
 
 export function toPublicView(gameDef: GameDefinition): PublicGameView {
+  const theme = sanitizeGameTheme(gameDef.theme);
+
   return {
     gameId: gameDef.gameId,
     name: gameDef.name,
@@ -86,5 +100,11 @@ export function toPublicView(gameDef: GameDefinition): PublicGameView {
           },
         }
       : {}),
+    // Sanitized at the boundary, not merely passed through. A colour that
+    // the client would refuse is worse than absent: the client falls back
+    // silently, so a designer sees their choice "saved" and never applied.
+    // Dropping it here means the projection only ever carries colours that
+    // will actually render.
+    ...(theme !== undefined ? { theme } : {}),
   };
 }

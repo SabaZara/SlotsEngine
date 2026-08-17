@@ -150,12 +150,117 @@ export interface GameAssets {
  */
 export const REMOVABLE_DRAFT_FIELDS = [
   "assets",
+  "theme",
   "reelStrips",
   "symbolWeights",
   "currency",
   "mathEngineId",
   "paylineWinRule",
 ] as const;
+
+/**
+ * A game's colour identity.
+ *
+ * **Presentation only, exactly like `GameAssets`, and for the same
+ * load-bearing reason**: nothing here reaches the evaluator, the RTP
+ * simulation or the publish gate. A game's mathematics is its strips,
+ * weights, paytable and bonus params, and none of those can be changed by
+ * picking a colour — which is what makes a theme safe to edit on a
+ * published game without re-running the gate.
+ *
+ * **Hex strings rather than the reference's numeric `0x4fd1ff`.** Theirs is
+ * a Pixi scene where colours are numbers; this client is DOM, these values
+ * become CSS custom properties, and `#4fd1ff` is what a designer types and
+ * what every colour picker on earth emits. Storing numbers would mean
+ * converting at both ends and inventing a format nobody else uses.
+ *
+ * **Deliberately far smaller than the reference's `VisualTheme`.** Theirs
+ * carries radii, spacing scales, glow alphas, particle density and type
+ * roles — a design system for a renderer that draws its own chrome. Ours
+ * draws chrome with CSS, so radii and spacing already live in a stylesheet
+ * where they belong, and duplicating them into game data would create two
+ * sources for one fact. What genuinely varies per game is colour, so that
+ * is what this holds. `winCelebration` thresholds are excluded on the same
+ * grounds and a stronger one: they are already derived from the bet in
+ * `winPresentation.ts`, and a per-game override there would change what
+ * counts as a big win without touching the maths that pays it.
+ *
+ * Every field is optional and every consumer falls back to the built-in
+ * palette. A game with no theme looks exactly as it does today.
+ */
+export interface GameTheme {
+  /** Page background, behind everything. */
+  background?: string;
+  /** Panels and raised surfaces. */
+  panel?: string;
+  /** Hairlines and outlines. */
+  border?: string;
+  /** Body text. */
+  text?: string;
+  /** Secondary text — labels, status lines. */
+  muted?: string;
+  /** The interactive colour: spin button, focus rings, selected chips. */
+  accent?: string;
+  /** Reserved for winning outcomes, and never reused for anything else —
+   * a player learns this colour means money. */
+  win?: string;
+}
+
+/**
+ * Whether a theme colour is one the client will actually apply.
+ *
+ * **Restricted to hex, and that is a security decision rather than a
+ * stylistic one.** These values become CSS custom properties, so they are
+ * interpolated into a stylesheet — and CSS accepts far more than colours.
+ * `url(...)` fetches a resource; a value containing `;` or `}` escapes the
+ * declaration it was meant to sit in and can rewrite rules further down. A
+ * game definition is data a designer edits, so treating it as trusted CSS
+ * would make the theme editor an injection point into every player's page.
+ *
+ * Named colours (`red`) and functional forms (`rgb(...)`, `color-mix(...)`)
+ * are refused too. They are individually harmless, but allowing them means
+ * the check has to reason about CSS syntax rather than match a shape — and
+ * a designer loses nothing, because every colour picker emits hex.
+ *
+ * **Shared here for the reason F24 records.** The backoffice writes this
+ * field and the client reads it; a second copy of the rule in either place
+ * would drift, and nothing would fail when it did — the client silently
+ * falls back, so a refused colour looks like a designer's choice not having
+ * been saved.
+ */
+const HEX_COLOUR = /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
+
+export function isValidThemeColour(value: unknown): value is string {
+  return typeof value === "string" && HEX_COLOUR.test(value.trim());
+}
+
+/** Every colour a theme may set. Exported so the editor renders exactly
+ * these and cannot offer a field the client will ignore. */
+export const THEME_COLOUR_KEYS = ["background", "panel", "border", "text", "muted", "accent", "win"] as const;
+
+export type ThemeColourKey = (typeof THEME_COLOUR_KEYS)[number];
+
+/**
+ * The theme with every unusable value dropped.
+ *
+ * Returns `undefined` rather than an empty object when nothing survives,
+ * matching `GameAssets`: absence is how every consumer decides "no theme",
+ * and an empty object would claim a theme that styles nothing.
+ *
+ * Filtering rather than rejecting is deliberate. One malformed colour must
+ * not cost a designer the other six — the client falls back per field, so a
+ * partial theme is a working game with one wrong colour, not a broken page.
+ */
+export function sanitizeGameTheme(theme: unknown): GameTheme | undefined {
+  if (typeof theme !== "object" || theme === null) return undefined;
+  const source = theme as Record<string, unknown>;
+  const clean: Record<string, string> = {};
+  for (const key of THEME_COLOUR_KEYS) {
+    const value = source[key];
+    if (isValidThemeColour(value)) clean[key] = value.trim();
+  }
+  return Object.keys(clean).length > 0 ? (clean as GameTheme) : undefined;
+}
 
 /**
  * Which URL schemes an asset may use.
@@ -207,6 +312,9 @@ export interface GameDefinition {
   /** Presentation only — see `GameAssets`. Never reaches the evaluator or
    * the publish gate, so artwork can be changed without re-running either. */
   assets?: GameAssets;
+  /** Colour identity — see `GameTheme`. Presentation only, on the same
+   * terms as `assets`. */
+  theme?: GameTheme;
   grid: GridSize;
   reelGenerationMode: ReelGenerationMode;
   /** Required when reelGenerationMode === "reel-strip". */

@@ -107,6 +107,45 @@ describe("toPublicView", () => {
       assert.ok("symbolImageUrls" in withExtra.assets);
     });
 
+    it("publishes a game's theme, sanitized rather than passed through", () => {
+      /*
+       * Sanitized HERE rather than trusted, and that is the point. A colour
+       * the client would refuse is worse than no colour: the client falls
+       * back silently, so a designer sees their choice "saved" and never
+       * applied. Dropping it at the boundary means the projection only ever
+       * carries colours that will actually render.
+       *
+       * It also matters as a security boundary — these values become CSS
+       * custom properties on every player's page, so a value carrying `;`
+       * or `url(...)` must not reach a browser at all.
+       */
+      const view = toPublicView({
+        ...REFERENCE_GAME,
+        theme: { accent: "#4fd1ff", win: "url(https://evil.example/pixel.png)" },
+      } as never) as unknown as { theme: Record<string, unknown> };
+
+      assert.deepEqual(view.theme, { accent: "#4fd1ff" }, "only renderable colours may be published");
+    });
+
+    it("omits the theme key entirely for a game with no colours", () => {
+      const view = toPublicView(REFERENCE_GAME) as unknown as Record<string, unknown>;
+
+      assert.ok(!("theme" in view), "a game with no theme must not carry a theme key");
+    });
+
+    it("withholds a non-colour key smuggled into the theme", () => {
+      // The reason the projection can type this field as `GameTheme` rather
+      // than re-listing each colour: anything outside THEME_COLOUR_KEYS is
+      // dropped, so a key added to the interface still cannot publish
+      // itself.
+      const view = toPublicView({
+        ...REFERENCE_GAME,
+        theme: { accent: "#4fd1ff", internalNote: "do not ship" },
+      } as never) as unknown as { theme: Record<string, unknown> };
+
+      assert.ok(!("internalNote" in view.theme));
+    });
+
     it("omits an asset key the game did not set, rather than sending undefined", () => {
       const partial = toPublicView({
         ...REFERENCE_GAME,

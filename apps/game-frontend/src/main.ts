@@ -1,6 +1,7 @@
 import type { BonusPublicState, Round } from "@slots-engine/shared-types";
 import { GameClient, fetchGameView, type PublicGameView } from "./api.js";
 import { PixiReelRenderer } from "./render/pixiRenderer.js";
+import { applyGameTheme } from "./render/theme.js";
 import { GameStateMachine } from "./state/gameState.js";
 import { AUTOPLAY_SPIN_COUNTS, AutoplayController, type AutoplayStopReason } from "./state/autoplay.js";
 import { applyEnablement } from "./ui/controls.js";
@@ -110,6 +111,9 @@ class GameApp {
 
     try {
       this.game = await fetchGameView(BACKEND_URL, gameId);
+      // Applied before anything renders, so the player never sees a frame
+      // in the default palette followed by a repaint into the game's own.
+      applyGameTheme(document.documentElement, this.game.theme);
     } catch {
       // The underlying message is deliberately not shown. "Failed to fetch"
       // tells a player nothing they can act on, and the phase's own wording

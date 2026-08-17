@@ -73,6 +73,7 @@ export async function publishDraft(
     // from "artwork that failed to load", and an empty object would publish
     // as the second.
     ...(draft.assets !== undefined ? { assets: draft.assets } : {}),
+    ...(draft.theme !== undefined ? { theme: draft.theme } : {}),
     grid: draft.grid,
     reelGenerationMode: draft.reelGenerationMode,
     ...(draft.reelStrips !== undefined ? { reelStrips: draft.reelStrips } : {}),

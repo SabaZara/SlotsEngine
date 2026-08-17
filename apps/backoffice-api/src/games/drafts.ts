@@ -7,6 +7,7 @@ import {
   type BonusModuleConfig,
   type GameAssets,
   type GameDefinition,
+  type GameTheme,
   type GridSize,
   type PaylinePath,
   type PaylineWinRule,
@@ -43,6 +44,8 @@ export interface GameDraft {
    * behind an art problem.
    */
   assets?: GameAssets;
+  /** Colour identity. Presentation only, on the same terms as `assets`. */
+  theme?: GameTheme;
   grid: GridSize;
   reelGenerationMode: ReelGenerationMode;
   reelStrips?: ReelStrip[];
@@ -154,6 +157,7 @@ export function draftFromPublished(gameDef: GameDefinition, userId: string): Gam
     // a designer opens a live game to change one payout, republishes, and
     // the artwork is gone — without either step ever mentioning artwork.
     ...(gameDef.assets !== undefined ? { assets: gameDef.assets } : {}),
+    ...(gameDef.theme !== undefined ? { theme: gameDef.theme } : {}),
     grid: gameDef.grid,
     reelGenerationMode: gameDef.reelGenerationMode,
     ...(gameDef.reelStrips !== undefined ? { reelStrips: gameDef.reelStrips } : {}),

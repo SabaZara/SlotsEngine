@@ -8,9 +8,10 @@ import { SymbolsEditor } from "../gameBuilder/SymbolsEditor.js";
 import { ReelStripsEditor } from "../gameBuilder/ReelStripsEditor.js";
 import { PaylinesEditor } from "../gameBuilder/PaylinesEditor.js";
 import { AssetsEditor } from "../gameBuilder/AssetsEditor.js";
+import { ThemeEditor } from "../gameBuilder/ThemeEditor.js";
 import { MathPanel } from "../gameBuilder/MathPanel.js";
 
-type TabId = "settings" | "symbols" | "reels" | "paylines" | "artwork" | "math" | "history";
+type TabId = "settings" | "symbols" | "reels" | "paylines" | "artwork" | "theme" | "math" | "history";
 
 /** How long editing must pause before a save fires. Long enough that typing
  * a name is one save rather than twelve; short enough that a designer who
@@ -173,6 +174,7 @@ export function GameBuilderScreen({
           { id: "reels", label: "Reels" },
           { id: "paylines", label: "Paylines" },
           { id: "artwork", label: "Artwork" },
+          { id: "theme", label: "Theme" },
           { id: "math", label: "Maths & publish", badge: !valid ? <Badge tone="bad">!</Badge> : undefined },
           { id: "history", label: "History" },
         ]}
@@ -202,6 +204,7 @@ export function GameBuilderScreen({
         {tab === "artwork" && (
           <AssetsEditor symbols={draft.symbols} assets={draft.assets} onChange={(assets) => edit({ assets })} />
         )}
+        {tab === "theme" && <ThemeEditor theme={draft.theme} onChange={(theme) => edit({ theme })} />}
         {tab === "math" && (
           <MathPanel
             draft={draft}

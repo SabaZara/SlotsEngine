@@ -454,6 +454,32 @@ describe("the published definition", () => {
 
     assert.ok(!("assets" in gameDef), "a game with no artwork must not publish an assets key");
   });
+
+  it("carries the draft's theme through, on the same terms as its artwork", async () => {
+    /*
+     * F26's lesson applied to a second field. `gameDef` is an allowlist, and
+     * an allowlist omits by default — a theme set on a draft would be
+     * accepted, saved, echoed back by every GET and then discarded at the
+     * one step that makes it playable, with nothing reporting a problem.
+     * That is precisely how `assets` was lost.
+     */
+    const db = setup();
+    const draft = goodDraft({ theme: { accent: "#4fd1ff", win: "#ffd166" } });
+
+    const { gameDef } = await publishStable(db, draft);
+
+    assert.deepEqual(gameDef.theme, { accent: "#4fd1ff", win: "#ffd166" });
+  });
+
+  it("omits the theme key for a game with no colours of its own", async () => {
+    // Absence is how the client decides "use the built-in palette", so an
+    // empty object would claim a theme that styles nothing.
+    const db = setup();
+
+    const { gameDef } = await publishStable(db, goodDraft());
+
+    assert.ok(!("theme" in gameDef), "a game with no theme must not publish a theme key");
+  });
 });
 
 describe("the audit trail", () => {

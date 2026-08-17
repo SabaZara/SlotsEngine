@@ -1,4 +1,4 @@
-import type { BonusPublicState, Round, ServerToClientMessage } from "@slots-engine/shared-types";
+import type { BonusPublicState, GameTheme, Round, ServerToClientMessage } from "@slots-engine/shared-types";
 
 /**
  * What the server is willing to tell a browser. Mirrors game-backend's
@@ -24,6 +24,9 @@ export interface PublicGameView {
   /** Artwork, presentation only. Optional at every level — a game with
    * none renders derived glyphs and plays identically. */
   assets?: { symbolImageUrls?: Record<string, string>; backgroundUrl?: string };
+  /** Colour identity. Already sanitized by the projection, and re-checked
+   * client-side before it reaches a stylesheet. */
+  theme?: GameTheme;
 }
 
 export async function fetchGameView(backendUrl: string, gameId: string): Promise<PublicGameView> {
