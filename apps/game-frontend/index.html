@@ -37,7 +37,45 @@
       .readout { display: flex; align-items: baseline; gap: 8px; }
       .readout .label { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; }
       #balance { font-variant-numeric: tabular-nums; font-size: 18px; font-weight: 600; }
-      #win { color: var(--win); font-weight: 600; font-variant-numeric: tabular-nums; }
+      /* `tabular-nums` is load-bearing rather than decorative: a counting-up
+         figure in a proportional font reflows on every frame as digit widths
+         change, so the number visibly jitters while it counts. */
+      #win { color: var(--win); font-weight: 600; font-variant-numeric: tabular-nums; transition: color .2s, transform .2s; }
+
+      /* Tier is set by the count-up as it crosses each threshold, so the
+         emphasis arrives with the number rather than being decided up front
+         — the player watches it become a big win. */
+      #win[data-tier="big"] { color: #ffd166; transform: scale(1.12); }
+      #win[data-tier="mega"] {
+        color: #fff;
+        transform: scale(1.28);
+        text-shadow: 0 0 12px rgba(255, 209, 102, .9), 0 0 28px rgba(255, 209, 102, .5);
+      }
+      /* A losing spin clears the tier, so the previous round's emphasis does
+         not linger over a new result. */
+      #win[data-tier="none"] { transform: none; }
+      #win[data-tier="win"] { transform: none; }
+
+      @media (prefers-reduced-motion: reduce) {
+        /* The number still counts and still changes colour; only the scaling
+           is dropped. Motion is the part that causes trouble, and the
+           information is carried by the figure itself either way. */
+        #win { transition: color .2s; }
+        #win[data-tier="big"] { transform: none; }
+        #win[data-tier="mega"] { transform: none; }
+      }
+
+      /* Verified on the running client, with one trap worth recording for
+         whoever checks this next: these tiers CANNOT be read with
+         `getComputedStyle` in a background or throttled tab. Transitions are
+         driven by the same frame clock as `requestAnimationFrame`, which such
+         a tab stops entirely — so a probe reads a transition frozen at its
+         start value and reports `transform: matrix(1,0,0,1,0,0)` for a rule
+         that plainly declares `scale(1.28)`. The tell is that `text-shadow`,
+         which has no transition, applies while `color` and `transform` from
+         the very same rule do not. Set `style.transition = "none"` before
+         measuring. Measured this way all four tiers are correct: none/win
+         flat, big 1.12x, mega 1.28x white with a glow. */
 
       main { position: relative; min-height: 0; }
       #reels { width: 100%; height: 100%; display: block; cursor: pointer; }

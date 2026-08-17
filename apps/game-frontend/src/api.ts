@@ -21,6 +21,9 @@ export interface PublicGameView {
   bonusModules: Array<{ moduleId: string; params: Record<string, unknown> }>;
   betOptions: number[];
   currency?: string;
+  /** Artwork, presentation only. Optional at every level — a game with
+   * none renders derived glyphs and plays identically. */
+  assets?: { symbolImageUrls?: Record<string, string>; backgroundUrl?: string };
 }
 
 export async function fetchGameView(backendUrl: string, gameId: string): Promise<PublicGameView> {

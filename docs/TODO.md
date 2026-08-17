@@ -1137,14 +1137,26 @@ reversal and what it does not touch; this item tracks the work.
   | `tierCrossing` is **edge**-triggered | A level-triggered check fires on every frame above the threshold rather than once as it is crossed. |
 
   **Mutation: 6 of 8 caught, and the two survivors are documented
-  equivalents established by measurement.** Both `Math.floor` and the
-  `elapsedMs >= durationMs` early return are unreachable under a cubic
-  ease-out, which never exceeds 1. They are kept deliberately: swapping in
-  the overshooting `easeOutBack` that `reelStrip.ts` already uses for the
-  reel settle makes both live immediately — measured, the count-up would then
-  display **up to 499 minor units over** a 5000-unit win, a 4.99
-  overstatement of a 50.00 payout. Dead code that stops a curve change from
-  silently reintroducing a money bug.
+  equivalents.** Both `Math.floor` and the `elapsedMs >= durationMs` early
+  return are unreachable under a cubic ease-out, which never exceeds 1.
+
+  **Corrected 2026-08-17, and the correction is the more useful fact.** This
+  entry previously claimed that swapping in the overshooting `easeOutBack`
+  makes both mutants live immediately, and cited a 499-minor-unit
+  overstatement on a 5000-unit win. Re-probed: **it does not.** Applying
+  `floor → round` *and* `easeOutBack` together leaves all 27 tests passing.
+  The 500-at-peak figure is right about the raw curve and wrong about the
+  consequence, because `Math.min(Math.round(winMinor), …)` clamps the result
+  before it is returned — so the protection against overstating a win comes
+  from **the clamp, not from the choice of curve**.
+
+  Worth keeping rather than quietly rewriting, because the original reasoning
+  was the kind that sounds rigorous and cites a measurement: a number was
+  computed from the curve in isolation and then attributed to the shipped
+  function, which has a clamp the curve never reaches past. The load-bearing
+  line is `return Math.min(...)` in `countUpValueAt` — that is what a future
+  editor must not remove. Changing the ease is safe; removing the clamp is
+  not.
 
   **A caution recorded in `index.html` for whoever verifies the tiers next.**
   They cannot be read with `getComputedStyle` in a background or throttled

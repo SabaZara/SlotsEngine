@@ -1,7 +1,12 @@
 import type { BonusPublicState, Round } from "@slots-engine/shared-types";
 import { GameClient, fetchGameView, type PublicGameView } from "./api.js";
-import { GameRenderer } from "./render/renderer.js";
+import { PixiReelRenderer } from "./render/pixiRenderer.js";
+import { GameStateMachine } from "./state/gameState.js";
+import { applyEnablement } from "./ui/controls.js";
 import { formatMoney } from "./ui/formatMoney.js";
+import { isTerminalCode, presentStatus } from "./ui/statusPresentation.js";
+import { startWinCountUp, writeFinalWin } from "./ui/winCountUp.js";
+import { BonusPanelView } from "./ui/bonusPanel.js";
 
 const BACKEND_URL = import.meta.env?.VITE_GAME_BACKEND_URL ?? "http://localhost:9102";
 const SOCKET_URL = import.meta.env?.VITE_GAME_SOCKET_URL ?? "ws://localhost:9103";
@@ -22,46 +27,99 @@ const el = <T extends HTMLElement>(id: string): T => {
  * when the reels stop, and why skipping the animation is always safe.
  */
 class GameApp {
-  private renderer: GameRenderer | null = null;
+  private renderer: PixiReelRenderer | null = null;
   private client: GameClient | null = null;
   private game: PublicGameView | null = null;
 
   private balance = 0;
   private betIndex = 0;
   private lastRound: Round | null = null;
-  private spinInFlight = false;
+  /** Cancels an in-flight count-up. A count-up that outlives its round
+   * writes a stale figure over the next one, which is a wrong number
+   * attached to a spin that did not produce it. */
+  private cancelCountUp: (() => void) | null = null;
+
+  /**
+   * The single source for what the player may do.
+   *
+   * This replaced a `spinInFlight` boolean plus direct `disabled` writes
+   * from five call sites. The problem with that shape is not verbosity: two
+   * of those sites could disagree, and the one that lost re-enabled a
+   * control during a round that had not finished paying. Enablement is now
+   * derived, so there is nothing to keep in step.
+   */
+  private readonly state = new GameStateMachine();
+
+  /**
+   * The bonus panel, constructed once. Its callbacks are the only path from
+   * a tile press to the socket, and `onResolvedDismissed` is what returns
+   * the client to idle — kept here rather than inside the panel because a
+   * phase change belongs with the phases.
+   */
+  private readonly bonusPanel = new BonusPanelView(
+    { panel: el("bonus") },
+    {
+      onPick: (tileIndex) => this.client?.bonusStep("pick", { tileIndex }),
+      onSpin: () => this.client?.bonusStep("spin", {}),
+      onResolvedDismissed: () => this.state.transition({ phase: "idle" }),
+    },
+  );
 
   async start(): Promise<void> {
     const params = new URLSearchParams(window.location.search);
     const token = params.get("token");
     const gameId = params.get("gameId") ?? "reference-5x3";
 
+    // Subscribed FIRST, before anything that can fail. Registering after
+    // the guards below would mean an early failure transitions the phase
+    // with nobody listening — the player would get a dead button and no
+    // explanation, which is the exact failure this wiring exists to
+    // prevent.
+    this.state.subscribe(() => {
+      this.applyEnablement();
+      this.applyStatus();
+    });
+
     if (!token) {
-      this.fatal(
-        "No launch token",
-        "A player normally arrives here through a casino, which supplies a signed one-time token. Open this page with ?token=… to play.",
-      );
+      this.fatal("invalid_token");
       return;
     }
 
     try {
       this.game = await fetchGameView(BACKEND_URL, gameId);
-    } catch (err) {
-      this.fatal("Could not load the game", err instanceof Error ? err.message : String(err));
+    } catch {
+      // The underlying message is deliberately not shown. "Failed to fetch"
+      // tells a player nothing they can act on, and the phase's own wording
+      // does. The error still reaches the console for a developer.
+      this.fatal("launch_failed");
       return;
     }
 
     el("game-name").textContent = this.game.name;
-    this.renderer = new GameRenderer(el<HTMLCanvasElement>("reels"), this.game);
+
+    // Pixi 8 initialises asynchronously and acquires a WebGL context, which
+    // genuinely can fail — an old browser, a blocked context, a GPU reset.
+    // Awaited and caught rather than left floating, because the failure
+    // mode otherwise is a blank canvas with working buttons: the player
+    // spins, is charged, and sees nothing move. Observed during development,
+    // which is why it is handled rather than assumed away.
+    try {
+      const renderer = new PixiReelRenderer(el<HTMLCanvasElement>("reels"), this.game);
+      await renderer.init();
+      this.renderer = renderer;
+    } catch {
+      this.fatal("graphics_failed");
+      return;
+    }
+
     this.buildBetControls();
     this.buildPaytable();
 
     this.client = new GameClient(SOCKET_URL, {
       onJoined: ({ balance }) => {
         this.balance = balance;
-        this.setStatus("Ready");
         this.updateBalance();
-        this.setControlsEnabled(true);
+        this.state.transition({ phase: "idle" });
       },
       onSpinResult: (round) => this.handleSpinResult(round),
       onBalance: (balance) => {
@@ -71,38 +129,81 @@ class GameApp {
       onBonusState: (state) => this.handleBonusState(state),
       onError: (code, message) => this.handleError(code, message),
       onDisconnected: () => {
-        this.setStatus("Disconnected");
-        this.setControlsEnabled(false);
+        // Deliberately not `unrecoverable`: a dropped socket is exactly the
+        // case a reconnect fixes, and the two are told apart by whether
+        // retrying could possibly help.
+        this.state.transition({ phase: "offline" });
       },
     });
 
     this.client.connect(token);
-    this.setStatus("Connecting…");
+    // Not a phase: `offline` is the initial state and its wording is about a
+    // DROPPED connection, which is a different thing to say than a first
+    // attempt that has not resolved yet.
+    this.setTransientStatus("Connecting…");
 
-    el("spin").addEventListener("click", () => this.spin());
-    el("reels").addEventListener("click", () => this.renderer?.skipToResult());
-    // Space is the conventional spin key; it also skips a spin in progress,
-    // so an impatient player never has to wait out the animation.
+    el("spin").addEventListener("click", () => this.spinOrSkip());
+    el("reels").addEventListener("click", () => this.skip());
+    // Space is the conventional spin key; it also skips a reveal in
+    // progress, so an impatient player never has to wait out the animation.
     window.addEventListener("keydown", (event) => {
       if (event.code !== "Space") return;
       event.preventDefault();
-      if (this.renderer?.isSpinning) this.renderer.skipToResult();
-      else this.spin();
+      this.spinOrSkip();
     });
   }
 
+  /**
+   * One entry point for both the button and the spacebar.
+   *
+   * Which of the two actions this is depends on the phase rather than on
+   * asking the renderer whether it happens to be moving. That mattered: the
+   * previous form read `renderer.isSpinning`, so between sending a spin and
+   * the result arriving the reels were still — and a second press started a
+   * second round.
+   */
+  private spinOrSkip(): void {
+    if (this.state.enablement.skipAffordance) {
+      this.skip();
+      return;
+    }
+    if (this.state.enablement.spinEnabled) this.spin();
+  }
+
+  private skip(): void {
+    if (!this.state.enablement.skipAffordance) return;
+    this.state.requestSkip();
+    this.renderer?.skipToResult();
+    // The count-up is part of the reveal, so a skip must finish it too —
+    // otherwise the reels land instantly and the number keeps ticking
+    // afterwards, which reads as the result still being decided.
+    this.cancelCountUp?.();
+    this.cancelCountUp = null;
+    const win = this.lastRound?.evaluation?.totalWin ?? 0;
+    if (win > 0) writeFinalWin({ amount: el("win") }, win, this.game?.currency);
+  }
+
+  /** Pushes derived enablement onto the DOM. The only place that writes
+   * `disabled`, so no other path can contradict it. The work itself lives in
+   * `ui/controls.ts` so it is reachable by a test without a socket and a
+   * canvas — this method is the wiring, not the rule. */
+  private applyEnablement(): void {
+    applyEnablement(
+      { spin: el<HTMLButtonElement>("spin"), bets: el("bets") },
+      this.state.current,
+    );
+  }
+
   private spin(): void {
-    if (!this.game || this.spinInFlight) return;
+    if (!this.game || !this.state.enablement.spinEnabled) return;
 
     const bet = this.game.betOptions[this.betIndex];
     if (bet > this.balance) {
-      this.setStatus("Not enough balance for that bet");
+      this.setTransientStatus("Not enough balance for that bet");
       return;
     }
 
-    this.spinInFlight = true;
-    this.setControlsEnabled(false);
-    this.setStatus("Spinning…");
+    this.state.transition({ phase: "spinning" });
     el("win").textContent = "";
     this.client?.spin(bet);
   }
@@ -112,119 +213,96 @@ class GameApp {
     const matrix = round.resultMatrix;
     if (!matrix) return;
 
+    // The result is settled from here on, so the reveal becomes skippable.
+    this.state.transition({ phase: "revealing", stopRequested: false });
+
     // Reveal, then report. The balance has already moved server-side; the
     // win figure is held back only so it doesn't spoil the animation.
     this.renderer?.spinTo(matrix, () => {
       const win = round.evaluation?.totalWin ?? 0;
+      // Counted up rather than printed, and the tier it reaches scales the
+      // pacing. The value written is always an integer count of minor units
+      // — see `winCountUp.ts` for the money bug that guards against.
+      this.cancelCountUp?.();
+      this.cancelCountUp = startWinCountUp(
+        { amount: el("win") },
+        {
+          winMinor: win,
+          totalBetMinor: round.totalBet ?? 0,
+          currency: this.game?.currency,
+          onTier: (tier) => el("win").setAttribute("data-tier", tier),
+        },
+      );
+
       if (win > 0) {
-        el("win").textContent = `Win ${formatMoney(win, this.game?.currency)}`;
         this.renderer?.showWinLines(
           (round.evaluation?.winLines ?? []).map((line) => ({ positions: line.positions, symbol: line.symbol })),
         );
       }
 
-      this.setStatus(round.evaluation?.bonusTriggered ? "Bonus round!" : "Ready");
-      this.spinInFlight = false;
-      // Stay disabled through a bonus: the round isn't over until the
-      // module resolves, and spinning again mid-bonus would be confusing.
-      this.setControlsEnabled(!round.evaluation?.bonusTriggered);
+      const triggered = round.evaluation?.bonusTriggered ?? false;
+      // The round is not over until the module resolves, so a triggered
+      // bonus goes to its own phase rather than back to idle — betting into
+      // a round that has not finished paying is the thing being prevented.
+      this.state.transition(triggered ? { phase: "bonus" } : { phase: "idle" });
     });
-  }
-
-  private handleBonusState(state: BonusPublicState): void {
-    const panel = el("bonus");
-    panel.hidden = false;
-
-    if (state.status === "resolved") {
-      const win = state.totalWin ?? 0;
-      panel.innerHTML = `<strong>Bonus complete</strong><span>${formatMoney(win, this.game?.currency)}</span>`;
-      setTimeout(() => {
-        panel.hidden = true;
-        this.setStatus("Ready");
-        this.setControlsEnabled(true);
-      }, 2600);
-      return;
-    }
-
-    // Dispatch on what the view actually carries rather than on a module id.
-    // The server decides which module is running; the client only needs to
-    // know how to draw what it was sent, and a view carrying `remaining` is
-    // a free-spins round whatever it is called.
-    if ("remaining" in state.view) {
-      this.renderFreeSpins(state);
-      return;
-    }
-
-    // A multi-step module. The view carries only what the player is allowed
-    // to see — never the unrevealed remainder of the layout.
-    const tileCount = Number(state.view.tileCount ?? 0);
-    const revealed = (state.view.revealed as number[] | undefined) ?? [];
-    panel.innerHTML = `<strong>Pick a prize</strong><div class="tiles"></div>`;
-    const tiles = panel.querySelector(".tiles")!;
-
-    for (let i = 0; i < tileCount; i++) {
-      const button = document.createElement("button");
-      button.className = "tile";
-      button.disabled = revealed.includes(i);
-      const picks = (state.view.picks as Array<{ tileIndex: number; multiplier: number | null }> | undefined) ?? [];
-      const pick = picks.find((p) => p.tileIndex === i);
-      button.textContent = pick ? (pick.multiplier === null ? "✕" : `×${pick.multiplier}`) : "?";
-      button.addEventListener("click", () => this.client?.bonusStep("pick", { tileIndex: i }));
-      tiles.appendChild(button);
-    }
   }
 
   /**
-   * Free spins: the reels the player already knows, spun again.
+   * Draws a bonus round.
    *
-   * The grid is drawn through the SAME renderer the base game uses rather
-   * than a separate bonus display — a free spin is a real spin, and showing
-   * it any other way would teach the player it is something else. The last
-   * spin's outcome arrives in the view, so `spinTo` is given a settled
-   * result exactly as it is in the base game.
+   * The panel owns its own elements and updates them in place — see
+   * `bonusPanel.ts` for why an `innerHTML` rebuild per step was wrong. What
+   * stays here is the wiring: sending steps, and replaying a free spin onto
+   * the real reels.
    */
-  private renderFreeSpins(state: BonusPublicState): void {
-    const panel = el("bonus");
-    const remaining = Number(state.view.remaining ?? 0);
-    const multiplier = Number(state.view.winMultiplier ?? 1);
-    const accumulated = Number(state.view.accumulatedWin ?? 0);
-    const retriggers = Number(state.view.retriggers ?? 0);
-    const lastSpin = state.view.lastSpin as { matrix?: string[][]; multipliedWin?: number; retriggered?: boolean } | undefined;
+  private handleBonusState(state: BonusPublicState): void {
+    this.bonusPanel.setCurrency(this.game?.currency);
 
-    // Replay the spin onto the real reels. Guarded on `matrix` because the
-    // first view — the one from `start` — has no spin yet.
+    // Replay the spin onto the reels the player already knows, rather than a
+    // separate bonus display — a free spin IS a real spin, and showing it
+    // any other way would teach the player it is something else. Guarded on
+    // `matrix` because the first view, from `start`, has no spin yet.
+    const lastSpin = state.view?.lastSpin as { matrix?: string[][] } | undefined;
     if (lastSpin?.matrix) this.renderer?.spinTo(lastSpin.matrix);
 
-    panel.innerHTML = `
-      <strong>Free spins${multiplier > 1 ? ` ×${multiplier}` : ""}</strong>
-      <span>${remaining} left${retriggers > 0 ? ` · ${retriggers} retrigger${retriggers > 1 ? "s" : ""}` : ""}</span>
-      <span>${formatMoney(accumulated, this.game?.currency)}</span>
-      <button class="tile" id="free-spin">Spin</button>
-    `;
-
-    const button = panel.querySelector<HTMLButtonElement>("#free-spin")!;
-    // Disabled while the reels are moving, so a player cannot queue spins
-    // faster than they can watch them. The server refuses a step for an
-    // already-claimed index regardless — this is presentation, not the
-    // guarantee.
-    button.addEventListener("click", () => {
-      button.disabled = true;
-      this.client?.bonusStep("spin", {});
-    });
+    this.bonusPanel.render(state);
   }
 
   private handleError(code: string, message: string): void {
-    this.spinInFlight = false;
-    this.setStatus(message);
-
     // A spent or expired token cannot be recovered from in the client — the
-    // player has to be launched again by the casino, so say so plainly
-    // rather than leaving a dead button.
-    if (code === "token_expired" || code === "token_already_used" || code === "invalid_token") {
-      this.setControlsEnabled(false);
+    // player has to be launched again by the casino. The phase records that
+    // distinction rather than only disabling a button, so nothing later
+    // re-enables it on the assumption the error was transient. The phase's
+    // own wording is used rather than the server's `message`, since the
+    // latter is written for a developer.
+    if (isTerminalCode(code)) {
+      this.state.transition({ phase: "unrecoverable", code });
       return;
     }
-    this.setControlsEnabled(true);
+
+    // Any other error ends the round it interrupted. Returning to idle
+    // rather than to the phase it came from is deliberate: a failed spin has
+    // no result to reveal, so `revealing` would offer a skip over nothing.
+    this.state.transition({ phase: "idle" });
+    // Written *after* the transition, which would otherwise overwrite it
+    // with "Ready". A transient error is the one thing the phase model
+    // genuinely cannot express — it says what the client may do, and this
+    // says what just went wrong.
+    this.setTransientStatus(message);
+  }
+
+  /**
+   * A message that outlives no phase change.
+   *
+   * Deliberately separate from `applyStatus`, and always applied after a
+   * transition rather than before one. Two writers of the same element is
+   * the drift this repo keeps finding; naming the exception is what keeps
+   * it an exception rather than a second source.
+   */
+  private setTransientStatus(text: string): void {
+    el("status").textContent = text;
+    el("status").dataset.tone = "bad";
   }
 
   private buildBetControls(): void {
@@ -266,18 +344,28 @@ class GameApp {
     el("balance").textContent = formatMoney(this.balance, this.game?.currency);
   }
 
-  private setStatus(text: string): void {
-    el("status").textContent = text;
+  /**
+   * Writes the phase's own wording, so the status line and the buttons
+   * cannot disagree. A client reading "Ready" beside a disabled spin button
+   * is worse than a silent one — the player concludes the button is broken
+   * rather than that the round is not over.
+   */
+  private applyStatus(): void {
+    const { headline, detail, tone } = presentStatus(this.state.current);
+    el("status").textContent = headline;
+    el("status").dataset.tone = tone;
+    // The detail shares the win line, which is empty whenever there is
+    // something to explain — a win and a failure never coexist.
+    if (detail) el("win").textContent = detail;
   }
 
-  private setControlsEnabled(enabled: boolean): void {
-    el<HTMLButtonElement>("spin").disabled = !enabled;
-  }
-
-  private fatal(title: string, detail: string): void {
-    el("status").textContent = title;
-    el("win").textContent = detail;
-    this.setControlsEnabled(false);
+  /**
+   * A failure the player cannot act on — no launch token, no graphics, or a
+   * game that would not load. Distinct from `handleError`'s transient case,
+   * and the phase records which: nothing here is retried by reconnecting.
+   */
+  private fatal(code: string): void {
+    this.state.transition({ phase: "unrecoverable", code });
   }
 }
 

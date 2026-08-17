@@ -61,8 +61,23 @@ describe("free-spins-5x3 fixture", () => {
     const drift = Math.abs(measured - FREE_SPINS_GAME.rtpTarget);
 
     assert.ok(drift < GATE_TOLERANCE, `measured ${measured.toFixed(4)} drifts ${drift.toFixed(4)} from target`);
-    // Not merely inside the band — comfortably inside it, so ordinary
-    // sampling noise cannot flip a green run red. Measured drift is ~0.004.
+    // Not merely inside the band — comfortably inside it, so the fixture is
+    // not one bad sample away from failing the real gate.
+    //
+    // The margin here is real but smaller than this comment used to claim.
+    // "Measured drift is ~0.004, so sampling noise cannot flip a green run
+    // red" was wrong on both halves, and it flipped one red: re-measured
+    // over 12 unseeded 200k runs, drift ranges 0.0007–0.0163 with a median
+    // of 0.0114 — roughly 3x the old figure, against a 0.025 threshold.
+    // That is about 1.5x headroom, so an occasional failure here is
+    // sampling noise and NOT a broken paytable. The gate proper (0.05) was
+    // never approached in any run.
+    //
+    // Left unseeded deliberately. Pinning a seed would make this stable and
+    // simultaneously stop it from sampling anything — the point is that the
+    // fixture survives *arbitrary* runs, which is what a designer's publish
+    // will be. If it starts failing often, re-measure before re-tuning:
+    // this assertion is about margin, and margin is a distribution.
     assert.ok(drift < GATE_TOLERANCE / 2, `drift ${drift.toFixed(4)} leaves too little margin for sampling noise`);
   });
 
