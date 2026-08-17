@@ -47,11 +47,17 @@ import { t } from "../ui/tokens.js";
  */
 export function applyAssetEdit(
   assets: GameAssets | undefined,
-  edit: { kind: "symbol"; symbol: string; url: string } | { kind: "background"; url: string },
+  edit:
+    | { kind: "symbol"; symbol: string; url: string }
+    | { kind: "background"; url: string }
+    | { kind: "music"; url: string }
+    | { kind: "spinSound"; url: string },
 ): GameAssets | undefined {
   const next: GameAssets = {
     ...(assets?.symbolImageUrls !== undefined ? { symbolImageUrls: { ...assets.symbolImageUrls } } : {}),
     ...(assets?.backgroundUrl !== undefined ? { backgroundUrl: assets.backgroundUrl } : {}),
+    ...(assets?.musicUrl !== undefined ? { musicUrl: assets.musicUrl } : {}),
+    ...(assets?.spinSoundUrl !== undefined ? { spinSoundUrl: assets.spinSoundUrl } : {}),
   };
 
   const trimmed = edit.url.trim();
@@ -59,6 +65,12 @@ export function applyAssetEdit(
   if (edit.kind === "background") {
     if (trimmed === "") delete next.backgroundUrl;
     else next.backgroundUrl = trimmed;
+  } else if (edit.kind === "music") {
+    if (trimmed === "") delete next.musicUrl;
+    else next.musicUrl = trimmed;
+  } else if (edit.kind === "spinSound") {
+    if (trimmed === "") delete next.spinSoundUrl;
+    else next.spinSoundUrl = trimmed;
   } else {
     const symbols = { ...next.symbolImageUrls };
     if (trimmed === "") delete symbols[edit.symbol];
@@ -84,11 +96,16 @@ export function applyAssetEdit(
  * catchable, which is the same argument `BonusParamsForm` makes about
  * silently-substituted defaults.
  */
-export function assetUrlWarning(url: string): string | null {
+export function assetUrlWarning(url: string, kind: "artwork" | "sound" = "artwork"): string | null {
   const trimmed = url.trim();
   if (trimmed === "") return null;
   if (isLoadableAssetUrl(trimmed)) return null;
-  return "not a loadable URL — the player will see a placeholder instead of this artwork";
+  // The consequence differs by kind, and saying the wrong one is worse than
+  // saying none: a designer told to expect a "placeholder" for a refused
+  // music URL will go looking for a visual problem.
+  return kind === "sound"
+    ? "not a loadable URL — this will be silent"
+    : "not a loadable URL — the player will see a placeholder instead of this artwork";
 }
 
 function UrlField({
@@ -96,13 +113,15 @@ function UrlField({
   hint,
   value,
   onChange,
+  kind = "artwork",
 }: {
   label: string;
   hint?: string;
   value: string;
   onChange: (url: string) => void;
+  kind?: "artwork" | "sound";
 }) {
-  const warning = assetUrlWarning(value);
+  const warning = assetUrlWarning(value, kind);
   return (
     <Field label={label} hint={hint}>
       {/* Named on the input itself, not only via the surrounding `Field`.
@@ -149,6 +168,28 @@ export function AssetsEditor({
         hint="Drawn behind the reels. Empty means the built-in gradient."
         value={assets?.backgroundUrl ?? ""}
         onChange={(url) => onChange(applyAssetEdit(assets, { kind: "background", url }))}
+      />
+
+      <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.7, color: t.muted, margin: "16px 0 6px" }}>
+        Sound
+      </div>
+      <div style={{ fontSize: 11, color: t.faint, marginBottom: 10 }}>
+        Optional, and off by default. A browser will not play anything until the player has interacted with the page,
+        so the first spin is what starts the music — that is the browser's rule, not a bug here.
+      </div>
+      <UrlField
+        kind="sound"
+        label="Music"
+        hint="Looped quietly for the whole session."
+        value={assets?.musicUrl ?? ""}
+        onChange={(url) => onChange(applyAssetEdit(assets, { kind: "music", url }))}
+      />
+      <UrlField
+        kind="sound"
+        label="Spin sound"
+        hint="Looped only while the reels are moving, layered over the music."
+        value={assets?.spinSoundUrl ?? ""}
+        onChange={(url) => onChange(applyAssetEdit(assets, { kind: "spinSound", url }))}
       />
 
       <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.7, color: t.muted, margin: "16px 0 6px" }}>

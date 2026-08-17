@@ -135,6 +135,56 @@ describe("applyAssetEdit", () => {
   });
 });
 
+describe("sound", () => {
+  it("gives music and the spin sound their own fields", () => {
+    // F24 at the form level again: the client reads these URLs and the
+    // projection publishes them, so a field absent here is audio a designer
+    // cannot configure however correct everything downstream is.
+    renderComponent(<AssetsEditor symbols={SYMBOLS} assets={undefined} onChange={() => {}} />);
+
+    assert.ok(screen.getByRole("textbox", { name: "Music" }));
+    assert.ok(screen.getByRole("textbox", { name: "Spin sound" }));
+  });
+
+  it("stores each sound independently of the artwork", () => {
+    const seen: Array<GameAssets | undefined> = [];
+    renderComponent(
+      <AssetsEditor symbols={SYMBOLS} assets={{ backgroundUrl: "https://bg.png" }} onChange={(a) => seen.push(a)} />,
+    );
+
+    fireEvent.change(screen.getByRole("textbox", { name: "Music" }), { target: { value: "https://cdn/bg.mp3" } });
+
+    assert.deepEqual(seen.at(-1), { backgroundUrl: "https://bg.png", musicUrl: "https://cdn/bg.mp3" });
+  });
+
+  it("clears a sound when its field is emptied", async () => {
+    const seen: Array<GameAssets | undefined> = [];
+    renderComponent(
+      <AssetsEditor symbols={SYMBOLS} assets={{ musicUrl: "https://cdn/bg.mp3" }} onChange={(a) => seen.push(a)} />,
+    );
+
+    await interact(() =>
+      fireEvent.change(screen.getByRole("textbox", { name: "Music" }), { target: { value: "" } }),
+    );
+
+    assert.equal(seen.at(-1), undefined, "an emptied sound must remove the key, not store an empty string");
+  });
+
+  it("warns that a bad sound URL is silent, not that it is a placeholder", () => {
+    /*
+     * The consequence differs by kind, and saying the wrong one is worse
+     * than saying nothing: a designer told to expect a "placeholder" for a
+     * refused music URL goes looking for a visual problem that does not
+     * exist.
+     */
+    renderComponent(
+      <AssetsEditor symbols={SYMBOLS} assets={{ musicUrl: "javascript:alert(1)" }} onChange={() => {}} />,
+    );
+
+    assert.ok(screen.getByText(/silent/i), "a refused sound URL must say it will be silent");
+  });
+});
+
 describe("assetUrlWarning", () => {
   it("says nothing about an empty field, which is the ordinary case", () => {
     // Every game here ships no artwork. Warning on absence would make the

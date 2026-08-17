@@ -131,6 +131,21 @@ export interface GameAssets {
   symbolImageUrls?: Record<string, string>;
   /** Drawn behind the reels. Absent means the built-in gradient. */
   backgroundUrl?: string;
+  /**
+   * Looped quietly for the whole session. Absent means silence, which is
+   * every game here today.
+   *
+   * Audio is opt-in per game rather than platform-wide because it is the
+   * one presentation choice a player may actively not want, and a game that
+   * ships none is not missing anything — it is simply quiet.
+   */
+  musicUrl?: string;
+  /**
+   * Looped only while a spin is in flight, layered over the background
+   * rather than replacing it — a reel bed, not a substitute for the ambient
+   * loop. Absent means the background plays alone.
+   */
+  spinSoundUrl?: string;
 }
 
 /**

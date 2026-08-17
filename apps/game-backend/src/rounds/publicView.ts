@@ -48,7 +48,12 @@ export interface PublicGameView {
    * `GameAssets` later must be a decision someone makes here, not something
    * that publishes itself.
    */
-  assets?: { symbolImageUrls?: Record<string, string>; backgroundUrl?: string };
+  assets?: {
+    symbolImageUrls?: Record<string, string>;
+    backgroundUrl?: string;
+    musicUrl?: string;
+    spinSoundUrl?: string;
+  };
   /**
    * Colour identity. Public for the same reason artwork is — every player
    * sees it, so there is nothing to withhold.
@@ -97,6 +102,8 @@ export function toPublicView(gameDef: GameDefinition): PublicGameView {
               ? { symbolImageUrls: gameDef.assets.symbolImageUrls }
               : {}),
             ...(gameDef.assets.backgroundUrl !== undefined ? { backgroundUrl: gameDef.assets.backgroundUrl } : {}),
+            ...(gameDef.assets.musicUrl !== undefined ? { musicUrl: gameDef.assets.musicUrl } : {}),
+            ...(gameDef.assets.spinSoundUrl !== undefined ? { spinSoundUrl: gameDef.assets.spinSoundUrl } : {}),
           },
         }
       : {}),

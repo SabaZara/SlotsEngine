@@ -23,7 +23,12 @@ export interface PublicGameView {
   currency?: string;
   /** Artwork, presentation only. Optional at every level — a game with
    * none renders derived glyphs and plays identically. */
-  assets?: { symbolImageUrls?: Record<string, string>; backgroundUrl?: string };
+  assets?: {
+    symbolImageUrls?: Record<string, string>;
+    backgroundUrl?: string;
+    musicUrl?: string;
+    spinSoundUrl?: string;
+  };
   /** Colour identity. Already sanitized by the projection, and re-checked
    * client-side before it reaches a stylesheet. */
   theme?: GameTheme;

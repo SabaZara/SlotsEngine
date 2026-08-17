@@ -217,6 +217,9 @@
     <footer>
       <div id="bets"></div>
       <button id="spin" disabled>Spin</button>
+      <!-- Hidden unless the game actually carries audio; see
+           buildMuteControl for why hidden rather than disabled. -->
+      <button id="mute" type="button" hidden aria-label="Mute">🔊</button>
       <div>
         <div id="status">Starting…</div>
         <div id="win"></div>

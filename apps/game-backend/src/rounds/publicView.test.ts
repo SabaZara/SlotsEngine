@@ -107,6 +107,19 @@ describe("toPublicView", () => {
       assert.ok("symbolImageUrls" in withExtra.assets);
     });
 
+    it("publishes a game's sound alongside its artwork", () => {
+      // The projection is an explicit allowlist, so a new asset field that
+      // nobody adds here is simply never served — F26's shape, and the
+      // reason each key is named rather than the object spread.
+      const view = toPublicView({
+        ...REFERENCE_GAME,
+        assets: { musicUrl: "https://cdn.example.com/bg.mp3", spinSoundUrl: "https://cdn.example.com/spin.mp3" },
+      } as never) as unknown as { assets: Record<string, unknown> };
+
+      assert.equal(view.assets.musicUrl, "https://cdn.example.com/bg.mp3");
+      assert.equal(view.assets.spinSoundUrl, "https://cdn.example.com/spin.mp3");
+    });
+
     it("publishes a game's theme, sanitized rather than passed through", () => {
       /*
        * Sanitized HERE rather than trusted, and that is the point. A colour

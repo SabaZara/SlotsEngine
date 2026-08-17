@@ -2,6 +2,7 @@ import type { BonusPublicState, Round } from "@slots-engine/shared-types";
 import { GameClient, fetchGameView, type PublicGameView } from "./api.js";
 import { PixiReelRenderer } from "./render/pixiRenderer.js";
 import { applyGameTheme } from "./render/theme.js";
+import { GameAudio } from "./ui/gameAudio.js";
 import { GameStateMachine } from "./state/gameState.js";
 import { AUTOPLAY_SPIN_COUNTS, AutoplayController, type AutoplayStopReason } from "./state/autoplay.js";
 import { applyEnablement } from "./ui/controls.js";
@@ -40,6 +41,8 @@ class GameApp {
    * writes a stale figure over the next one, which is a wrong number
    * attached to a spin that did not produce it. */
   private cancelCountUp: (() => void) | null = null;
+  /** Null until the game view has arrived, since the URLs come from it. */
+  private audio: GameAudio | null = null;
 
   /**
    * The autoplay run, if any.
@@ -100,6 +103,7 @@ class GameApp {
       // itself in response — and a UI painted from a run that is about to
       // end shows a "stop" button for a run that no longer exists.
       this.autoplay.handleStateChange(next);
+      this.audio?.apply(next);
       this.applyEnablement();
       this.applyStatus();
     });
@@ -114,6 +118,11 @@ class GameApp {
       // Applied before anything renders, so the player never sees a frame
       // in the default palette followed by a repaint into the game's own.
       applyGameTheme(document.documentElement, this.game.theme);
+      this.audio = new GameAudio({
+        ...(this.game.assets?.musicUrl !== undefined ? { musicUrl: this.game.assets.musicUrl } : {}),
+        ...(this.game.assets?.spinSoundUrl !== undefined ? { spinSoundUrl: this.game.assets.spinSoundUrl } : {}),
+      });
+      this.buildMuteControl();
     } catch {
       // The underlying message is deliberately not shown. "Failed to fetch"
       // tells a player nothing they can act on, and the phase's own wording
@@ -191,6 +200,10 @@ class GameApp {
    * second round.
    */
   private spinOrSkip(): void {
+    // The browser refuses `play()` until a real gesture has happened, and
+    // this is the gesture every player makes. Safe to call on every press:
+    // priming is a no-op once the loop is already running.
+    this.audio?.prime();
     if (this.state.enablement.skipAffordance) {
       this.skip();
       return;
@@ -355,6 +368,44 @@ class GameApp {
    * away focus and makes a checkbox impossible to reach by keyboard.
    * `renderAutoplay` only ever writes text and `disabled` onto these.
    */
+  /**
+   * The mute button, built only when the game has sound.
+   *
+   * Hidden rather than disabled for a game with no audio, which is the
+   * opposite of the rule the autoplay panel follows — and deliberately so.
+   * A disabled control says "this exists and is unavailable right now"; a
+   * mute button on a silent game is not unavailable, it is meaningless, and
+   * offering it invites a player to press it wondering what broke. Every
+   * game in this repo ships no audio today, so this is the common path.
+   */
+  private buildMuteControl(): void {
+    const button = el<HTMLButtonElement>("mute");
+    if (!this.audio?.hasAudio) {
+      button.hidden = true;
+      return;
+    }
+
+    button.hidden = false;
+    const render = () => {
+      const muted = this.audio?.isMuted ?? false;
+      button.textContent = muted ? "🔇" : "🔊";
+      // The label states the ACTION, not the state — a screen reader
+      // announcing "muted" on a button that unmutes is ambiguous about
+      // which of the two it is describing.
+      button.setAttribute("aria-label", muted ? "Unmute" : "Mute");
+      button.setAttribute("aria-pressed", String(muted));
+    };
+
+    button.addEventListener("click", () => {
+      // Also a genuine gesture, so it can unlock audio for a player who
+      // reaches for the speaker icon before they spin.
+      this.audio?.prime();
+      this.audio?.setMuted(!this.audio.isMuted);
+      render();
+    });
+    render();
+  }
+
   private buildAutoplayControls(): void {
     const counts = el("autoplay-counts");
     counts.innerHTML = "";
