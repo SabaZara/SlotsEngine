@@ -94,6 +94,27 @@ export interface ManagedUser extends SessionUser {
 }
 
 /**
+ * An operator as every read returns it — **without `apiSecret`**.
+ *
+ * The omission is enforced by the type rather than left to discipline: the
+ * create and rotate calls intersect this with `{ apiSecret: string }`, so a
+ * screen that tries to read a secret off a listed operator fails to
+ * compile. That matters because the mistake it prevents — building a UI
+ * that displays a secret it can fetch on demand — would be a redesign to
+ * undo, not a patch.
+ */
+export interface ManagedOperator {
+  operatorId: string;
+  name: string;
+  integrationType: "direct" | "reverse";
+  apiKeyId: string;
+  enabledGameIds: string[];
+  createdAt: string;
+  disabledAt?: string;
+  secretRotatedAt?: string;
+}
+
+/**
  * A failed request, carrying the server's own error code so a screen can
  * react to *what* went wrong rather than parsing prose. `rtp_out_of_tolerance`
  * in particular is a refusal a designer must be able to act on, not a
@@ -284,6 +305,32 @@ export const api = {
       method: "POST",
       body: { password },
     }),
+
+  listOperators: () => request<{ operators: ManagedOperator[] }>("/v1/operators"),
+
+  /**
+   * The one response that ever carries `apiSecret`. Typed as optional
+   * everywhere else — see `ManagedOperator` — so the compiler stops anyone
+   * writing a screen that expects to read it back later.
+   */
+  createOperator: (body: {
+    operatorId: string;
+    name: string;
+    integrationType: "direct" | "reverse";
+    enabledGameIds: string[];
+  }) => request<{ operator: ManagedOperator & { apiSecret: string } }>("/v1/operators", { method: "POST", body }),
+
+  updateOperator: (operatorId: string, patch: { name?: string; enabledGameIds?: string[]; disabled?: boolean }) =>
+    request<{ operator: ManagedOperator }>(`/v1/operators/${encodeURIComponent(operatorId)}`, {
+      method: "PUT",
+      body: patch,
+    }),
+
+  rotateOperatorSecret: (operatorId: string) =>
+    request<{ operator: ManagedOperator & { apiSecret: string } }>(
+      `/v1/operators/${encodeURIComponent(operatorId)}/rotate-secret`,
+      { method: "POST" },
+    ),
 
   audit: (params: { entityId?: string; limit?: number } = {}) => {
     const query = new URLSearchParams();

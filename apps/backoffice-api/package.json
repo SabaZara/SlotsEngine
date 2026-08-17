@@ -17,6 +17,7 @@
     "@slots-engine/math-engine": "*",
     "@slots-engine/mongo-schemas": "*",
     "@slots-engine/rng": "*",
+    "@slots-engine/secrets": "*",
     "@slots-engine/shared-types": "*",
     "fastify": "^5.2.0",
     "mongodb": "^6.12.0",

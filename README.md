@@ -53,8 +53,20 @@ played on its own reels and retriggerable up to three times. Both are tuned
 to a 0.95 RTP and measured by simulation rather than by eye. Swap the
 `gameId` in the command below to play either.
 
-A player needs a signed launch token, which a real casino would mint. To
-generate one locally:
+A player needs a signed launch token. **A real operator mints one by calling
+`POST /v1/launch`** — see [docs/INTEGRATION.md](docs/INTEGRATION.md), and
+`apps/operator-demo` for a working integrator you can click through:
+
+```bash
+docker compose -f infra/docker-compose.yml --profile demo up -d operator-demo
+```
+
+That needs an operator to sign as. Create one in the backoffice under
+**Operators**, copy the secret it shows you once, and put it in `infra/.env`
+as `DEMO_OPERATOR_API_KEY_ID` / `DEMO_OPERATOR_API_SECRET`. Then open
+`http://localhost:9108`.
+
+To skip all that and mint a token directly, locally:
 
 ```bash
 node -e 'const{createHmac,randomUUID}=require("crypto");const S=process.env.LAUNCH_TOKEN_SECRET;const n=Date.now();const p={kind:"launch",operatorId:"demo",playerId:"demo-"+randomUUID().slice(0,6),gameId:"reference-5x3",jti:randomUUID(),iat:n,exp:n+900000};const b=Buffer.from(JSON.stringify(p)).toString("base64url");console.log(`http://localhost:9104/?gameId=reference-5x3&token=${b}.${createHmac("sha256",S).update(b).digest("base64url")}`)'
@@ -85,6 +97,7 @@ not an obstacle. See [Startup guards](#startup-guards).
 | `game-socket` | 9003 | Realtime relay; establishes player identity |
 | `backoffice-api` | 9005 | Authoring, validation, the publish gate, audit |
 | `integration-api` | 9006 | **The operator boundary.** Signed wallet, launch and catalogue calls |
+| `operator-demo` | 9008 | A reference integrator — the worked example of `docs/INTEGRATION.md` |
 | `game-frontend` | 9104 | The player's browser client (Canvas 2D, no deps) |
 | `backoffice-frontend` | 9106 | The designer's admin UI (React) |
 

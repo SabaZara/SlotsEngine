@@ -21,6 +21,17 @@ function assertStartupConfig(env: NodeJS.ProcessEnv = process.env): void {
   if (env.NODE_ENV === "production" && !env.BACKOFFICE_CORS_ORIGINS) {
     problems.push("BACKOFFICE_CORS_ORIGINS must be set explicitly in production.");
   }
+  // This service issues operator credentials, so it holds the key that
+  // encrypts them. Checked at boot rather than left to first use: the
+  // secrets package throws on the first encrypt, which here would be the
+  // moment someone tries to create an operator — a failure that looks like
+  // a bug in the create form rather than a missing deployment variable.
+  const encryptionKey = env.SECRETS_ENCRYPTION_KEY;
+  if (!encryptionKey) {
+    problems.push("SECRETS_ENCRYPTION_KEY is required — operator credentials are encrypted at rest.");
+  } else if (!/^[0-9a-fA-F]{64}$/.test(encryptionKey)) {
+    problems.push("SECRETS_ENCRYPTION_KEY must be exactly 64 hex characters (32 bytes).");
+  }
   if (problems.length > 0) {
     throw new Error(`backoffice-api refusing to start:\n  - ${problems.join("\n  - ")}`);
   }

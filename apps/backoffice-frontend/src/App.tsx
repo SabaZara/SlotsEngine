@@ -7,8 +7,14 @@ import { GameListScreen } from "./screens/GameListScreen.js";
 import { GameBuilderScreen } from "./screens/GameBuilderScreen.js";
 import { AuditScreen } from "./screens/AuditScreen.js";
 import { UsersScreen } from "./screens/UsersScreen.js";
+import { OperatorsScreen } from "./screens/OperatorsScreen.js";
 
-type Route = { name: "games" } | { name: "game"; gameId: string } | { name: "audit" } | { name: "users" };
+type Route =
+  | { name: "games" }
+  | { name: "game"; gameId: string }
+  | { name: "audit" }
+  | { name: "users" }
+  | { name: "operators" };
 
 export function App() {
   const [user, setUser] = useState<SessionUser | null>(null);
@@ -40,6 +46,14 @@ export function App() {
   // it is administrator-only — matching the API exactly, since a nav item
   // leading to a 403 is worse than no nav item.
   const canManageUsers = user.roles.includes("super_admin");
+  // Issuing an operator credential is what lets an outside company move
+  // money through this platform, so it sits with operations rather than
+  // with game_designer. Viewing is wider — support legitimately needs to
+  // see which operators exist — and the two are separate flags because
+  // the API draws the same line.
+  const canViewOperators =
+    user.roles.includes("operations") || user.roles.includes("viewer") || user.roles.includes("super_admin");
+  const canManageOperators = user.roles.includes("operations") || user.roles.includes("super_admin");
 
   const logout = async () => {
     // Revokes every token issued to this user, not just this tab's — a
@@ -82,6 +96,7 @@ export function App() {
         <nav style={{ display: "flex", gap: 16 }}>
           {navItem("Games", route.name === "games" || route.name === "game", () => setRoute({ name: "games" }))}
           {canManageUsers && navItem("Users", route.name === "users", () => setRoute({ name: "users" }))}
+          {canViewOperators && navItem("Operators", route.name === "operators", () => setRoute({ name: "operators" }))}
           {canAudit && navItem("Audit", route.name === "audit", () => setRoute({ name: "audit" }))}
         </nav>
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 12 }}>
@@ -103,6 +118,7 @@ export function App() {
           <GameBuilderScreen gameId={route.gameId} canEdit={canEdit} onBack={() => setRoute({ name: "games" })} />
         )}
         {route.name === "users" && <UsersScreen currentUserId={user.userId} />}
+        {route.name === "operators" && <OperatorsScreen canManage={canManageOperators} />}
         {route.name === "audit" && <AuditScreen />}
       </main>
     </div>

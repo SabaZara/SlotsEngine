@@ -8,6 +8,7 @@ import { registerAuthRoutes } from "./routes/auth.js";
 import { registerGameRoutes } from "./routes/games.js";
 import { registerUserRoutes } from "./routes/users.js";
 import { registerAuditRoutes } from "./routes/audit.js";
+import { registerOperatorRoutes } from "./routes/operators.js";
 import { registerHealthRoutes } from "./routes/health.js";
 
 /**
@@ -100,6 +101,7 @@ export async function buildApp(db: Db, logger: Logger): Promise<FastifyInstance>
   registerGameRoutes(app, db);
   registerUserRoutes(app, db);
   registerAuditRoutes(app, db);
+  registerOperatorRoutes(app, db);
 
   app.setErrorHandler((rawError, _request, reply) => {
     // A client error is the client's to fix — reporting a malformed body or

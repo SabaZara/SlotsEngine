@@ -188,6 +188,11 @@ services:
       MONGO_URI: ${MONGO_URI:-mongodb://mongo:27017/slots_engine?replicaSet=rs0}
       MONGO_DB: ${MONGO_DB:-slots_engine}
       BACKOFFICE_JWT_SECRET: ${BACKOFFICE_JWT_SECRET}
+      # This service ISSUES operator credentials, so it holds the same key
+      # integration-api uses to read them back. The two must match, or a
+      # credential created here cannot be decrypted there — and the only
+      # symptom is every call from that operator failing authentication.
+      SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY}
       BACKOFFICE_CORS_ORIGINS: ${BACKOFFICE_CORS_ORIGINS:-http://localhost:9106}
       BACKOFFICE_RATE_LIMIT: ${BACKOFFICE_RATE_LIMIT:-300}
       # Login gets a far tighter ceiling than ordinary admin traffic.
@@ -252,6 +257,41 @@ services:
       timeout: 5s
       retries: 10
       start_period: 15s
+
+  # A reference integrator, standing in for an aggregator's own lobby. Not
+  # part of the platform: it is the worked example of docs/INTEGRATION.md,
+  # and it holds an operator credential the way a partner's backend would.
+  #
+  # Deliberately has NO default credentials and refuses to start without
+  # them — create an operator in the backoffice, then put its values in
+  # infra/.env. The reference repo defaults these to a fixed dev secret and
+  # boot-seeds a matching operator, which is convenient right up until that
+  # seed runs somewhere real.
+  #
+  # Started only when asked for: `docker compose --profile demo up -d`.
+  # It is a demonstration, not a service the platform needs.
+  operator-demo:
+    profiles: ["demo"]
+    image: ${REGISTRY:-slots-engine}/operator-demo:${TAG:-local}
+    build:
+      context: ..
+      dockerfile: infra/docker/service.Dockerfile
+      args:
+        SERVICE: operator-demo
+    environment:
+      PORT: 9008
+      # The in-network address: this is a server-to-server call, not one a
+      # browser makes.
+      INTEGRATION_API_URL: ${INTEGRATION_API_INTERNAL_URL:-http://integration-api:9006}
+      OPERATOR_ID: ${DEMO_OPERATOR_ID:-demo}
+      OPERATOR_API_KEY_ID: ${DEMO_OPERATOR_API_KEY_ID}
+      OPERATOR_API_SECRET: ${DEMO_OPERATOR_API_SECRET}
+      DEMO_TOPUP_AMOUNT: ${DEMO_TOPUP_AMOUNT:-100000}
+    ports:
+      - "${OPERATOR_DEMO_HOST_PORT:-9108}:9008"
+    depends_on:
+      integration-api:
+        condition: service_healthy
 
   backoffice-frontend:
     image: ${REGISTRY:-slots-engine}/backoffice-frontend:${TAG:-local}

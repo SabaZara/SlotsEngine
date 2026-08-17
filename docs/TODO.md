@@ -96,8 +96,8 @@ non-decisions rather than gaps; section O names each and why.
   is not a criticism of them — a test that never fails is doing its job as a
   regression guard — but it does mean the suite's value here has been in the
   *writing*, and its value from here on is in the *guarding*.
-- **1720 tests** (1621 unit + 99 component), of which 53 are conformance
-  cases run against real MongoDB, 99 are React component tests, and a
+- **1784 tests** (1673 unit + 111 component), of which 53 are conformance
+  cases run against real MongoDB, 111 are React component tests, and a
   further 45 run against real MongoDB directly — 15 schema/index cases, 27
   integration-API cases, and 3 ledger concurrency cases. Counted from a
   full run rather than carried forward, because a number nobody re-measures
@@ -674,6 +674,88 @@ rollback semantics. And **`SECRETS_ENCRYPTION_KEY` adds a fourth secret to
 item 4** rather than removing one; the key lives in an env var, which
 raises the bar from "read the database" to "read the database and the
 environment" without being a managed store.
+
+### ~~11. Credentials could not be issued, and nothing demonstrated the protocol~~ — closed
+
+Item 10 built the operator boundary but left two gaps at either end of it.
+**Nothing could create an operator** — the collection existed and
+`integration-api` read from it, but the only way to get a row in was to
+write to Mongo by hand. And **nothing demonstrated the protocol**, so an
+integrator's only reference was the source of the service they were
+integrating against.
+
+**Operator CRUD, in the backoffice.** `POST/GET/PUT /v1/operators` plus
+`POST /v1/operators/:id/rotate-secret`, with an Operators screen. 25 API
+tests (**13/13 mutations caught**) and 12 component tests (**7/7 caught**).
+
+The decisions worth recording:
+
+- **Issuance sits with `operations`, not `game_designer`.** A designer
+  changes what a game pays, which is already sensitive; issuing a
+  credential to an outside company is a different kind of authority.
+  Reading is deliberately wider (`viewer` too) — support needs to answer
+  "why can't this partner launch that game", and no read carries a secret.
+- **The secret is shown exactly once**, on create and on rotate. There is
+  no route that returns it afterwards, which makes the *client's* handling
+  of it unrecoverable — so the panel cannot be dismissed until a checkbox
+  is ticked, and it is held in state that a background refresh cannot
+  clear. That second one is a real bug the tests caught: `create` calls
+  `refresh()` immediately after, and a panel rendered from list state would
+  be wiped by it, losing a secret that cannot be re-read, in the *success*
+  path.
+- **Rotation is its own route, not a field on `PUT`.** It invalidates the
+  credential an operator is actively using, so it should not be reachable
+  by sending one extra key in an update body — and it deserves its own
+  audit action.
+- **`ManagedOperator` has no `apiSecret` field at all.** The create and
+  rotate calls intersect it with `{ apiSecret: string }`, so a screen that
+  tries to read a secret off a listed operator fails to compile. The
+  mistake it prevents — a UI that displays a secret it can fetch on demand
+  — would be a redesign to undo, not a patch.
+
+**`apps/operator-demo`.** A lobby form, server-side signing, the game
+embedded in an iframe. 27 tests, **10 of 11 mutations caught**.
+
+Two deliberate divergences from the reference, both because this repo
+differs in a real way:
+
+| Its version | Here, and why |
+|---|---|
+| Boot-seeds a demo operator from env vars, defaulting the secret to a fixed dev string. | Refuses to start without `OPERATOR_API_KEY_ID`/`OPERATOR_API_SECRET`, and the error says to create one in the backoffice. Item 10 already recorded why the seed was not built; a demo that defaults to a known secret would have reintroduced it through the back door. |
+| Post/Redirect/Get: the POST mints a token and redirects to a GET carrying the `launchUrl`, so a refresh re-GETs rather than re-submitting. | Renders on the POST, minting a fresh token per load. **Their client recovers a spent launch token from a stored session; ours does not** — `game-frontend` holds its session token in memory only, so a refresh there would show `invalid_token`. Copying the pattern would have produced a page that works once and breaks on the first refresh, which survives review because nobody refreshes during a demo. Verified: two loads produce two distinct `jti`s. |
+
+**The signing is re-derived from the protocol, not imported.** A real
+aggregator writes it in their own stack from `docs/INTEGRATION.md`; a demo
+that imported `apps/integration-api`'s helpers would prove only that the
+protocol is implementable by us. The duplication is the test — if the
+document is wrong, this file and the server disagree and `e2e:operator`
+fails.
+
+**One surviving mutation, and it is genuinely equivalent — which the same
+edit on the server was not.** Replacing `body: rawBody` with
+`body: JSON.stringify(JSON.parse(rawBody))` cannot be caught by any test of
+this client, because `rawBody` is always `JSON.stringify`'s own output and
+that round trip is provably lossless for every value this client can build
+(checked across floats, exponents, non-ASCII, `-0`, nesting). On
+`integration-api`'s parser the identical edit was a **real defect**, because
+there the bytes come from an arbitrary client that may pretty-print or
+order keys differently. Same edit, opposite verdict, decided by which side
+of the wire owns the bytes.
+
+Worth recording that the first attempt to close it produced a test that
+recomputed the expected value with `JSON.stringify` and therefore shared
+the blind spot exactly — it passed, and asserted nothing. It was deleted
+rather than kept. Two earlier "survivors" in the same run were also not
+survivors at all: a `perl` substitution had failed silently and the mutation
+was never applied. **A mutation harness that cannot fail is worth no more
+than a test that cannot fail**, so every mutation since is confirmed applied
+(by `diff`) before its result is believed.
+
+**Verified against the live stack, through the path a person actually
+takes:** an operator created through the real backoffice API, its
+one-shot secret pasted into `infra/.env`, the demo started against it, and
+a real spin driven in the browser — balance $1000.00 → $999.00 on a $1.00
+bet, inside the demo's own iframe on port 9108.
 
 ---
 
