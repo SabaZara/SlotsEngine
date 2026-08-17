@@ -80,7 +80,7 @@ non-decisions rather than gaps; section O names each and why.
   is not a criticism of them — a test that never fails is doing its job as a
   regression guard — but it does mean the suite's value here has been in the
   *writing*, and its value from here on is in the *guarding*.
-- **1623 tests**, of which 53 are conformance cases run against real MongoDB
+- **1625 tests**, of which 53 are conformance cases run against real MongoDB
   and 86 are React component tests.
 - **Sections A, B and C are closed** — no source module with meaningful
   logic is without a direct test. **The React components are no longer the
@@ -1458,12 +1458,12 @@ does not fire pins something real.
 | ~~4~~ | ~~**Music and a spin bed**~~ — **shipped 2026-08-17.** Two optional URLs on `GameAssets`, driven off the phase model. The playing is four lines of `HTMLAudioElement`; what is split out and tested is **when** each track should run, because a bed still looping after the reels stop is as wrong as one that never starts and neither raises an error — a tester with the volume down notices neither. `revealing` counts as spinning, which is the subtlety: the result is known but the reels are moving, so cutting there stops the sound partway through the motion it accompanies. Muting pauses rather than only setting `.muted`, and unmuting restores *what the phase asks for* rather than everything. 29 tests, **7 of 7 mutations caught**. |
 | ~~5~~ | ~~**Rotate-device prompt**~~ — **shipped 2026-08-17.** Portrait **and** narrow, because a portrait tablet has plenty of room and a tall desktop window is still a desktop — prompting either covers a game the player can already see, which is the worse of the two failures. `matchMedia("(orientation: portrait)")` rather than comparing width to height: the comparison only re-evaluates when something else triggers a resize, while the media query fires on the rotation itself, which is the moment the overlay must clear. Does **not** gate play — `computeGridMetrics` already fits the grid to the tighter axis, so nothing a player is paid on can be cropped. 12 tests, **6 of 6 mutations caught**. |
 | 6 | Object storage and an upload button | Only worth doing when someone needs to host art *here* rather than at a URL they already have. Read F25, F26 and the reference's `repair-corrupted-asset-urls.ts` before starting: signing introduces a read shape that differs from the write shape, which is exactly the asymmetry this design currently does not have, and the reference shipped a compounding data-corruption bug on it. |
-| 7 | Per-input names on multi-control rows | `Field` now names the *row* (`role="group"`), and `TextInput` accepts a `label`, but `SettingsEditor`'s multi-control rows do not pass one — so "Grid"'s reels and rows boxes are still anonymous to a screen reader. The primitive work is done; this is the caller-by-caller half, on screens with no tests of their own. |
+| ~~7~~ | ~~**Per-input names on multi-control rows**~~ — **done 2026-08-17, and it was four times bigger than this row predicted.** The row said "SettingsEditor's multi-control rows"; a sweep found **18 unlabelled controls across seven files**, including a password reset whose only description was a placeholder that vanishes the moment the user types, and two fields in `GameListScreen` whose "labels" were bare `<div>`s associated with nothing at all. `NumberInput` and `Select` gained the `label` prop `TextInput` already had, and every caller now passes one. Guarded by a **source-level check** rather than six new component suites: it asserts on text and so cannot see wiring, but it covers every screen at once — including the six with no tests of their own, which is exactly why this shipped. It carries its own guard-the-guard test, because a regex that silently stopped matching would make the whole file pass while checking nothing. Both mutations caught. | `Field` now names the *row* (`role="group"`), and `TextInput` accepts a `label`, but `SettingsEditor`'s multi-control rows do not pass one — so "Grid"'s reels and rows boxes are still anonymous to a screen reader. The primitive work is done; this is the caller-by-caller half, on screens with no tests of their own. |
 
 **The accessible-name defect in `Field` is recorded as F28**, since it was a
 real shipped bug rather than a gap in this section's plan. Row 7 above is
-its remaining half: the primitive is fixed and the multi-control callers
-still pass no per-input label.
+its second half, now also closed — and it turned out to be four times the
+size this section predicted.
 
 **Surveyed against the reference on 2026-08-17**, since "what is missing"
 was worth answering from its source rather than from memory. What it has and

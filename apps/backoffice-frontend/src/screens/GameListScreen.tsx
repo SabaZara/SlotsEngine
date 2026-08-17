@@ -69,11 +69,11 @@ export function GameListScreen({
             <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
               <div style={{ width: 200 }}>
                 <div style={{ fontSize: 11, color: t.muted, marginBottom: 4 }}>Game id — permanent</div>
-                <TextInput mono value={newId} onChange={setNewId} placeholder="cosmic-fruits" />
+                <TextInput label="Game id" mono value={newId} onChange={setNewId} placeholder="cosmic-fruits" />
               </div>
               <div style={{ width: 220 }}>
                 <div style={{ fontSize: 11, color: t.muted, marginBottom: 4 }}>Display name</div>
-                <TextInput value={newName} onChange={setNewName} placeholder="Cosmic Fruits" />
+                <TextInput label="Display name" value={newName} onChange={setNewName} placeholder="Cosmic Fruits" />
               </div>
               <Button variant="primary" onClick={() => void create()} disabled={!newId.trim() || !newName.trim()}>
                 Create

@@ -208,12 +208,17 @@ export function NumberInput({
   step,
   min,
   disabled,
+  label,
 }: {
   value: number;
   onChange: (value: number) => void;
   step?: number;
   min?: number;
   disabled?: boolean;
+  /** Names this specific input — see `TextInput`'s `label`. Required in
+   * practice for any row holding more than one control, because `Field`
+   * names the group and a group name is not announced on focus. */
+  label?: string;
 }) {
   return (
     <input
@@ -221,6 +226,7 @@ export function NumberInput({
       step={step}
       min={min}
       disabled={disabled}
+      {...(label ? { "aria-label": label } : {})}
       value={Number.isFinite(value) ? value : ""}
       onChange={(e) => {
         const parsed = Number(e.target.value);
@@ -236,16 +242,20 @@ export function Select<T extends string>({
   options,
   onChange,
   disabled,
+  label,
 }: {
   value: T;
   options: Array<{ value: T; label: string }>;
   onChange: (value: T) => void;
   disabled?: boolean;
+  /** Names this specific select — see `TextInput`'s `label`. */
+  label?: string;
 }) {
   return (
     <select
       value={value}
       disabled={disabled}
+      {...(label ? { "aria-label": label } : {})}
       onChange={(e) => onChange(e.target.value as T)}
       style={{ ...inputStyle, cursor: disabled ? "default" : "pointer" }}
     >

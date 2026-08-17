@@ -26,7 +26,14 @@ function BetOptionsEditor({ betOptions, onChange }: { betOptions: number[]; onCh
         {betOptions.map((bet, index) => (
           <div key={index} style={{ display: "flex", alignItems: "center", gap: 4 }}>
             <div style={{ width: 92 }}>
+              {/* Numbered rather than named after the stake it holds. The
+                  Remove button beside it says "Remove bet option 500"
+                  because it acts on a value that exists; this box is where
+                  a value is CHANGED, so labelling it "Bet option 500" would
+                  announce the old amount while the player types the new
+                  one. The position is the stable fact. */}
               <NumberInput
+                label={`Bet option ${index + 1}`}
                 value={bet}
                 step={100}
                 min={1}
@@ -82,6 +89,10 @@ function BonusModulesEditor({
           <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 8 }}>
             <div style={{ width: 170 }}>
               <Select
+                // Numbered, because the value IS the module id — naming it
+                // after the current selection would announce the old module
+                // while the designer picks a new one.
+                label={`Bonus module ${index + 1}`}
                 value={module.moduleId}
                 // A draft can name a module this build does not have — saved
                 // before the module was removed, or restored from an older
@@ -109,6 +120,7 @@ function BonusModulesEditor({
               <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: t.muted }}>
                 <div style={{ width: 84 }}>
                   <NumberInput
+                    label={`Trigger chance per spin for ${module.moduleId}`}
                     value={module.probabilityTrigger.chancePerSpin}
                     step={0.005}
                     min={0}
@@ -185,13 +197,18 @@ export function SettingsEditor({
     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 24 }}>
       <div>
         <Field label="Name">
-          <TextInput value={draft.name} onChange={(name) => onChange({ name })} />
+          <TextInput label="Name" value={draft.name} onChange={(name) => onChange({ name })} />
         </Field>
 
         <Field label="Grid" hint="Changing this reshapes every payline to match.">
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <div style={{ width: 78 }}>
+              {/* Named individually because `Field` names the GROUP. The
+                  "×" and "reels × rows" beside these boxes are visual cues
+                  a screen reader never reaches, so without these labels the
+                  two inputs are announced identically. */}
               <NumberInput
+                label="Reels"
                 value={draft.grid.reels}
                 step={1}
                 min={1}
@@ -201,6 +218,7 @@ export function SettingsEditor({
             <span style={{ color: t.faint }}>×</span>
             <div style={{ width: 78 }}>
               <NumberInput
+                label="Rows"
                 value={draft.grid.rows}
                 step={1}
                 min={1}
@@ -216,12 +234,19 @@ export function SettingsEditor({
           hint="A fraction like 0.95, never a percentage. Publishing is refused if the measured return misses this by more than 0.05."
         >
           <div style={{ width: 110 }}>
-            <NumberInput value={draft.rtpTarget} step={0.01} min={0} onChange={(rtpTarget) => onChange({ rtpTarget })} />
+            <NumberInput
+              label="RTP target"
+              value={draft.rtpTarget}
+              step={0.01}
+              min={0}
+              onChange={(rtpTarget) => onChange({ rtpTarget })}
+            />
           </div>
         </Field>
 
         <Field label="Payline win rule">
           <Select<PaylineWinRule>
+            label="Payline win rule"
             value={draft.paylineWinRule ?? "sum"}
             options={[
               { value: "sum", label: "Sum — every winning line pays" },
@@ -233,7 +258,7 @@ export function SettingsEditor({
 
         <Field label="Currency" hint="Display and denomination only — it does not partition wallets.">
           <div style={{ width: 110 }}>
-            <TextInput mono value={draft.currency ?? "USD"} onChange={(currency) => onChange({ currency })} />
+            <TextInput label="Currency" mono value={draft.currency ?? "USD"} onChange={(currency) => onChange({ currency })} />
           </div>
         </Field>
       </div>

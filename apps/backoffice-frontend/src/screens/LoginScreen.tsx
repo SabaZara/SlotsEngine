@@ -48,10 +48,10 @@ export function LoginScreen({ onAuthenticated }: { onAuthenticated: (user: Sessi
         {error && <Banner tone="bad">{error}</Banner>}
 
         <Field label="Email">
-          <TextInput type="email" value={email} onChange={setEmail} placeholder="admin@example.com" />
+          <TextInput label="Email" type="email" value={email} onChange={setEmail} placeholder="admin@example.com" />
         </Field>
         <Field label="Password">
-          <TextInput type="password" value={password} onChange={setPassword} />
+          <TextInput label="Password" type="password" value={password} onChange={setPassword} />
         </Field>
 
         <div style={{ marginTop: 16 }}>

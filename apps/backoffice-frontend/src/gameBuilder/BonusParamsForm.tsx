@@ -112,6 +112,7 @@ export function BonusParamsForm({
           Parameters <span style={{ color: t.faint }}>· this module publishes no schema, so these are raw JSON</span>
         </div>
         <TextInput
+          label="Parameters as raw JSON"
           mono
           value={JSON.stringify(params)}
           onChange={(value) => {
@@ -155,6 +156,7 @@ export function BonusParamsForm({
               hint={isSet ? spec.help : `${spec.help} Default: ${formatDefault(spec)}.`}
             >
               <TextInput
+                label={spec.label}
                 mono
                 value={text}
                 placeholder={formatDefault(spec)}
@@ -183,6 +185,7 @@ export function BonusParamsForm({
             hint={isSet ? spec.help : `${spec.help} Default: ${formatDefault(spec)}.`}
           >
             <NumberInput
+              label={spec.label}
               value={numeric}
               step={spec.type === "integer" ? 1 : 0.01}
               min={spec.min}

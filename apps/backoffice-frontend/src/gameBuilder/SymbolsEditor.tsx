@@ -60,7 +60,11 @@ function PaytableRow({
           <label key={count} style={{ display: "flex", alignItems: "center", gap: 5 }}>
             <span style={{ fontSize: 11, color: t.faint, fontFamily: t.mono }}>{count}×</span>
             <div style={{ width: 78 }}>
+              {/* The surrounding label's only text is "3x", and it wraps
+                  the input rather than pointing at it — so every count in
+                  the row would otherwise be announced identically. */}
               <NumberInput
+                label={`Payout for ${count} of a kind`}
                 value={paytable[count] ?? 0}
                 step={1}
                 min={0}
@@ -136,11 +140,20 @@ export function SymbolsEditor({
             >
               <div style={{ display: "flex", gap: 10, alignItems: "flex-start", flexWrap: "wrap" }}>
                 <div style={{ width: 160 }}>
-                  <TextInput mono value={symbol.symbol} onChange={(value) => update(index, { symbol: value })} />
+                  {/* Numbered rather than named after its own value: the
+                      field IS the symbol id, so labelling it with the
+                      current id announces the old one while it is edited. */}
+                  <TextInput
+                    label={`Symbol ${index + 1} id`}
+                    mono
+                    value={symbol.symbol}
+                    onChange={(value) => update(index, { symbol: value })}
+                  />
                   {duplicate && <div style={{ fontSize: 11, color: t.bad, marginTop: 4 }}>Duplicate id</div>}
                 </div>
                 <div style={{ width: 260 }}>
                   <Select
+                    label={`Role for ${symbol.symbol || `symbol ${index + 1}`}`}
                     value={symbol.role}
                     options={ROLES}
                     onChange={(role) =>
@@ -216,6 +229,7 @@ export function SymbolsEditor({
                     Multiplier
                     <div style={{ width: 70 }}>
                       <NumberInput
+                        label={`Wild multiplier for ${symbol.symbol || `symbol ${index + 1}`}`}
                         value={symbol.wildConfig?.multiplier ?? 1}
                         step={1}
                         min={1}
@@ -251,6 +265,7 @@ export function SymbolsEditor({
                     Module
                     <div style={{ width: 180 }}>
                       <Select
+                        label={`Bonus module for ${symbol.symbol || `symbol ${index + 1}`}`}
                         value={symbol.bonusTriggerConfig?.module ?? ""}
                         options={
                           bonusModules.length > 0
@@ -269,6 +284,7 @@ export function SymbolsEditor({
                     Needs at least
                     <div style={{ width: 62 }}>
                       <NumberInput
+                        label={`Symbols needed to trigger ${symbol.symbol || `symbol ${index + 1}`}`}
                         value={symbol.bonusTriggerConfig?.minCount ?? 3}
                         step={1}
                         min={1}

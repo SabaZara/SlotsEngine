@@ -148,10 +148,10 @@ export function UsersScreen({ currentUserId }: { currentUserId: string }) {
           <div style={{ border: `1px solid ${t.borderStrong}`, borderRadius: t.radiusSm, padding: 14, marginBottom: 16 }}>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 14 }}>
               <Field label="Email">
-                <TextInput type="email" value={newEmail} onChange={setNewEmail} placeholder="designer@example.com" />
+                <TextInput label="Email" type="email" value={newEmail} onChange={setNewEmail} placeholder="designer@example.com" />
               </Field>
               <Field label="Password" hint={`At least ${MIN_PASSWORD_LENGTH} characters. Length matters more than symbols.`}>
-                <TextInput type="password" value={newPassword} onChange={setNewPassword} />
+                <TextInput label="Password" type="password" value={newPassword} onChange={setNewPassword} />
               </Field>
             </div>
             <Field label="Roles">
@@ -264,7 +264,15 @@ export function UsersScreen({ currentUserId }: { currentUserId: string }) {
               {resetting === user.userId && (
                 <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10 }}>
                   <div style={{ width: 240 }}>
+                    {/* Named rather than relying on the placeholder, which
+                        disappears the moment a character is typed — so a
+                        screen reader user loses the only description of the
+                        field exactly when they start using it. The user's
+                        email is in the name because this row repeats per
+                        user and "New password" alone would be ambiguous
+                        about whose. */}
                     <TextInput
+                      label={`New password for ${user.email}`}
                       type="password"
                       value={resetPassword}
                       onChange={setResetPassword}
