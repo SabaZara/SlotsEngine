@@ -12,8 +12,16 @@ than deleted because in almost every case the *reasoning* outlived the fix.
 
 ## Where this stands
 
-**Everything testable is tested; what remains is mostly infrastructure that
-needs a decision rather than code.**
+**Everything testable is tested. What remains is a provisioning decision, a
+storage decision, and a short list of presentation work nobody is blocked
+on.**
+
+The frontend is no longer the thin part. As of 2026-08-17 it carries a Pixi
+renderer, a phase model, artwork, per-game themes, audio, autoplay, a drawn
+wheel bonus and a rotate prompt — and is **larger in source than the
+reference client** (3,757 lines against 2,417) with roughly 38x the test
+coverage (4,189 lines of tests against 110). The reference modules still unbuilt here are deliberate
+non-decisions rather than gaps; section O names each and why.
 
 - **27 bugs found and fixed** (F1–F27), each recorded below with *how it was
   found*. **Not one was found by a test that already passed** — the closest
@@ -71,8 +79,8 @@ needs a decision rather than code.**
   is not a criticism of them — a test that never fails is doing its job as a
   regression guard — but it does mean the suite's value here has been in the
   *writing*, and its value from here on is in the *guarding*.
-- **1467 tests**, of which 53 are conformance cases run against real MongoDB
-  and 59 are React component tests.
+- **1623 tests**, of which 53 are conformance cases run against real MongoDB
+  and 86 are React component tests.
 - **Sections A, B and C are closed** — no source module with meaningful
   logic is without a direct test. **The React components are no longer the
   exception**: section C's stopping point ("needs a DOM environment and a
@@ -87,6 +95,24 @@ needs a decision rather than code.**
   output**, so seven output tests passed against a clock-derived seed.
 - **The deploy pipeline is built and green** (item 1). It builds five images
   per commit and stops, honestly, at the point where a server would be.
+
+  It was **red for six consecutive runs on 2026-08-17**, and the fix is worth
+  recording because the first attempt was wrong. Jobs died in "Set up job" —
+  before checkout, before any build — because the runner could not download
+  the `docker/*` action tarballs from codeload.github.com: 503, then 429,
+  giving up after three internal attempts. The first theory was contention
+  between five simultaneous matrix jobs, so `max-parallel: 3` was added; the
+  next run disproved it, with **three separate** docker actions failing and
+  the one job that succeeded simply being the one that ran last. The actions
+  are now plain `docker` CLI calls — the runner already ships
+  `/usr/bin/docker` with buildx — which removes the network dependency
+  rather than shrinking it. Four consecutive green runs since.
+
+  One consequence caught before it shipped: `type=gha` caching needs
+  `ACTIONS_RUNTIME_TOKEN` and `ACTIONS_CACHE_URL`, which `build-push-action`
+  injected for free and a bare CLI call does not have — so it would have
+  failed **silently** and every build would have been cold. Now a registry
+  cache, which needs only the `docker login` the job already does.
 
 The three things standing between this and a running service, in order:
 
@@ -1425,9 +1451,33 @@ does not fire pins something real.
 | # | What | Why it is next |
 |---|---|---|
 | ~~1~~ | ~~**A wheel is never drawn**~~ — **shipped 2026-08-17.** `readBonusPanel` now checks the wheel's shape *before* `resolved`, which is the whole fix: `wheel` resolves in `start()`, so its state always arrived already-resolved and matched that branch first. The exception is safe because the rule `resolved`-first exists for — not leaving a settled round clickable — cannot be violated by a module that offers no control. Drawn as a CSS `conic-gradient` rather than a canvas: this panel is already an HTML overlay, and `jsdom` returns null for `getContext`, so a canvas would make every wedge untestable. The reveal is a CSS transition rather than a rAF loop, which sidesteps the hidden-tab throttling that `shouldForceSettle` exists to recover from — a transition is compositor-driven, so a hidden tab simply arrives at the finished state. 19 tests on the geometry (including a **round trip** proving the settled rotation points at the segment the server chose, across seven wheel sizes), 7 on the view, 11 on the panel; **all 4 mutations caught**, including reverting to the shipped bug and inverting the rotation direction. |
-| 1b | ~~placeholder~~ | The clearest gap the reference survey found, and the only one on a **shipped, default-game** module. `reference-5x3` carries a `wheel` bonus, and `readBonusPanel` dispatches on view shape: a wheel view carries `segmentIndex`/`multiplier`/`segments`/`totalWin` — neither `remaining` nor `tileCount` — so it matches nothing. **Not a blank overlay, and that is worth knowing before anyone panics**: `wheel` is resolved-on-start, so `status === "resolved"` matches first and the player correctly sees "Bonus complete" with the amount won. The money is right and the feature is reachable; what is missing is the wheel itself — the segment table is sent, and the client shows a number instead of the thing that produced it. The reference's `wheelAngleMath.ts` is 17 lines and directly adaptable (`computeWheelFinalRotation`, with segment 0 at 12 o'clock); its `WheelBonusView` is the Pixi half. |
-| 2 | Object storage and an upload button | Only worth doing when someone needs to host art *here* rather than at a URL they already have. Read F25, F26 and the reference's `repair-corrupted-asset-urls.ts` before starting: signing introduces a read shape that differs from the write shape, which is exactly the asymmetry this design currently does not have, and the reference shipped a compounding data-corruption bug on it. |
-| 3 | Per-input names on multi-control rows | `Field` now names the *row* (`role="group"`), and `TextInput` accepts a `label`, but `SettingsEditor`'s multi-control rows do not pass one — so "Grid"'s reels and rows boxes are still anonymous to a screen reader. The primitive work is done; this is the caller-by-caller half, on screens with no tests of their own. |
+| ~~2~~ | ~~**Autoplay**~~ — **shipped 2026-08-17.** A bounded run of spins, built as pure state rather than a widget: the reference puts the loop inside a Pixi component, which makes it reachable only by standing up a renderer, while every decision here is a function of the phase and a counter. Deliberately **no unlimited option** — this engine has no loss limit and no responsible-gambling backing, so "spin until the money runs out" is a different product; that is the one row here a non-engineer should revisit. Waits out a bonus by resuming on `idle`, so it needs to know nothing about bonuses. 28 tests, **6 of 6 mutations caught** — see the note below on the one that survived first. |
+| ~~3~~ | ~~**Per-game themes**~~ — **shipped 2026-08-17.** Seven colours on the game definition, edited in a Theme tab, carried through publish and served by the projection — the same path `assets` takes, including being removable, so F25 and F26 cannot recur in a new field. Much smaller than the reference's `VisualTheme` (radii, spacing, glow alphas, type roles) because this client draws chrome with CSS, where those already live; duplicating them into game data would create two sources for one fact and the database copy would win silently. **The colour rule is a security boundary, not a formatting preference** — these values are interpolated into a stylesheet, and CSS accepts `url(...)` and `;`-escapes, so it is a hex shape-match rather than anything that reasons about CSS. Guarded twice on purpose: the projection sanitizes, and the client re-checks, because the client is reachable from a cached payload that never passed through the projection. 39 tests, **6 of 6 mutations caught**. |
+| ~~4~~ | ~~**Music and a spin bed**~~ — **shipped 2026-08-17.** Two optional URLs on `GameAssets`, driven off the phase model. The playing is four lines of `HTMLAudioElement`; what is split out and tested is **when** each track should run, because a bed still looping after the reels stop is as wrong as one that never starts and neither raises an error — a tester with the volume down notices neither. `revealing` counts as spinning, which is the subtlety: the result is known but the reels are moving, so cutting there stops the sound partway through the motion it accompanies. Muting pauses rather than only setting `.muted`, and unmuting restores *what the phase asks for* rather than everything. 29 tests, **7 of 7 mutations caught**. |
+| ~~5~~ | ~~**Rotate-device prompt**~~ — **shipped 2026-08-17.** Portrait **and** narrow, because a portrait tablet has plenty of room and a tall desktop window is still a desktop — prompting either covers a game the player can already see, which is the worse of the two failures. `matchMedia("(orientation: portrait)")` rather than comparing width to height: the comparison only re-evaluates when something else triggers a resize, while the media query fires on the rotation itself, which is the moment the overlay must clear. Does **not** gate play — `computeGridMetrics` already fits the grid to the tighter axis, so nothing a player is paid on can be cropped. 12 tests, **6 of 6 mutations caught**. |
+| 6 | Object storage and an upload button | Only worth doing when someone needs to host art *here* rather than at a URL they already have. Read F25, F26 and the reference's `repair-corrupted-asset-urls.ts` before starting: signing introduces a read shape that differs from the write shape, which is exactly the asymmetry this design currently does not have, and the reference shipped a compounding data-corruption bug on it. |
+| 7 | Per-input names on multi-control rows | `Field` now names the *row* (`role="group"`), and `TextInput` accepts a `label`, but `SettingsEditor`'s multi-control rows do not pass one — so "Grid"'s reels and rows boxes are still anonymous to a screen reader. The primitive work is done; this is the caller-by-caller half, on screens with no tests of their own. |
+
+**A shipped accessibility defect, fixed 2026-08-17 and recorded because it
+had no F-number and would otherwise leave no trace.** `Field` wrapped its
+children in a `<label>`, which was wrong in two independent ways, neither
+visible on screen. Everything inside a label becomes the control's
+accessible name, so a hinted field announced as "BackgroundDrawn behind the
+reels. Empty means the built-in gradient." — the explanation read out as the
+field's identity on every focus. And a wrapping label binds to exactly ONE
+control, while half these rows hold several ("Grid" is a reels box and a
+rows box), so the label silently named the first and left the rest
+anonymous. No hint-level fix addresses the second.
+
+Now `role="group"` with `aria-labelledby` for the row and
+`aria-describedby` for the hint, plus an optional `label` on `TextInput` so
+an individual control carries its own name. `Field` had **no tests at all**,
+which is why this shipped; it has four now, and all three mutations are
+caught including reverting to the `<label>` wrapper. The `AssetsEditor`
+tests moved from `getByLabelText` to `getByRole("textbox", { name })`, which
+is the better assertion anyway — it pins the accessible name of the control
+a player focuses, which is exactly what regressed. Row 7 above is the
+remaining half.
 
 **Surveyed against the reference on 2026-08-17**, since "what is missing"
 was worth answering from its source rather than from memory. What it has and
