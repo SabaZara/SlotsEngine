@@ -288,6 +288,48 @@ describe("paging", () => {
     assert.equal(response.statusCode, 400);
     assert.equal(response.json().error, "invalid_cursor");
   });
+
+  it("returns every row when several share a timestamp, paged one at a time", async function () {
+    if (!client) return this.skip(skipReason);
+
+    // The failure this pins is silent: `createdAt` is millisecond
+    // resolution, so concurrent play ties on it, and a cursor of
+    // `createdAt < last` skips every row in that millisecond — including
+    // ones no page returned. Against real Mongo rather than a stand-in
+    // because the sort order under a tie is the database's behaviour, and
+    // that is exactly what is being relied on.
+    const operator = "tie-test-operator";
+    const sameInstant = new Date("2026-06-01T09:00:00.000Z");
+    const ids = ["tie-a", "tie-b", "tie-c"];
+
+    await db.collection("transactions").insertMany(
+      ids.map((transactionId) => ({
+        transactionId,
+        operatorId: operator,
+        playerId: "tie-player",
+        type: "debit",
+        amount: 100,
+        balanceAfter: 900,
+        status: "completed",
+        createdAt: sameInstant,
+      })),
+    );
+
+    // Page size 1, so every step has to cross the tie rather than swallow
+    // it inside one page.
+    const seen: string[] = [];
+    let cursor: string | undefined;
+    for (let guard = 0; guard < 10; guard += 1) {
+      const query = `?operatorId=${operator}&limit=1${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`;
+      const body = (await report(query)).json();
+      seen.push(...body.transactions.map((t: { transactionId: string }) => t.transactionId));
+      if (!body.hasMore) break;
+      cursor = body.nextCursor;
+    }
+
+    assert.deepEqual([...seen].sort(), ids, "every tied row must appear on exactly one page");
+    assert.equal(new Set(seen).size, seen.length, "and none of them twice");
+  });
 });
 
 describe("the CSV export", () => {

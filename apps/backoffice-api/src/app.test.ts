@@ -895,3 +895,36 @@ describe("bonus module registry", () => {
     );
   });
 });
+
+describe("cross-origin exposure", () => {
+  /**
+   * The backoffice UI is served from a different origin than this API
+   * (9106 vs 9105), so a browser only hands JavaScript the CORS-safelisted
+   * response headers plus whatever `Access-Control-Expose-Headers` names.
+   *
+   * This is here because the omission is invisible everywhere else. The
+   * header still travels on the wire, still shows in devtools, and every
+   * server-side test that asserts on it passes — `app.inject()` is not a
+   * browser and applies no CORS rules at all. The only place the defect
+   * appears is a real browser, where `headers.get("x-truncated")` returns
+   * null and a truncated financial export reports itself as complete.
+   */
+  it("lets a browser read the truncation header it sends", async () => {
+    const { app } = await setup();
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/health",
+      headers: { origin: "http://localhost:9104" },
+    });
+
+    const exposed = String(response.headers["access-control-expose-headers"] ?? "")
+      .split(",")
+      .map((h) => h.trim().toLowerCase());
+
+    assert.ok(
+      exposed.includes("x-truncated"),
+      "x-truncated must be exposed, or the CSV export's truncation warning can never fire in a browser",
+    );
+  });
+});

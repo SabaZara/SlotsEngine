@@ -56,7 +56,17 @@ export async function buildApp(db: Db, logger: Logger): Promise<FastifyInstance>
     .split(",")
     .map((o) => o.trim())
     .filter(Boolean);
-  void app.register(cors, { origin: origins, credentials: true });
+  // `exposedHeaders` is not decoration. The backoffice UI is served from a
+  // different origin than this API (9106 vs 9105), so every read is
+  // cross-origin — and a browser hands JavaScript only the CORS-safelisted
+  // response headers unless the server names the others here. Without
+  // `x-truncated` on this list the header still travels on the wire and is
+  // still visible in devtools, but `response.headers.get("x-truncated")`
+  // returns null, so a CSV export that hit the 50,000-row ceiling reports
+  // itself as complete. That is the precise failure the truncation signal
+  // was built to prevent, and it was invisible to the suite because the
+  // screen's test stubs the fetch and never reads a real header.
+  void app.register(cors, { origin: origins, credentials: true, exposedHeaders: ["x-truncated"] });
 
   // A global ceiling, generous enough that ordinary admin work never
   // notices it. The point is not to shape traffic — it is that an

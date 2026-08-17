@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   InvalidReportQueryError,
   buildTransactionFilter,
+  formatCursor,
   clampLimit,
   parseCursor,
   parseDateRange,
@@ -47,6 +48,26 @@ describe("parseDateRange", () => {
     } catch (err) {
       assert.equal((err as InvalidReportQueryError).code, "invalid_from_date");
     }
+  });
+
+  it("covers the whole of the last day, which is what 'inclusive' means to whoever typed it", () => {
+    // `new Date("2026-03-31")` is midnight, and the filter applies `$lte`,
+    // so taking a date-only bound literally drops every transaction on the
+    // final day. A March report asked for as 03-01..03-31 would silently
+    // be missing March 31st — and its totals would still tie against the
+    // rows shown, so nothing on screen suggests a day is absent.
+    const range = parseDateRange("2026-03-01", "2026-03-31");
+    assert.equal(range.to?.toISOString(), "2026-03-31T23:59:59.999Z");
+
+    const lateOnTheLastDay = new Date("2026-03-31T14:30:00.000Z");
+    assert.ok(range.to && lateOnTheLastDay <= range.to, "an afternoon transaction on the last day is inside the range");
+  });
+
+  it("leaves an explicit timestamp exactly where the caller put it", () => {
+    // Only a date-only string is widened. Someone who wrote a time has
+    // said what they mean, and moving it would be the bug.
+    const range = parseDateRange(undefined, "2026-03-31T09:00:00.000Z");
+    assert.equal(range.to?.toISOString(), "2026-03-31T09:00:00.000Z");
   });
 
   it("refuses a reversed range rather than returning nothing", () => {
@@ -108,8 +129,23 @@ describe("parseCursor", () => {
     assert.equal(parseCursor(""), undefined);
   });
 
-  it("parses an ISO timestamp from a previous page", () => {
-    assert.equal(parseCursor("2026-03-15T12:00:00.000Z")?.toISOString(), "2026-03-15T12:00:00.000Z");
+  it("parses the timestamp and the id a previous page stopped on", () => {
+    const cursor = parseCursor("2026-03-15T12:00:00.000Z|tx-7");
+    assert.equal(cursor?.createdAt.toISOString(), "2026-03-15T12:00:00.000Z");
+    assert.equal(cursor?.transactionId, "tx-7");
+  });
+
+  it("still reads a bare timestamp, so a page open across a deploy is not an error", () => {
+    const cursor = parseCursor("2026-03-15T12:00:00.000Z");
+    assert.equal(cursor?.createdAt.toISOString(), "2026-03-15T12:00:00.000Z");
+    assert.equal(cursor?.transactionId, "");
+  });
+
+  it("keeps an id containing a separator intact rather than truncating it", () => {
+    // Split on the FIRST `|` only. An ISO timestamp cannot contain one, so
+    // everything after the first is the id however many it holds — a
+    // greedy split would silently shorten the id and break the tie-break.
+    assert.equal(parseCursor("2026-03-15T12:00:00.000Z|tx|odd|id")?.transactionId, "tx|odd|id");
   });
 
   it("refuses a mangled cursor rather than serving a silently empty page", () => {
@@ -117,6 +153,15 @@ describe("parseCursor", () => {
     // Date`, which matches nothing — so paging would end early and a
     // caller looping until `hasMore` is false would stop mid-report.
     assert.throws(() => parseCursor("not-a-cursor"), InvalidReportQueryError);
+  });
+
+  it("round-trips what formatCursor writes", () => {
+    // The two halves are a pair; a change to either that is not made to
+    // the other breaks paging silently, which is what this pins.
+    const at = new Date("2026-03-15T12:00:00.000Z");
+    const parsed = parseCursor(formatCursor(at, "tx-42"));
+    assert.equal(parsed?.createdAt.getTime(), at.getTime());
+    assert.equal(parsed?.transactionId, "tx-42");
   });
 });
 
@@ -150,21 +195,59 @@ describe("buildTransactionFilter", () => {
     // for it — so when the range ends before the cursor, the range wins.
     const from = new Date("2026-03-01T00:00:00.000Z");
     const to = new Date("2026-03-31T00:00:00.000Z");
-    const before = new Date("2026-05-01T00:00:00.000Z");
+    const before = { createdAt: new Date("2026-05-01T00:00:00.000Z"), transactionId: "tx-1" };
 
     const filter = buildTransactionFilter({ range: { from, to }, before }).createdAt as Record<string, Date>;
 
     assert.equal(filter.$gte, from, "the lower bound is untouched");
-    assert.equal(filter.$lt?.toISOString(), to.toISOString(), "the tighter of the two bounds applies");
+    assert.equal(filter.$lte?.toISOString(), to.toISOString(), "the tighter of the two bounds applies");
   });
 
-  it("uses the cursor when it is tighter than the range", () => {
+  it("pages past a row without skipping others sharing its millisecond", () => {
+    // The defect this exists for. `createdAt` is written as `new Date()`,
+    // so it is millisecond-resolution and concurrent transactions tie on
+    // it. A cursor of `createdAt < last` excludes EVERY row in that
+    // millisecond, including ones the previous page never returned — a
+    // ledger movement that appears on no page of a money report, with
+    // totals that still tie against the rows shown.
+    const at = new Date("2026-03-15T12:00:00.001Z");
+    const filter = buildTransactionFilter({ range: {}, before: { createdAt: at, transactionId: "tx-B" } });
+
+    const branches = filter.$or as Array<Record<string, unknown>>;
+    assert.ok(Array.isArray(branches), "the cursor clause is a disjunction, not a single bound");
+    assert.equal(branches.length, 2);
+
+    // Strictly older...
+    assert.deepEqual(branches[0], { createdAt: { $lt: at } });
+    // ...or the same instant, with an id that sorts after the cursor's.
+    assert.deepEqual(branches[1], { createdAt: at, transactionId: { $lt: "tx-B" } });
+  });
+
+  it("keeps the lower bound on both branches, so a cursor cannot escape the range", () => {
+    // The `$or` replaces the top-level `createdAt` clause, so a `from`
+    // left off either branch would let page two return rows from before
+    // the range the caller asked for.
+    const from = new Date("2026-03-01T00:00:00.000Z");
+    const at = new Date("2026-03-15T12:00:00.001Z");
+
+    const filter = buildTransactionFilter({ range: { from }, before: { createdAt: at, transactionId: "tx-B" } });
+    const branches = filter.$or as Array<Record<string, Record<string, Date>>>;
+
+    assert.equal(branches[0].createdAt.$gte, from, "the older-rows branch stays inside the range");
+    // The tie branch pins createdAt to one exact instant, which is already
+    // inside the range — a `$gte` there would be redundant, not missing.
+    assert.equal(filter.createdAt, undefined, "the bound is not also applied at the top level, where it would conflict");
+  });
+
+  it("drops the tie-break when the range ends below the cursor", () => {
+    // The cursor's own instant is out of scope entirely, so there is no
+    // tie left to break and a plain bound is the honest query.
     const to = new Date("2026-03-31T00:00:00.000Z");
-    const before = new Date("2026-03-15T00:00:00.000Z");
+    const before = { createdAt: new Date("2026-05-01T00:00:00.000Z"), transactionId: "tx-1" };
 
-    const filter = buildTransactionFilter({ range: { to }, before }).createdAt as Record<string, Date>;
+    const filter = buildTransactionFilter({ range: { to }, before });
 
-    assert.equal(filter.$lt?.toISOString(), before.toISOString());
-    assert.equal(filter.$lte, undefined, "the looser bound is removed rather than left to coexist");
+    assert.equal(filter.$or, undefined);
+    assert.equal((filter.createdAt as Record<string, Date>).$lte?.toISOString(), to.toISOString());
   });
 });

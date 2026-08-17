@@ -26,6 +26,12 @@ export interface DateRange {
   to?: Date;
 }
 
+/** `YYYY-MM-DD` with no time part — the form the report UI asks for, and
+ * the only form that gets widened to cover its whole day. */
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 /** Parses an optional ISO date pair, throwing rather than silently
  * excluding everything. */
 export function parseDateRange(from?: string, to?: string): DateRange {
@@ -44,7 +50,18 @@ export function parseDateRange(from?: string, to?: string): DateRange {
     if (Number.isNaN(parsed.getTime())) {
       throw new InvalidReportQueryError("invalid_to_date", `'${to}' is not a valid ISO date.`);
     }
-    range.to = parsed;
+    // A date with no time means the whole of that day, because that is what
+    // the person typing it means. `new Date("2026-03-31")` is midnight, and
+    // the filter applies `$lte`, so taking it literally silently drops every
+    // transaction on the last day of the range — a March report asked for as
+    // `2026-03-01`..`2026-03-31` would be missing March 31st entirely, with
+    // totals that still tie against the rows shown and so give no sign
+    // anything is absent. Same family as the `Invalid Date` case above: the
+    // wrong answer is the dangerous one precisely because it looks right.
+    //
+    // Only a date-only string is widened. An explicit timestamp is a caller
+    // who has said what they mean, and moving it would be the mistake.
+    range.to = DATE_ONLY.test(to) ? new Date(parsed.getTime() + DAY_MS - 1) : parsed;
   }
 
   // Refused rather than returned as an empty result, for the same reason
@@ -85,25 +102,61 @@ export function clampLimit(requested: string | undefined, defaultLimit: number, 
   return Math.min(maxLimit, Math.max(1, Math.floor(parsed)));
 }
 
-/** Parses the opaque paging cursor — an ISO timestamp from a previous
- * page's `nextCursor`. Refused when unparseable, so a mangled cursor is an
- * error rather than a silently empty next page. */
-export function parseCursor(cursor: string | undefined): Date | undefined {
+/**
+ * Where a page stopped: the last row's timestamp *and* its id.
+ *
+ * The id is the half that keeps rows from disappearing. `createdAt` is
+ * written as `new Date()`, so it is only millisecond-resolution and two
+ * transactions genuinely collide on it under concurrent play. A cursor that
+ * carried the timestamp alone had to ask for `createdAt < cursor`, which
+ * skips *every* row sharing that millisecond — including ones the previous
+ * page never returned. A money report would silently omit a real ledger
+ * movement, with totals that still tie against the rows shown.
+ */
+export interface Cursor {
+  createdAt: Date;
+  transactionId: string;
+}
+
+/** Renders a cursor for the wire. The `|` separator is safe because an ISO
+ * timestamp cannot contain one, so the split below is unambiguous no matter
+ * what an id holds. */
+export function formatCursor(createdAt: Date, transactionId: string): string {
+  return `${createdAt.toISOString()}|${transactionId}`;
+}
+
+/**
+ * Parses the opaque paging cursor from a previous page's `nextCursor`.
+ * Refused when unparseable, so a mangled cursor is an error rather than a
+ * silently empty next page.
+ *
+ * A bare timestamp with no `|` is still accepted, as a cursor issued by the
+ * previous single-key version of this route: rejecting it would turn a page
+ * someone had open across a deploy into an error. It pages by timestamp
+ * alone and so can still skip a tie — the tie-break needs an id the old
+ * cursor never carried.
+ */
+export function parseCursor(cursor: string | undefined): Cursor | undefined {
   if (cursor === undefined || cursor === "") return undefined;
 
-  const parsed = new Date(cursor);
+  const separator = cursor.indexOf("|");
+  const timestamp = separator === -1 ? cursor : cursor.slice(0, separator);
+  const transactionId = separator === -1 ? "" : cursor.slice(separator + 1);
+
+  const parsed = new Date(timestamp);
   if (Number.isNaN(parsed.getTime())) {
     throw new InvalidReportQueryError("invalid_cursor", "cursor must be an ISO date from a previous page's nextCursor.");
   }
-  return parsed;
+  return { createdAt: parsed, transactionId };
 }
 
 export interface TransactionFilterInput {
   operatorId?: string;
   playerId?: string;
   range: DateRange;
-  /** Exclusive upper bound for keyset paging — strictly older than this. */
-  before?: Date;
+  /** Where the previous page stopped. Everything strictly after it in the
+   * sort order is excluded — see the tie-break note below. */
+  before?: Cursor;
 }
 
 /**
@@ -113,6 +166,14 @@ export interface TransactionFilterInput {
  * combined rather than one overwriting the other — a cursor must not widen
  * a range the caller asked for. Getting this wrong would make page two of
  * a March report include April.
+ *
+ * The cursor clause is an `$or`, not a plain `$lt`, and that is the whole
+ * point of it. The sort is `createdAt` descending then `transactionId`
+ * descending, so "after the cursor" means *either* strictly older, *or* the
+ * same instant with a smaller id. A plain `createdAt < cursor` skips every
+ * row sharing the cursor's millisecond, and `createdAt` has only
+ * millisecond resolution, so concurrent transactions collide and one
+ * silently never appears on any page.
  */
 export function buildTransactionFilter(input: TransactionFilterInput): Record<string, unknown> {
   const filter: Record<string, unknown> = {};
@@ -122,11 +183,28 @@ export function buildTransactionFilter(input: TransactionFilterInput): Record<st
   const createdAt: Record<string, Date> = {};
   if (input.range.from) createdAt.$gte = input.range.from;
   if (input.range.to) createdAt.$lte = input.range.to;
+
   if (input.before) {
-    // The tighter of the two wins. `$lt` and `$lte` can coexist in one
-    // Mongo query, but relying on that would leave the intent unstated.
-    createdAt.$lt = input.range.to && input.range.to < input.before ? input.range.to : input.before;
-    if (createdAt.$lt && createdAt.$lte) delete createdAt.$lte;
+    // The range still wins where it is tighter — a cursor must never widen
+    // what the caller asked for.
+    const ceiling = input.range.to && input.range.to < input.before.createdAt ? input.range.to : input.before.createdAt;
+
+    if (ceiling < input.before.createdAt) {
+      // The range cut in below the cursor, so the cursor's own instant is
+      // already out of scope and there is no tie left to break.
+      createdAt.$lte = ceiling;
+    } else {
+      // The upper bound now lives entirely inside the `$or`, so it is
+      // removed from the shared clause — leaving both would constrain
+      // `createdAt` twice at the top level, and the second would win.
+      delete createdAt.$lte;
+      const lowerBound = createdAt.$gte ? { $gte: createdAt.$gte } : {};
+      filter.$or = [
+        { createdAt: { ...lowerBound, $lt: ceiling } },
+        { createdAt: ceiling, transactionId: { $lt: input.before.transactionId } },
+      ];
+      return filter;
+    }
   }
 
   if (Object.keys(createdAt).length > 0) filter.createdAt = createdAt;

@@ -6,6 +6,7 @@ import {
   InvalidReportQueryError,
   buildTransactionFilter,
   clampLimit,
+  formatCursor,
   parseCursor,
   parseDateRange,
 } from "./query.js";
@@ -129,10 +130,14 @@ export function registerReportRoutes(app: FastifyInstance, db: Db): void {
       // subsequent page, so a report can show a transaction twice or not at
       // all. A cursor is stable against concurrent writes, which a money
       // report has to be.
+      // Sorted by the same compound key the cursor carries. `createdAt`
+      // alone is not a total order — it is millisecond-resolution, so
+      // concurrent transactions tie — and a keyset cursor over a
+      // non-deterministic order drops rows. `transactionId` breaks the tie.
       const docs = await db
         .collection("transactions")
         .find(filter, { projection: { _id: 0 } })
-        .sort({ createdAt: -1 })
+        .sort({ createdAt: -1, transactionId: -1 })
         .limit(limit + 1)
         .toArray();
 
@@ -146,7 +151,9 @@ export function registerReportRoutes(app: FastifyInstance, db: Db): void {
         hasMore,
         // Only present when there IS another page, so a caller can loop on
         // its presence rather than comparing counts.
-        ...(hasMore && last ? { nextCursor: new Date(last.createdAt as Date).toISOString() } : {}),
+        ...(hasMore && last
+          ? { nextCursor: formatCursor(new Date(last.createdAt as Date), String(last.transactionId)) }
+          : {}),
       });
     },
   );

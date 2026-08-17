@@ -144,7 +144,16 @@ export const COLLECTIONS: CollectionDefinition[] = [
         options: { unique: true, name: "operator_transaction_idempotency" },
       },
       { keys: { roundId: 1 }, options: { name: "roundId_lookup" } },
-      { keys: { operatorId: 1, playerId: 1, createdAt: -1 }, options: { name: "operator_player_statement" } },
+      // `transactionId` is the last key because the report pages by a
+      // keyset cursor of `(createdAt, transactionId)` and sorts by both.
+      // Without it here the sort is only *partly* served by the index and
+      // Mongo finishes it in memory — which is a 32MB ceiling the day an
+      // operator's statement grows past it, and a report that starts
+      // erroring rather than one that starts being slow.
+      {
+        keys: { operatorId: 1, playerId: 1, createdAt: -1, transactionId: -1 },
+        options: { name: "operator_player_statement" },
+      },
     ],
   },
   {

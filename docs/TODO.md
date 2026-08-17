@@ -31,7 +31,7 @@ reference client** (3,757 lines against 2,417) with roughly 38x the test
 coverage (4,189 lines of tests against 110). The reference modules still unbuilt here are deliberate
 non-decisions rather than gaps; section O names each and why.
 
-- **29 bugs found and fixed** (F1–F29), each recorded below with *how it was
+- **32 bugs found and fixed** (F1–F32), each recorded below with *how it was
   found*. **Not one was found by a test that already passed** — the closest
   is F17, where a mutation of existing code exposed a stand-in that had been
   silently ignoring an operator. Counted:
@@ -40,6 +40,7 @@ non-decisions rather than gaps; section O names each and why.
   |---|---:|---|
   | Writing the *first* test for a file | 9 | F13, F15, F16, F18–F23 |
   | Running the real stack | 9 | F1, F6–F12, F25 |
+  | **Reviewing a finished commit** | **3** | **F30, F31, F32** |
   | CI, on a clean checkout | 2 | F3, F4 |
   | Reading the reference repo | 2 | F5, F14 |
   | Mutation-testing existing code | 1 | F17 |
@@ -48,6 +49,17 @@ non-decisions rather than gaps; section O names each and why.
   | **Reading configuration** | **1** | **F27** |
   | **Reading a shared component** | **1** | **F28** |
   | **Reading the diffstat of my own commit** | **1** | **F29** |
+
+  F30–F32 are the first three found by **reviewing work that was already
+  finished, tested and green** — the reporting screens shipped with a
+  passing suite, and all three defects sat underneath it. They share one
+  shape worth naming: each produces a *plausible wrong number* rather than
+  an error. A report missing a day, a report missing a row, and an
+  incomplete export that reports itself complete are all internally
+  consistent, so nothing on screen suggests anything is wrong. That is the
+  argument for reviewing money-path code even when the tests are green, and
+  for testing the seam between layers rather than each layer alone: F31 in
+  particular was correct on both sides of a boundary that no test crosses.
 
   The same question that produced F24 — *how does a real user reach this?*
   — later produced item 10, which is not a bug row because nothing was
@@ -235,6 +247,9 @@ existed matters more than the fix, and that reasoning is easy to lose.
 
 | # | What was wrong | How it was found |
 |---|---|---|
+| F32 | **The transaction report silently omitted rows, and its totals still tied.** Keyset paging used a cursor of the last row's `createdAt` alone, applied as `createdAt < cursor`. But `createdAt` is written as `new Date()` — millisecond resolution — so concurrent play genuinely ties on it, and a strictly-less-than bound skips **every** row sharing that millisecond, including ones the previous page never returned. A ledger movement then appears on *no* page of a money report. The failure is invisible from the inside: the summary is a separate aggregate over the same filter, so it counts the missing row and the reconciler sees totals that are internally consistent and simply do not match the rows. The cursor is now the compound key `(createdAt, transactionId)`, the filter an `$or` of "strictly older" or "same instant, smaller id", and the sort names both — a total order, which is what keyset paging requires and `createdAt` alone never was. The `operator_player_statement` index grew a `transactionId` key to match, or the sort would be only partly index-served and finish in memory against a 32MB ceiling. | Reviewing the commit that added the reporting screens. The route's own comment argues — correctly — that `skip`/`offset` lets a concurrent write shift every later page, and cursors were chosen to prevent exactly that; the tie case is the same class of defect one level down, in the fix. **Nothing could have failed:** the existing paging tests use fixture rows with distinct timestamps, so the tie never arises, and the assertion "page two does not repeat page one" stays true when a row is dropped — losing a row satisfies it. Pinned now by a live-Mongo test that inserts three rows sharing one instant and pages them one at a time; mutation-verified against the real database, where removing the tie-break from the sort fails it. |
+| F31 | **`x-truncated` was sent, and no browser could read it.** The CSV export refuses to serve more than 50,000 rows and announces the cut in a response header, so the screen can warn that a financial export is incomplete — the header exists solely to prevent someone reconciling against a file that looks whole. But the backoffice UI is served from a different origin than its API (9106 vs 9105), and a browser hands JavaScript only the CORS-safelisted response headers plus whatever `Access-Control-Expose-Headers` names. That option was never set, so `headers.get("x-truncated")` returned `null` in every real browser, `truncated` was always `false`, and the warning could not fire. The one signal guarding the worst failure of the route was itself the thing that was broken. | Reviewing the reporting commit, by asking what the frontend does with the header rather than whether the backend sends it. **Every layer looked right in isolation and the suite was green:** the route sets the header, a route test asserts it is set, and the screen has a test asserting the warning renders when `truncated` is true. The gap is between them — the screen's test stubs `reportTransactionsCsv` wholesale, so the only line that reads a real header is covered by nothing, and `app.inject()` is not a browser and applies no CORS rules at all, so no server-side test could have seen it either. Confirmed by running the real `@fastify/cors` registration and observing the header on the wire with `access-control-expose-headers` absent. |
+| F30 | **A March report ran as `2026-03-01`–`2026-03-31` was missing March 31st.** The field's own hint says "YYYY-MM-DD. Inclusive.", but `new Date("2026-03-31")` is midnight, and the filter applies `$lte` — so a bound the UI promised was inclusive excluded the entire final day. Same family as the `Invalid Date` case this module was written to prevent, and dangerous for the same reason: the wrong answer looks right. The rows and the totals agree with each other, nothing errors, and a day of takings is simply absent. Fixed in `parseDateRange` rather than at the UI, because that is where the rule belongs and the API has other callers; a date-only bound is widened to `23:59:59.999`, while an explicit timestamp is left exactly where the caller put it. | Reviewing the reporting commit — reading the UI hint and the parser next to each other and asking whether "inclusive" was true. The module header names precisely this class of bug ("a typo in a date turns *show me March* into *there were no transactions*") and the code then made a quieter version of it. The existing range test passed because it uses full ISO timestamps on both ends, which is the one form that never trips it. |
 | F1 | Idempotency index declared `sparse` on a **compound** key, so it indexed every round and a player's second ordinary spin collided with their first. 119 of 120 concurrent spins returned 500. | Load check, first run. No unit test could see it — the in-memory stand-in models the index we intended, not the one Mongo builds. |
 | F2 | `applySchemas` could not change an existing index: Mongo returns `IndexOptionsConflict` rather than updating in place, so the F1 fix would have prevented boot on every existing database. | Found while fixing F1, before it shipped. |
 | F3 | Workspace build ran alphabetically — `apps/` compiled before the `packages/` they import. 87 type errors on a clean checkout, invisible locally behind stale `dist/`. | CI, first run. |
