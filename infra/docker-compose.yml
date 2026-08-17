@@ -46,7 +46,19 @@ services:
         SERVICE: game-backend
     environment:
       PORT: 9002
-      MONGO_URI: mongodb://mongo:27017/slots_engine?replicaSet=rs0
+      # Interpolated like every other variable here, and it was the one
+      # exception: the value was hardcoded, so editing MONGO_URI in
+      # `infra/.env` changed nothing and nothing said so. A setting that
+      # looks configurable and is ignored is worse than one that is plainly
+      # fixed, because the edit appears to have worked.
+      #
+      # The default is the in-network address and deliberately carries NO
+      # `directConnection=true`. That flag belongs on HOST-side connections
+      # only — see `.env.example`. From inside this network the replica set
+      # advertises itself as `mongo:27017`, which resolves, so following the
+      # advertisement is correct here and the flag would suppress the very
+      # topology discovery that makes transactions work on a failover.
+      MONGO_URI: ${MONGO_URI:-mongodb://mongo:27017/slots_engine?replicaSet=rs0}
       MONGO_DB: ${MONGO_DB:-slots_engine}
       SERVICE_AUTH_SECRET: ${SERVICE_AUTH_SECRET}
       LAUNCH_TOKEN_SECRET: ${LAUNCH_TOKEN_SECRET}
@@ -114,7 +126,19 @@ services:
         SERVICE: backoffice-api
     environment:
       PORT: 9005
-      MONGO_URI: mongodb://mongo:27017/slots_engine?replicaSet=rs0
+      # Interpolated like every other variable here, and it was the one
+      # exception: the value was hardcoded, so editing MONGO_URI in
+      # `infra/.env` changed nothing and nothing said so. A setting that
+      # looks configurable and is ignored is worse than one that is plainly
+      # fixed, because the edit appears to have worked.
+      #
+      # The default is the in-network address and deliberately carries NO
+      # `directConnection=true`. That flag belongs on HOST-side connections
+      # only — see `.env.example`. From inside this network the replica set
+      # advertises itself as `mongo:27017`, which resolves, so following the
+      # advertisement is correct here and the flag would suppress the very
+      # topology discovery that makes transactions work on a failover.
+      MONGO_URI: ${MONGO_URI:-mongodb://mongo:27017/slots_engine?replicaSet=rs0}
       MONGO_DB: ${MONGO_DB:-slots_engine}
       BACKOFFICE_JWT_SECRET: ${BACKOFFICE_JWT_SECRET}
       BACKOFFICE_CORS_ORIGINS: ${BACKOFFICE_CORS_ORIGINS:-http://localhost:9106}

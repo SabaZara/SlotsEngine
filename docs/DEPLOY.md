@@ -119,6 +119,7 @@ secret and are visible in logs, which is correct for all of them.
 | `DEPLOY_PATH` | `/opt/slots-engine` | Where `infra/` is synced on the box. |
 | `BOOTSTRAP_ADMIN_EMAIL` | — | First administrator's email. |
 | `MONGO_DB` | `slots_engine` | Database name. |
+| `MONGO_URI` | `mongodb://mongo:27017/slots_engine?replicaSet=rs0` | Only needed to point the stack at a database **outside** this compose file — a managed cluster, say. The default addresses the `mongo` service in-network and is right for the bundled one. Do **not** add `directConnection=true`: it suppresses replica-set topology discovery, and the money path's transactions depend on that surviving a failover. |
 | `GAME_CORS_ORIGINS` | — | Origins allowed to call game-backend. |
 | `SOCKET_ALLOWED_ORIGINS` | — | Origins allowed to open a WebSocket. |
 | `BACKOFFICE_CORS_ORIGINS` | — | Origins allowed to call backoffice-api. |
