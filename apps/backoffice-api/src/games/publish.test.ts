@@ -302,6 +302,38 @@ describe("versioning", () => {
     assert.equal(live?.version, 2, "the live document must be the newest version");
   });
 
+  it("does not let a field dropped between publishes survive on the live game", async () => {
+    /*
+     * F25's second site, and the one with the worse consequence. Found by
+     * clearing artwork on the live stack and watching the player-facing
+     * projection keep serving it.
+     *
+     * `games` was upserted with `$set`, which writes the keys it is given
+     * and leaves the rest of the existing document alone. So an optional
+     * field present in one publish and absent from the next stayed on the
+     * live document indefinitely — while `gameVersions` correctly recorded
+     * it as gone. The two disagreed, and the one players read was the wrong
+     * one.
+     *
+     * The assertion is the invariant rather than the symptom: the live
+     * document must equal the snapshot for the version it claims to be.
+     * Checking only `assets` would pass again the moment a second optional
+     * field is added.
+     */
+    const db = setup();
+    await publishStable(db, goodDraft({ assets: { symbolImageUrls: { seven: "https://cdn.example.com/7.png" } } }));
+
+    await publishStable(db, goodDraft());
+
+    const live = await db.collection("games").findOne({ gameId: REFERENCE_GAME.gameId });
+    const snapshot = await db.collection("gameVersions").findOne({ gameId: REFERENCE_GAME.gameId, version: 2 });
+    assert.equal(live?.assets, undefined, "artwork removed before a publish must not survive on the live game");
+
+    const { _id: _liveId, ...liveDoc } = live ?? {};
+    const { _id: _snapId, ...snapshotDoc } = snapshot ?? {};
+    assert.deepEqual(liveDoc, snapshotDoc, "the live game must match the snapshot of the version it claims to be");
+  });
+
   it("writes the snapshot before the live game", async () => {
     // Deliberate ordering, and the only mitigation available without a
     // transaction: a live game whose version has no snapshot is
@@ -377,6 +409,50 @@ describe("the published definition", () => {
     assert.deepEqual(gameDef.paylines, draft.paylines);
     assert.deepEqual(gameDef.betOptions, draft.betOptions);
     assert.equal(gameDef.rtpTarget, draft.rtpTarget);
+  });
+
+  it("carries the draft's artwork through, rather than dropping it", async () => {
+    /*
+     * `gameDef` is built here as an explicit allowlist rather than a spread
+     * of the draft, which is the right choice — it is what stops a stray
+     * draft field from publishing itself. But an allowlist omits by
+     * default, and that is the failure mode this pins: artwork set on a
+     * draft was accepted, saved, echoed back by every GET, and then
+     * silently discarded at the one step that makes it playable. Nothing
+     * anywhere reported a problem; the game simply published without art.
+     *
+     * That is F24's shape one layer down — a field correct everywhere
+     * except the path a designer actually travels — and the reason it is
+     * worth a test rather than a glance is that the drop is invisible from
+     * both ends. The draft still holds the URLs, so the editor keeps
+     * showing them.
+     */
+    const db = setup();
+    const draft = goodDraft({
+      assets: {
+        symbolImageUrls: { seven: "https://cdn.example.com/seven.png" },
+        backgroundUrl: "https://cdn.example.com/bg.jpg",
+      },
+    });
+
+    const { gameDef } = await publishStable(db, draft);
+
+    assert.deepEqual(gameDef.assets, {
+      symbolImageUrls: { seven: "https://cdn.example.com/seven.png" },
+      backgroundUrl: "https://cdn.example.com/bg.jpg",
+    });
+  });
+
+  it("omits the assets key for a game with no artwork, rather than publishing an empty one", async () => {
+    // The public projection distinguishes "no artwork" from "artwork that
+    // failed to load", and it can only do that if absence stays absence.
+    // An empty `{}` here would publish as a game that *has* artwork,
+    // none of which resolves.
+    const db = setup();
+
+    const { gameDef } = await publishStable(db, goodDraft());
+
+    assert.ok(!("assets" in gameDef), "a game with no artwork must not publish an assets key");
   });
 });
 

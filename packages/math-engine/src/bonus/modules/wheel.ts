@@ -22,6 +22,23 @@ function rewards(params: Record<string, unknown>): number[] {
 export const wheelModule: BonusModule = {
   moduleId: "wheel",
 
+  // Declared here rather than in the backoffice, per F24: a list kept in a
+  // second place drifts, and nothing fails when it does. The default shown
+  // is `DEFAULT_REWARDS` above, which is what `rewards()` substitutes for
+  // anything malformed — so a designer can see that an empty field is a
+  // choice with a value rather than an omission.
+  paramSchema: [
+    {
+      key: "rewardMultipliers",
+      label: "Reward multipliers",
+      type: "numberList",
+      defaultValue: DEFAULT_REWARDS,
+      min: 0,
+      help:
+        "One entry per wheel segment, as a multiple of the bet. Every segment is equally likely, so the odds come from how many times a multiplier appears — list 2 twice to make it twice as likely. The average of this list is exactly the wheel's expected return, which is the number the publish gate uses.",
+    },
+  ],
+
   start({ totalBet, params, rng }): BonusStepOutput {
     const table = rewards(params);
     const index = rollInt(rng, table.length);

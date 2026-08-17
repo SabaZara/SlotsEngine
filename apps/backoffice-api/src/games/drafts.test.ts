@@ -131,6 +131,50 @@ describe("saveDraft and getDraft", () => {
     assert.equal(await getDraft(setup(), "no-such-game"), null);
   });
 
+  it("removes an optional field the draft no longer has, rather than leaving the old value", async () => {
+    /*
+     * F25's storage half. `$set` writes the keys it is given and says
+     * nothing about the rest, so a field dropped from the draft object
+     * simply kept its previous stored value — a save that looked
+     * successful, returned the right object, and left the database holding
+     * artwork the designer had just cleared. `$unset` is what makes the
+     * removal persist.
+     *
+     * Note this is the one property `fakeMongo` could plausibly model
+     * differently from real MongoDB, which is why the same behaviour is
+     * also asserted through the route against the live stack.
+     */
+    const db = setup();
+    const withArt = {
+      ...blankDraft("game-1", "Game One", "user-1"),
+      assets: { symbolImageUrls: { seven: "https://cdn.example.com/seven.png" } },
+    };
+    await saveDraft(db, withArt);
+
+    const { assets: _dropped, ...withoutArt } = withArt;
+    await saveDraft(db, withoutArt);
+
+    const loaded = await getDraft(db, "game-1");
+    assert.equal("assets" in (loaded ?? {}), false, "a dropped field must be unset, not left behind");
+  });
+
+  it("keeps the fields a draft still has", async () => {
+    // The guard against over-unsetting: removal is driven by a fixed list of
+    // optional fields, so a save must not strip everything it did not
+    // explicitly mention.
+    const db = setup();
+    const draft = {
+      ...blankDraft("game-1", "Game One", "user-1"),
+      assets: { backgroundUrl: "https://cdn.example.com/bg.jpg" },
+    };
+
+    await saveDraft(db, draft);
+    const loaded = await getDraft(db, "game-1");
+
+    assert.deepEqual(loaded?.assets, { backgroundUrl: "https://cdn.example.com/bg.jpg" });
+    assert.ok(loaded?.symbols, "an unrelated field must survive");
+  });
+
   it("stamps updatedAt on every save, so it reflects the write not the object", async () => {
     // The caller's `updatedAt` is deliberately overwritten: it records when
     // the draft was *stored*, and trusting a client-supplied timestamp
@@ -284,6 +328,31 @@ describe("draftFromPublished", () => {
     if (REFERENCE_GAME.paylineWinRule !== undefined) {
       assert.equal(draft.paylineWinRule, REFERENCE_GAME.paylineWinRule);
     }
+  });
+
+  it("carries a published game's artwork back into the draft", () => {
+    /*
+     * The path this protects is the ordinary one: open a live game to
+     * change a payout, republish. If artwork were dropped here it would be
+     * erased by an edit that never mentioned artwork — and because the
+     * publish gate ignores `assets` entirely, nothing would refuse or even
+     * warn. Every fixture in this repo ships no artwork, so the omission
+     * would also be invisible to every other test in this file.
+     */
+    const withArt = {
+      ...REFERENCE_GAME,
+      assets: { symbolImageUrls: { seven: "https://cdn.example.com/seven.png" } },
+    } as unknown as typeof REFERENCE_GAME;
+
+    const draft = draftFromPublished(withArt, "user-1");
+
+    assert.deepEqual(draft.assets, { symbolImageUrls: { seven: "https://cdn.example.com/seven.png" } });
+  });
+
+  it("omits assets for a published game with no artwork", () => {
+    const draft = draftFromPublished(REFERENCE_GAME, "user-1") as unknown as Record<string, unknown>;
+
+    assert.equal("assets" in draft, false);
   });
 
   it("round-trips through the database unchanged", async () => {

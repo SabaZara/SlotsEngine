@@ -4,6 +4,7 @@ import { generateSeed } from "@slots-engine/rng";
 import {
   deriveStepRng,
   getBonusModule,
+  listBonusModuleSchemas,
   listBonusModules,
   registerBonusModule,
 } from "./registry.js";
@@ -178,5 +179,129 @@ describe("getBonusModule", () => {
       assert.match((err as Error).message, /wheel/);
       assert.match((err as Error).message, /pick/);
     }
+  });
+});
+
+describe("listBonusModuleSchemas", () => {
+  /** Only the modules this repo ships. The registry is process-global and
+   * the tests above register stubs into it, so "everything registered" is
+   * a different set from "everything we ship". */
+  const shippedSchemas = () =>
+    listBonusModuleSchemas().filter((s) => ["wheel", "pick", "freeSpins"].includes(s.moduleId));
+
+  /**
+   * The backoffice builds its bonus parameter form from this.
+   *
+   * F24 was a **module** list kept in a second place; a **parameter** list
+   * kept in a second place is the identical bug one level down, and it is
+   * quieter — a form offering a field the module ignores, or omitting one it
+   * depends on, fails nothing at publish time, because every module silently
+   * substitutes a default for anything malformed. The game then pays out
+   * under parameters nobody chose while looking entirely successful.
+   *
+   * These tests therefore assert the *contract* rather than the contents. A
+   * test restating that `spinCount` defaults to 10 pins nothing — it passes
+   * whatever the number is, and makes retuning the module harder.
+   */
+  it("describes every registered module, including any with no parameters", () => {
+    // Omitting a schema-less module would make it unselectable in the
+    // editor, which is F24 exactly. Absence must be an empty list, not a
+    // missing entry.
+    const ids = listBonusModuleSchemas().map((s) => s.moduleId);
+    assert.deepEqual([...ids].sort(), [...listBonusModules()].sort());
+  });
+
+  it("gives every shipped module a non-empty schema", () => {
+    /**
+     * Not a requirement of the interface — `paramSchema` is optional, and
+     * deliberately so — but a standard the three *shipped* modules are held
+     * to, so that no designer meets a raw JSON blob for a module we wrote.
+     *
+     * Named explicitly rather than iterating everything registered, because
+     * the registry is process-global and the tests above register stubs
+     * into it. The first version of this test iterated the whole registry
+     * and failed on `test-registry-a`, which is a fixture rather than a
+     * gap — a reminder that "everything registered" and "everything we
+     * ship" are different sets in a file that writes to the registry.
+     */
+    const shipped = ["wheel", "pick", "freeSpins"];
+    const schemas = listBonusModuleSchemas();
+
+    for (const moduleId of shipped) {
+      const entry = schemas.find((s) => s.moduleId === moduleId);
+      assert.ok(entry, `${moduleId} is not registered`);
+      assert.ok(entry.params.length > 0, `${moduleId} ships without a parameter schema`);
+    }
+  });
+
+  it("describes each parameter completely enough to render a field", () => {
+    // A half-filled spec produces a form control with no label or no
+    // default, which is worse than no form: it looks authoritative.
+    for (const { moduleId, params } of shippedSchemas()) {
+      for (const spec of params) {
+        assert.ok(spec.key.length > 0, `${moduleId} has a spec with no key`);
+        assert.ok(spec.label.length > 0, `${moduleId}.${spec.key} has no label`);
+        assert.ok(spec.help.length > 0, `${moduleId}.${spec.key} has no help text`);
+        assert.ok(
+          ["number", "integer", "numberList"].includes(spec.type),
+          `${moduleId}.${spec.key} has an unrenderable type ${spec.type}`,
+        );
+        assert.ok(spec.defaultValue !== undefined, `${moduleId}.${spec.key} has no default`);
+      }
+    }
+  });
+
+  it("declares a default that satisfies the parameter's own bounds", () => {
+    // The default is what the module substitutes for a malformed value, so
+    // a default outside the advertised range would mean the form warns
+    // about a value the module itself uses.
+    for (const { moduleId, params } of shippedSchemas()) {
+      for (const spec of params) {
+        const values = Array.isArray(spec.defaultValue) ? spec.defaultValue : [spec.defaultValue];
+        for (const value of values) {
+          if (spec.min !== undefined) {
+            assert.ok(value >= spec.min, `${moduleId}.${spec.key} defaults to ${value}, below its own min ${spec.min}`);
+          }
+          if (spec.max !== undefined) {
+            assert.ok(value <= spec.max, `${moduleId}.${spec.key} defaults to ${value}, above its own max ${spec.max}`);
+          }
+        }
+      }
+    }
+  });
+
+  it("uses each key only once per module", () => {
+    // A duplicate key renders two fields writing the same value, where the
+    // one the designer did not edit silently wins.
+    for (const { moduleId, params } of shippedSchemas()) {
+      const keys = params.map((p) => p.key);
+      assert.equal(new Set(keys).size, keys.length, `${moduleId} declares a duplicate parameter key`);
+    }
+  });
+
+  it("returns copies, so a caller cannot edit the registry in place", () => {
+    // F18's shape: handing back internal state from the function whose job
+    // is producing a safe view is how a read turns into a write.
+    const first = listBonusModuleSchemas();
+    const spec = first[0].params[0];
+    spec.label = "mutated";
+    first[0].params.push({ ...spec, key: "injected" });
+
+    const second = listBonusModuleSchemas();
+    assert.notEqual(second[0].params[0].label, "mutated", "a caller edited a spec through the returned array");
+    assert.ok(!second[0].params.some((p) => p.key === "injected"), "a caller added a parameter to the registry");
+  });
+
+  it("names freeSpins' parameters, the module F24 left unreachable", () => {
+    // The one concrete assertion, and it earns its place: F24 made this
+    // module selectable and stopped, leaving five parameters documented
+    // only in its source. Naming them here means removing one from the
+    // schema fails rather than quietly returning the editor to a blob.
+    const freeSpins = listBonusModuleSchemas().find((s) => s.moduleId === "freeSpins");
+    assert.ok(freeSpins, "freeSpins is not registered");
+    assert.deepEqual(
+      [...freeSpins.params.map((p) => p.key)].sort(),
+      ["assumedBaseRtp", "maxRetriggers", "retriggerSpins", "spinCount", "winMultiplier"],
+    );
   });
 });

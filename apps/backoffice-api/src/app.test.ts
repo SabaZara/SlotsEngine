@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { before, beforeEach, describe, it } from "node:test";
 import type { FastifyInstance } from "fastify";
 import { createLogger } from "@slots-engine/logging";
-import { REFERENCE_GAME } from "@slots-engine/math-engine";
+import { FREE_SPINS_GAME, listBonusModuleSchemas, listBonusModules, REFERENCE_GAME } from "@slots-engine/math-engine";
 import { fakeMongo } from "../../game-backend/src/testing/fakeMongo.js";
 import { buildApp } from "./app.js";
 import { createUser } from "./auth/users.js";
@@ -383,6 +383,97 @@ describe("game authoring", () => {
     await ctx.app.inject({ method: "PUT", url: "/v1/games/my-game", headers: auth(token), payload: { name: "Renamed" } });
     assert.equal(await ctx.raw.collection("games").findOne({ gameId: "my-game" }), null);
   });
+
+  it("saves artwork set by the builder, and hands it back on reload", async () => {
+    /*
+     * The path a designer actually travels, which is the thing F24 says to
+     * test rather than the module in isolation. The artwork editor is a
+     * controlled component: it renders whatever `draft.assets` holds, so if
+     * the round trip through this route lost the field, the screen would
+     * clear itself the moment it reloaded — the field would look accepted
+     * and then be empty, with nothing reporting an error.
+     */
+    await create();
+    const assets = {
+      symbolImageUrls: { seven: "https://cdn.example.com/seven.png" },
+      backgroundUrl: "https://cdn.example.com/bg.jpg",
+    };
+
+    const saved = await ctx.app.inject({
+      method: "PUT",
+      url: "/v1/games/my-game",
+      headers: auth(token),
+      payload: { assets },
+    });
+    assert.equal(saved.statusCode, 200);
+    assert.deepEqual(saved.json().draft.assets, assets);
+
+    const reloaded = await ctx.app.inject({ method: "GET", url: "/v1/games/my-game", headers: auth(token) });
+    assert.deepEqual(reloaded.json().draft.assets, assets);
+  });
+
+  it("clears artwork when the field is sent as null", async () => {
+    /*
+     * F25. Found by driving the live stack, and not reachable from any test
+     * that did not use this route the way the editor does.
+     *
+     * This route merges a patch over the stored draft, so an absent key
+     * means "leave unchanged" — that is what lets the editor save one field
+     * at a time. But `JSON.stringify` drops `undefined`, so the editor's
+     * "artwork cleared" and "artwork not mentioned" arrived as identical
+     * bytes, and `$set` cannot unset. Artwork could be added and then never
+     * removed: the screen showed the field emptied and the next reload
+     * brought it back.
+     */
+    await create();
+    const assets = { symbolImageUrls: { seven: "https://cdn.example.com/seven.png" } };
+    await ctx.app.inject({ method: "PUT", url: "/v1/games/my-game", headers: auth(token), payload: { assets } });
+
+    const cleared = await ctx.app.inject({
+      method: "PUT",
+      url: "/v1/games/my-game",
+      headers: auth(token),
+      payload: { assets: null },
+    });
+    assert.equal(cleared.statusCode, 200);
+    assert.equal("assets" in cleared.json().draft, false, "a null must remove the key, not store null");
+
+    // The reload is the half that actually failed before: the response
+    // could look right while the stored document kept the old value.
+    const reloaded = await ctx.app.inject({ method: "GET", url: "/v1/games/my-game", headers: auth(token) });
+    assert.equal("assets" in reloaded.json().draft, false, "the cleared field came back on reload");
+  });
+
+  it("leaves artwork alone when a save does not mention it", async () => {
+    // The other half of the same rule, and the one that makes per-field
+    // saving safe: only a key that is PRESENT and null removes anything.
+    // If absence meant removal, editing the name would wipe the artwork.
+    await create();
+    const assets = { symbolImageUrls: { seven: "https://cdn.example.com/seven.png" } };
+    await ctx.app.inject({ method: "PUT", url: "/v1/games/my-game", headers: auth(token), payload: { assets } });
+
+    await ctx.app.inject({ method: "PUT", url: "/v1/games/my-game", headers: auth(token), payload: { name: "Renamed" } });
+
+    const reloaded = await ctx.app.inject({ method: "GET", url: "/v1/games/my-game", headers: auth(token) });
+    assert.deepEqual(reloaded.json().draft.assets, assets, "an unrelated edit must not clear artwork");
+  });
+
+  it("does not require artwork to be valid for a draft to be valid", async () => {
+    // Deliberate: artwork is presentation, and refusing a save over a
+    // picture would block a maths fix behind an art problem. The player
+    // client falls back to a glyph for a URL it will not load, so a bad
+    // value here degrades rather than breaks.
+    await create();
+    const response = await ctx.app.inject({
+      method: "PUT",
+      url: "/v1/games/my-game",
+      headers: auth(token),
+      payload: { assets: { symbolImageUrls: { seven: "javascript:alert(1)" } } },
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().valid, true, "artwork must not participate in draft validity");
+  });
 });
 
 describe("publishing", () => {
@@ -678,5 +769,106 @@ describe("publishing", () => {
       assert.equal(response.statusCode, 404);
       assert.equal(response.json().error, "draft_not_found");
     });
+  });
+});
+
+/**
+ * The bonus-module registry, served rather than restated.
+ *
+ * This route exists because the backoffice editor used to hold its own
+ * hardcoded array and it drifted: `freeSpins` shipped in the engine and
+ * **could not be selected by a designer at all**, because the editor's list
+ * still named two modules. Nothing failed — the drift is silent in both
+ * directions, which is why the list has to be derived rather than maintained.
+ */
+describe("bonus module registry", () => {
+  let ctx: Awaited<ReturnType<typeof setup>>;
+  let token: string;
+
+  beforeEach(async () => {
+    ctx = await setup();
+    token = ctx.tokenFor(ctx.designer);
+  });
+
+  it("reports exactly what the engine registry holds", async () => {
+    // Compared against `listBonusModules()` itself, not against a literal.
+    // A test naming ["wheel","pick","freeSpins"] would be a second copy of
+    // the list — the very thing that drifted — and would need editing every
+    // time a module ships, which is when it would be got wrong.
+    const response = await ctx.app.inject({ method: "GET", url: "/v1/bonus-modules", headers: auth(token) });
+
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(response.json().modules.slice().sort(), listBonusModules().slice().sort());
+  });
+
+  it("includes every module a shipped fixture actually references", async () => {
+    // The failure that happened, stated as its own test: a game seeded by
+    // this build names a module, so the editor must be able to offer it. This
+    // catches the drift from the other side — if a fixture starts using a
+    // module the route does not report, that is equally broken.
+    const response = await ctx.app.inject({ method: "GET", url: "/v1/bonus-modules", headers: auth(token) });
+    const offered: string[] = response.json().modules;
+
+    for (const game of [REFERENCE_GAME, FREE_SPINS_GAME]) {
+      for (const module of game.bonusModules) {
+        assert.ok(
+          offered.includes(module.moduleId),
+          `${game.gameId} plays '${module.moduleId}' but the editor cannot offer it`,
+        );
+      }
+    }
+  });
+
+  it("is readable by a viewer, since it reveals nothing about a game", async () => {
+    // Deliberately not designer-gated. The list is the set of features this
+    // build supports, not anyone's configuration — and a viewer opening the
+    // builder read-only still needs the labels to render.
+    const response = await ctx.app.inject({
+      method: "GET",
+      url: "/v1/bonus-modules",
+      headers: auth(ctx.tokenFor(ctx.viewer)),
+    });
+    assert.equal(response.statusCode, 200);
+  });
+
+  it("still requires authentication", async () => {
+    const response = await ctx.app.inject({ method: "GET", url: "/v1/bonus-modules" });
+    assert.equal(response.statusCode, 401);
+  });
+
+  it("serves each module's parameter schema alongside the ids", async () => {
+    // Compared against the registry rather than a literal, for the same
+    // reason the id list is: a schema written down here would be a second
+    // copy of the thing whose duplication caused F24.
+    const response = await ctx.app.inject({ method: "GET", url: "/v1/bonus-modules", headers: auth(token) });
+
+    assert.deepEqual(response.json().schemas, JSON.parse(JSON.stringify(listBonusModuleSchemas())));
+  });
+
+  it("describes every module it offers, so no module lands on a blank form", async () => {
+    // The F24 shape one level down. A module offered in the dropdown but
+    // missing from `schemas` gives a designer the JSON blob this work
+    // exists to replace — silently, and only for that module.
+    const body = (await ctx.app.inject({ method: "GET", url: "/v1/bonus-modules", headers: auth(token) })).json();
+    const described = new Set(body.schemas.map((s: { moduleId: string }) => s.moduleId));
+
+    for (const moduleId of body.modules) {
+      assert.ok(described.has(moduleId), `'${moduleId}' is offered but has no parameter schema`);
+    }
+  });
+
+  it("names the parameters freeSpins actually reads", async () => {
+    // The one concrete assertion, and it earns its place: F24 made this
+    // module selectable and left its five parameters undocumented. The keys
+    // are checked against the module's own guards, so dropping one from the
+    // schema fails here rather than quietly returning that field to a blob.
+    const body = (await ctx.app.inject({ method: "GET", url: "/v1/bonus-modules", headers: auth(token) })).json();
+    const freeSpins = body.schemas.find((s: { moduleId: string }) => s.moduleId === "freeSpins");
+
+    assert.ok(freeSpins, "freeSpins is offered but not described");
+    assert.deepEqual(
+      freeSpins.params.map((p: { key: string }) => p.key).sort(),
+      ["assumedBaseRtp", "maxRetriggers", "retriggerSpins", "spinCount", "winMultiplier"],
+    );
   });
 });

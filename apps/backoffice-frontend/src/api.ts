@@ -1,5 +1,7 @@
+import { REMOVABLE_DRAFT_FIELDS } from "@slots-engine/shared-types";
 import type {
   BonusModuleConfig,
+  GameAssets,
   GridSize,
   PaylinePath,
   PaylineWinRule,
@@ -9,6 +11,7 @@ import type {
   SymbolRule,
   SymbolWeight,
 } from "@slots-engine/shared-types";
+import type { BonusParamSpec } from "./gameBuilder/BonusParamsForm.js";
 
 /**
  * `import.meta.env` is injected by Vite and is undefined anywhere else, so
@@ -25,6 +28,9 @@ const BASE_URL = import.meta.env?.VITE_BACKOFFICE_API_URL ?? "http://localhost:9
 export interface GameDraft {
   gameId: string;
   name: string;
+  /** Artwork. Presentation only — see `GameAssets`. Optional at every level,
+   * and absent for every game this repo ships. */
+  assets?: GameAssets;
   grid: GridSize;
   reelGenerationMode: ReelGenerationMode;
   reelStrips?: ReelStrip[];
@@ -156,6 +162,30 @@ async function request<T>(path: string, options: { method?: string; body?: unkno
   return payload as T;
 }
 
+/**
+ * Turns a removed field into an explicit `null` the server can act on.
+ *
+ * **Found by driving the live stack, and invisible to every test that did
+ * not.** `JSON.stringify({assets: undefined})` is `{}`, so "clear this
+ * field" and "do not touch this field" left the browser as the same bytes.
+ * The API merges a patch over the stored draft, so the second reading is the
+ * one it took: artwork could be added and then never cleared. The editor
+ * behaved correctly — its clear-the-last-symbol path returns `undefined`,
+ * pinned by its own tests — and the field came back on the next reload
+ * anyway, because the removal never reached the wire.
+ *
+ * Only keys **present** on the patch are converted, which is what keeps a
+ * one-field save from clearing the rest of the draft: `{name: "x"}` still
+ * says nothing at all about `assets`.
+ */
+export function withExplicitRemovals(patch: Partial<GameDraft>): Record<string, unknown> {
+  const body: Record<string, unknown> = { ...patch };
+  for (const field of REMOVABLE_DRAFT_FIELDS) {
+    if (field in patch && patch[field] === undefined) body[field] = null;
+  }
+  return body;
+}
+
 export const api = {
   login: (email: string, password: string) =>
     request<{ token: string; expiresAt: number; user: SessionUser }>("/v1/auth/login", {
@@ -168,6 +198,12 @@ export const api = {
   logout: () => request<{ loggedOut: boolean }>("/v1/auth/logout", { method: "POST" }),
 
   listGames: () => request<{ games: GameListEntry[] }>("/v1/games"),
+
+  /** The bonus modules this build can play, read from the engine registry.
+   * Fetched rather than hardcoded here because a client-side copy drifted the
+   * moment a third module shipped — see the route's own comment. */
+  listBonusModules: () =>
+    request<{ modules: string[]; schemas?: Array<{ moduleId: string; params: BonusParamSpec[] }> }>("/v1/bonus-modules"),
 
   createGame: (gameId: string, name: string) =>
     request<{ draft: GameDraft }>("/v1/games", { method: "POST", body: { gameId, name } }),
@@ -186,7 +222,7 @@ export const api = {
   saveDraft: (gameId: string, patch: Partial<GameDraft>) =>
     request<{ draft: GameDraft; valid: boolean; errors: string[] }>(`/v1/games/${encodeURIComponent(gameId)}`, {
       method: "PUT",
-      body: patch,
+      body: withExplicitRemovals(patch),
     }),
 
   simulate: (gameId: string, simCount: number) =>

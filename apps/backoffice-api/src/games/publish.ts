@@ -66,6 +66,13 @@ export async function publishDraft(
     name: draft.name,
     version: nextVersion,
     status: "published",
+    // Presentation only, and the one field here that the RTP gate above
+    // deliberately does not consider — artwork cannot change what a game
+    // pays. Carried conditionally so a game with no artwork publishes no
+    // `assets` key at all: the public projection distinguishes "no artwork"
+    // from "artwork that failed to load", and an empty object would publish
+    // as the second.
+    ...(draft.assets !== undefined ? { assets: draft.assets } : {}),
     grid: draft.grid,
     reelGenerationMode: draft.reelGenerationMode,
     ...(draft.reelStrips !== undefined ? { reelStrips: draft.reelStrips } : {}),
@@ -129,7 +136,25 @@ export async function publishDraft(
   // no live game is merely unused. If only one of these two writes can
   // survive a crash, this is the one that must.
   await db.collection("gameVersions").insertOne({ ...gameDef });
-  await db.collection("games").updateOne({ gameId: draft.gameId }, { $set: { ...gameDef } }, { upsert: true });
+  /*
+   * `replaceOne`, not `$set`. F25's second site, and the one with the worse
+   * consequence — found by clearing artwork on the live stack and watching
+   * players keep receiving it.
+   *
+   * `$set` writes the keys it is given and leaves every other key in the
+   * existing document untouched, so any optional field dropped between two
+   * publishes survived on the live game forever: v6 published without
+   * artwork, `gameVersions` recorded v6 without artwork, and `games` went
+   * on serving v5's. The append-only snapshot and the document players
+   * actually read had **diverged**, which makes the audit trail wrong about
+   * the thing it exists to establish — what a round was played under.
+   *
+   * A published game *is* its `gameDef`; there is no field on the live
+   * document that legitimately outlives a publish. Replacing states that,
+   * and makes the two writes above produce identical content by
+   * construction rather than by both being spelled correctly.
+   */
+  await db.collection("games").replaceOne({ gameId: draft.gameId }, { ...gameDef }, { upsert: true });
 
   await writeAuditLog(db, {
     actorUserId,

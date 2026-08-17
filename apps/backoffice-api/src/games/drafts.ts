@@ -3,7 +3,9 @@ import {
   DEFAULT_CURRENCY,
   DEFAULT_MATH_ENGINE_ID,
   DEFAULT_PAYLINE_WIN_RULE,
+  REMOVABLE_DRAFT_FIELDS,
   type BonusModuleConfig,
+  type GameAssets,
   type GameDefinition,
   type GridSize,
   type PaylinePath,
@@ -27,6 +29,20 @@ import {
 export interface GameDraft {
   gameId: string;
   name: string;
+  /**
+   * Artwork, and the one part of a draft that is **not** maths.
+   *
+   * It rides on the draft rather than living in its own collection because
+   * artwork is versioned with the game that uses it: a symbol renamed in
+   * `symbols` and its picture must move together, and two documents with
+   * separate lifecycles would let exactly that pair drift apart.
+   *
+   * Nothing here reaches `validateDraft` or the publish gate — see
+   * `GameAssets`. A draft with a broken image URL is still publishable,
+   * deliberately: refusing a publish over a picture would block a maths fix
+   * behind an art problem.
+   */
+  assets?: GameAssets;
   grid: GridSize;
   reelGenerationMode: ReelGenerationMode;
   reelStrips?: ReelStrip[];
@@ -98,7 +114,28 @@ export async function listDrafts(db: Db): Promise<Array<{ gameId: string; name: 
 
 export async function saveDraft(db: Db, draft: GameDraft): Promise<GameDraft> {
   const next = { ...draft, updatedAt: new Date().toISOString() };
-  await db.collection("gameDrafts").updateOne({ gameId: draft.gameId }, { $set: next }, { upsert: true });
+
+  /*
+   * `$set` alone cannot express removal, and that gap was invisible until
+   * the live stack was driven the way the editor drives it: every optional
+   * field could be added and then never taken away, because a key absent
+   * from `next` simply left the stored value in place. `$unset` is what
+   * makes clearing artwork — or dropping a reel-strip set when a game
+   * switches to weighted symbols — actually persist.
+   *
+   * Mongo rejects an empty `$unset`, so it is included only when there is
+   * something to remove.
+   */
+  const unset: Record<string, ""> = {};
+  for (const field of REMOVABLE_DRAFT_FIELDS) {
+    if (next[field] === undefined) unset[field] = "";
+  }
+
+  await db.collection("gameDrafts").updateOne(
+    { gameId: draft.gameId },
+    { $set: next, ...(Object.keys(unset).length > 0 ? { $unset: unset } : {}) },
+    { upsert: true },
+  );
   return next;
 }
 
@@ -113,6 +150,10 @@ export function draftFromPublished(gameDef: GameDefinition, userId: string): Gam
   return {
     gameId: gameDef.gameId,
     name: gameDef.name,
+    // Omitting this would be the publish-side drop in reverse, and quieter:
+    // a designer opens a live game to change one payout, republishes, and
+    // the artwork is gone — without either step ever mentioning artwork.
+    ...(gameDef.assets !== undefined ? { assets: gameDef.assets } : {}),
     grid: gameDef.grid,
     reelGenerationMode: gameDef.reelGenerationMode,
     ...(gameDef.reelStrips !== undefined ? { reelStrips: gameDef.reelStrips } : {}),

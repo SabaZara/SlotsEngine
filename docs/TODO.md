@@ -15,7 +15,7 @@ than deleted because in almost every case the *reasoning* outlived the fix.
 **Everything testable is tested; what remains is mostly infrastructure that
 needs a decision rather than code.**
 
-- **23 bugs found and fixed** (F1–F23), each recorded below with *how it was
+- **26 bugs found and fixed** (F1–F26), each recorded below with *how it was
   found*. **Not one was found by a test that already passed** — the closest
   is F17, where a mutation of existing code exposed a stand-in that had been
   silently ignoring an operator. Counted:
@@ -23,11 +23,31 @@ needs a decision rather than code.**
   | How | Count | Which |
   |---|---:|---|
   | Writing the *first* test for a file | 9 | F13, F15, F16, F18–F23 |
-  | Running the real stack | 8 | F1, F6–F12 |
+  | Running the real stack | 9 | F1, F6–F12, F25 |
   | CI, on a clean checkout | 2 | F3, F4 |
   | Reading the reference repo | 2 | F5, F14 |
   | Mutation-testing existing code | 1 | F17 |
-  | Found while fixing another | 1 | F2 |
+  | Found while fixing another | 2 | F2, F26 |
+  | **Asking how a user reaches the feature** | **1** | **F24** |
+
+  **F25 sharpens what "running the real stack" means**, and it is worth
+  separating from the other eight. The artwork editor was finished, green,
+  and mutation-verified before F25 was found — and every one of those tests
+  called `saveDraft` with an **object**, while the bug lived in what
+  `JSON.stringify` does to `undefined`. No test that does not cross a network
+  boundary could have seen it. The eight above are mostly "the stand-in
+  models no validator"; this one is "the stand-in models no *wire*". Both
+  point the same way: the suite establishes what the code computes, not what
+  survives the trip between two processes.
+
+  The last row is new and worth keeping separate rather than filed under one
+  of the others. F24 was not a coverage gap: free spins was finished, tested
+  by 30 cases, mutation-verified and confirmed against the live stack — and
+  **none of that touched the path a designer would actually use**, because the
+  fixture sets its parameters in code and every check therefore went around
+  the editor. A feature can be complete on the money path and unreachable
+  through the only interface that configures it, and no test asks that
+  question unless someone does.
 
   The 9 and the 8 are the load-bearing rows, and they say different things.
   **Writing a file's first test found a bug 9 times across 57 test files** —
@@ -41,10 +61,14 @@ needs a decision rather than code.**
   is not a criticism of them — a test that never fails is doing its job as a
   regression guard — but it does mean the suite's value here has been in the
   *writing*, and its value from here on is in the *guarding*.
-- **1176 tests**, of which 50 are conformance cases run against real MongoDB.
+- **1467 tests**, of which 53 are conformance cases run against real MongoDB
+  and 59 are React component tests.
 - **Sections A, B and C are closed** — no source module with meaningful
-  logic is without a direct test. The React components are the deliberate
-  exception, recorded in section C.
+  logic is without a direct test. **The React components are no longer the
+  exception**: section C's stopping point ("needs a DOM environment and a
+  component testing library, neither of which this repo has") is closed, and
+  the reason it moved is recorded there. F24 is the argument — a component
+  was the one layer where a bug could survive every other check in this repo.
 - **A third sweep has been run** (section A2), filtered differently: not
   "uncovered file" but **imported by many test files, asserted by none**.
   Two matched, both tiny and both load-bearing — the logger's redaction and
@@ -140,6 +164,9 @@ existed matters more than the fix, and that reasoning is easy to lose.
 | F14 | The ledger's idempotency was only ever tested as a **sequential** replay — call, then call again — on a stand-in that models no transactions. Two callers arriving at the same instant is a different guarantee, resting on the unique index plus the driver's write-conflict retry, and nothing exercised it at this level. Now covered against a real replica set. | Reading the reference repo's own ledger suite (`~/Desktop/irakli/slot-engine`), which had exactly these tests and which I had not consulted. Both mutations caught: removing the in-flight check fails even with the index intact. |
 | F15 | `evaluateScatter` looks a count up **exactly** (`payout[count]`), so a table of `{3,4,5}` pays **nothing** at 6 — the biggest outcome in the game silently returning zero. Unreachable for `reference-5x3` (one scatter per strip caps it at 5), but one edit in the backoffice makes it live, and draft validation checked each entry's shape without ever checking the table covered the reachable range. `validateDraft` now refuses to publish an under-covered table. | Writing the first tests for `scatter.ts`, after the reference's suite flagged that its own engine uses N-or-more semantics where this one does not. Verified the shipped game still publishes and the dangerous edit is refused. |
 | F22 | **`?limit=abc` on `/v1/audit` returned the entire audit log**, through the one expression whose purpose is bounding it. `readAuditLog` clamped with `Math.min(Math.max(limit, 1), 500)`, and the route builds that value with `Number(limit)` straight off a query string — so a non-numeric one arrives as `NaN`. No comparison with `NaN` is ever true, so the clamp evaluates to `NaN` rather than to a bounded number, and the driver reads a `NaN` limit as **no limit at all**. Measured on the running service: 142 entries returned against a configured maximum of 500 and a default of 100, from an unauthenticated-by-shape query any operations user could type. Unbounded in the only sense that matters — the response grows with the collection forever. `clampLimit` now refuses any non-finite value and falls back to the default rather than the maximum. | Writing the first tests for `audit/log.ts`. The clamp was the first thing that looked worth a boundary test, and `Number("abc")` was the second case tried. `fakeMongo` returns `[]` for the same query — **more restrictive than Mongo**, so every existing test would have shown a bounded page while production served the whole collection; that disagreement is now pinned by three conformance tests. Verified live, before and after. |
+| F24 | **A designer could not select `freeSpins` at all.** The backoffice's game builder held its own hardcoded `KNOWN_MODULES = ["wheel", "pick"]`, so the moment a third module shipped the editor offered two and the engine played three — the new feature was unreachable through the only UI that configures it. The drift is silent in **both** directions and that is the point: a short list refuses a module that works, while a long one offers a module that does not exist, which publishes cleanly (the API cannot see a client array) and then fails at spin time, in front of a player, on the money path. The list is now served from `listBonusModules()` — the engine registry itself — via `GET /v1/bonus-modules`, so there is one copy rather than two. A draft naming a module this build lacks keeps its own id as an option labelled "not in this build", rather than being silently rewritten to whichever module happens to be first, which would change what a game pays without anyone choosing it. | Working down the free-spins follow-ups. The feature was finished, tested and verified live, and *none of that touched the path a designer would actually use* — the fixture sets its params in code, so every test and every live check went around the editor. Found by asking how a designer configures the thing that had just shipped. The same shape as the fixture/allowlist note in section D: a list maintained in a second place drifts, and nothing fails. |
+| F26 | **A published game went on serving artwork that had been removed, and disagreed with its own audit snapshot.** `publishDraft` upserted the live `games` document with `$set`, which writes the keys it is given and leaves every other key in the existing document in place — so an optional field present in one publish and absent from the next survived on the live document indefinitely. Measured on the running stack: `reference-5x3` published as **v6 with no artwork**, `gameVersions` recorded v6 with no artwork, and `games` went on serving v5's URLs to players. The append-only snapshot and the document players actually read had **diverged**, which makes the audit trail wrong about the one thing it exists to establish — what maths and presentation a round was played under. Now a `replaceOne`: a published game *is* its `gameDef`, and no field on the live document legitimately outlives a publish. | Found by fixing F25 and then checking whether the clear had actually reached players. It had not. The test pins the invariant rather than the symptom — the live document must equal the snapshot of the version it claims to be — because asserting only on `assets` would pass again the moment a second optional field is added. Required teaching `fakeMongo` `replaceOne`, now pinned by **three conformance tests against real MongoDB** (fields dropped, `_id` preserved, upsert branch). |
+| F25 | **Artwork could be added through the API and then never cleared.** Saving a draft is a patch — an absent key means "leave unchanged", which is what lets the editor save one field at a time — but `JSON.stringify` drops `undefined`, so "clear this field" and "do not mention this field" left the browser as **identical bytes**, and `saveDraft`'s `$set` cannot unset. The editor was correct throughout: its clear-the-last-symbol path returns `undefined` and is pinned by its own mutation-verified tests. The field emptied on screen, the save reported success, and the next reload brought the artwork back. Fixed at all three layers — the client converts a removal to an explicit `null` (the one value that survives JSON and cannot be confused with a legitimate one), the route turns that back into a deletion, and `saveDraft` emits a `$unset`. The removable-field list lives in `shared-types` because a field one end can null and the other will not unset fails silently in both directions. | Driving the live stack after the artwork editor was finished, green and mutation-verified — trying to *undo* the change I had just made. Every unit test passed throughout, because they all called `saveDraft` with an object rather than across a network, and `undefined` only disappears at the wire. The reference repo's `repair-corrupted-asset-urls.ts` is the same lesson from the other side: read shape and write shape diverging on an asset field, discovered after it had already corrupted production data. |
 | F23 | `writeAuditLog` spread the caller's entry **after** the generated `entryId` and `timestamp` (`{ entryId: randomUUID(), ...entry }`), so a caller supplying either field overwrote the generated one — able to backdate an entry or collide an id in the one record whose entire value is that its writers cannot shape it. Latent rather than live: `Omit<…, "entryId" \| "timestamp">` forbids it at compile time and no call site passes them, so this only bites where the type has been cast around. The spread now comes first. F18's shape exactly — a safe-looking function one ordering away from being unsafe. | The same first tests, from a case written to pin the *promise* the docstring makes ("no update or delete anywhere in this module"). It failed, which was not the expected outcome; checking the call sites established it was unreachable today rather than a live hole. |
 | F21 | `fakeMongo` honoured **exclusion** projections (`{ _id: 0 }`, the F16 fix) but ignored **inclusion** ones (`{ gameId: 1, name: 1 }`) entirely, so a projected list query returned whole documents in tests and three fields against real Mongo. The third time this same asymmetry has bitten — F16 fixed half of it and the other half went unnoticed because nothing tested it. Projection is now a shared `applyProjection` handling both shapes, including Mongo's quirk that `_id` rides along with an inclusion projection unless excluded, and it is applied **after** sort rather than before — Mongo sorts then projects, so a query may legally order by a field the caller never receives. | A `listDrafts` test asserting the summary shape failed against correct code. Pinned by three new conformance tests against real Mongo, one of them specifically for the sort-then-project ordering. |
 | F19 | **`verifyPassword` derived a key of `expected.length` — the length taken from the stored record — so a truncated hash verified.** Shorten a stored digest to one byte and scrypt derives one byte, which matches roughly one guess in 256: measured, an arbitrary password verified against a 1-byte hash after **274 guesses**. Anyone able to write to a user record could downgrade an account to trivially guessable without knowing or changing the password. The required length is now fixed at `KEY_LENGTH` and a digest of any other length is refused. | Writing the first tests for `passwords.ts`. A shape test ("refuses a hash of the right length but wrong content") failed by returning `true`, which made no sense until the derive call was read closely. Verified on the live stack: a 1-byte hash planted in the real database now yields 401 for every guess. |
@@ -585,7 +612,7 @@ route rather than the rule that broke.
 | ~~`shared-types/src/money.ts`~~ | 84 | **Done.** 26 tests, all eight mutations caught. The "no minor unit created or lost" property is pinned exhaustively over totals 0–60 × parts 1–12, plus a spread check — summing correctly is not enough on its own, since `[total, 0, 0, …]` also sums correctly. Adapted from the reference's `money.test.ts` (near-identical module), extended with the cases it lacked: negative totals, `-0`, and the `70.07 * 100 = 7006.999…` float error that is the reason this module exists. |
 | ~~`shared-types/src/rbac.ts`~~ | 65 | **Done.** 14 tests, all six mutations caught. Note the file is types plus `ROLE_IDS` and `toPublicUser` — there are no "permission sets" here, so this row overstated it; authorisation lives in `requireRole`. Writing the tests found F18. |
 
-### ~~C. Frontend — the request layers~~ — closed, with a stated stopping point
+### ~~C. Frontend — the request layers~~ — closed, and the stopping point reopened and closed too
 
 `game-frontend/src/api.ts` (20 tests) and `backoffice-frontend/src/api.ts`
 (15 tests) are done. Between them they close all three of the specific
@@ -624,12 +651,55 @@ unimportable from a test. Both now use `import.meta.env?.` — guarded in the
 source rather than worked around in the test, because a module only one
 toolchain can load is why these had no tests at all.
 
-**Still untested:** the React components (`screens/*.tsx`,
-`gameBuilder/*.tsx`), `renderer.ts` and `main.ts`. These need a DOM
-environment and a component testing library, neither of which this repo has
-— a deliberate stopping point rather than an oversight. The logic worth
-testing was extracted into `paylineGrid.ts`, `reelStrip.ts` and the two
-`api.ts` files, all of which are now covered.
+**~~Still untested: the React components.~~ — the stopping point is now
+closed, and the reason it moved is worth recording.**
+
+This section used to end here, with the components (`screens/*.tsx`,
+`gameBuilder/*.tsx`), `renderer.ts` and `main.ts` untested because the repo
+had no DOM environment and no component testing library — "a deliberate
+stopping point rather than an oversight". That was an honest trade while the
+frontend was a reference client whose only untested part was presentation.
+
+**F24 is what invalidated it.** A feature was complete on the money path,
+covered by 30 cases, mutation-verified and confirmed against the live stack,
+and was *still* unreachable — because of a hardcoded array in a component
+nothing tested. The components are not merely presentation; they are the
+surface a designer configures money through, and they were the one layer
+where a bug could survive every check in this repo.
+
+The environment now exists: `jsdom` + `global-jsdom` + `@testing-library/react`,
+wired through `apps/backoffice-frontend/src/testing/`. `primitives.test.tsx`
+is the first consumer — 11 tests, **4 of 5 mutations caught**, the survivor
+documented in the file header as an equivalent mutant established by probe
+(the DOM coerces a non-finite `value` to `""` on its own, so the guard is
+unobservable through the rendered value).
+
+**Two pieces of infrastructure had to be right first**, both recorded because
+each fails in a way that names the symptom rather than the cause:
+
+- **The DOM must be installed at module-evaluation time, not in a `before`
+  hook.** React and Testing Library both capture `document` when their module
+  bodies run, and ESM hoists every `import` above every statement — so a test
+  calling `installDom()` as its first *statement* has already imported
+  Testing Library against an undefined `document`. Importing the environment
+  module is what installs it, and `renderComponent.tsx` imports it first.
+- **`tsx` needs an explicit `--tsconfig` for JSX.** There is no root
+  `tsconfig.json`, so esbuild falls back to the *classic* runtime and emits
+  `React.createElement` into files that never import React — every component
+  test failing with `ReferenceError: React is not defined`. `run-tests.mjs`
+  now runs `.test.tsx` as a second invocation pointed at the frontend's own
+  test config. A root tsconfig would have fixed it globally and was rejected:
+  it would become the resolution base for every other workspace too.
+
+`IS_REACT_ACT_ENVIRONMENT` is set in the harness for the same class of
+reason — without it React warns instead of failing, and an effect-driven
+assertion silently reads the state from *before* the effect ran.
+
+The logic previously extracted into `paylineGrid.ts`, `reelStrip.ts` and the
+two `api.ts` files remains covered, and extraction is still the first choice
+where it applies — a pure function tests faster and more precisely than a
+mounted tree. What has changed is that "it needs a DOM" is no longer a reason
+for something to go untested.
 
 **The spin animation is on the covered side of that line**, which is worth
 saying explicitly because "renderer.ts is untested" reads as though it were
@@ -647,12 +717,31 @@ overshoot.
 The reference repo's animation subsystem is much larger — designer-authored
 spin and symbol animation *templates*, edited in the backoffice and stored
 per game (`spinAnimationTemplates`, `symbolAnimationTemplates`, and a
-`game-renderer` package with sprite-sheet handling). None of that exists
-here and none of it is planned: this frontend is a **reference client** that
-exists to prove the protocol and the money path, not a production skin. The
-animation it has is the amount needed to show that a settled server result
-can be revealed convincingly, and its timing maths is tested to the same
-standard as the rest of the repo.
+`game-renderer` package with sprite-sheet handling).
+
+**This paragraph used to end "none of that exists here and none of it is
+planned".** That decision has been reversed deliberately, and the reversal is
+recorded rather than quietly edited away, because the old reasoning was sound
+for the scope it assumed. The frontend was scoped as a **reference client**
+proving the protocol and the money path; presentation work now has its own
+budget, so `pixi.js` and `gsap` are dependencies of `game-frontend` and the
+renderer is being built out rather than held at "enough to show a settled
+result convincingly".
+
+**What the reversal does not touch is the boundary that matters.** The client
+still never computes a win: it renders `round.evaluation.totalWin` and
+server-sent balances, and `api.test.ts` pins that a spin message carries
+exactly `betAmount`, `clientRequestId` and `type`. A richer renderer changes
+how a settled fact is revealed, never what the fact is. The property in
+`reelStrip.ts` — reel state as a pure function of elapsed time, so a dropped
+frame cannot desync the reels — is the one to preserve through the rewrite,
+and it is what makes skipping an animation safe at any point.
+
+The timing maths stays on the covered side of the line either way: every
+timing decision lives in `reelStrip.ts` under 19 tests, and pure geometry and
+state helpers are the pieces worth adapting from the reference's
+`game-shell` (its `gameStateMachine.ts` and `deriveEnablement` are pure
+functions, testable with no renderer at all).
 
 ### ~~A2. The third sweep~~ — run, and it found the limit of output testing
 
@@ -829,10 +918,435 @@ ledger, `archiveAfter` a genuine BSON Date. Then the audit property, which
 is the one that matters: **replaying the round from the stored session seed
 alone reproduced 1960 exactly.**
 
-Still open, and deliberately: the backoffice has no editor for these params
-(they are set in the fixture, and a designer would edit them as raw JSON),
-and `runSimulation` still scores the feature with one multiplier rather than
-playing rounds out — item G's standing assumption, unchanged by this work.
+**The claim that first stood here was wrong, and F24 is the correction.** It
+read: "the backoffice has no editor for these params (they are set in the
+fixture, and a designer would edit them as raw JSON)" — filed as a deliberate
+omission. The editor *does* exist and does take raw JSON, so that half was
+true. What was not true is that a designer could reach the feature at all:
+the module dropdown held a hardcoded two-item list and `freeSpins` was not
+in it. A deliberate omission and an unreachable feature look identical from
+the outside, which is why the follow-up was worth doing rather than assuming.
+
+Still open, and genuinely deliberate: bonus parameters are free-form JSON
+rather than a per-module form, and `runSimulation` still scores the feature
+with one multiplier rather than playing rounds out — item G's standing
+assumption, unchanged by this work.
+
+### O. Frontend and presentation
+**Severity: n/a (product surface) · Effort: high · In progress**
+
+A deliberate scope change rather than a defect. The frontend was built as a
+**reference client** — enough presentation to prove the protocol and the
+money path — and is now being built out as a real one. Section C carries the
+reversal and what it does not touch; this item tracks the work.
+
+**Done:**
+
+- **A DOM test environment**, which was the blocker under everything else.
+  `jsdom` + `global-jsdom` + `@testing-library/react`, wired through
+  `apps/backoffice-frontend/src/testing/`. Two ordering hazards are solved
+  and documented in section C, because each fails in a way that names the
+  symptom rather than the cause: the DOM must be installed at
+  module-evaluation time (ESM hoists imports above statements, so React and
+  Testing Library capture `document` before any `installDom()` call in the
+  test body), and `tsx` needs an explicit `--tsconfig` or esbuild emits
+  classic-runtime `React.createElement` into files that never import React.
+- **`primitives.test.tsx`** — 11 tests on the shared components every screen
+  is built from, 4 of 5 mutations caught, the survivor documented as an
+  equivalent mutant established by probe rather than by argument.
+- **`pixi.js` and `gsap`** are dependencies of `game-frontend`.
+- **The player client's phase model** (`state/gameState.ts`) — 20 tests,
+  **all 8 mutations caught**, and it needs no DOM, which is why it was done
+  before any rendering work. It replaces `main.ts`'s scattered booleans
+  (`spinInFlight`, renderer nullability, direct `disabled` assignment) with
+  one typed state plus a pure `deriveEnablement`, so two controls cannot
+  disagree about whether a round is in flight.
+
+  **Adapted from the reference's `gameStateMachine.ts`, not transplanted**,
+  and the three departures are each forced by this engine's protocol rather
+  than chosen: no `bonusTriggered` phase (here `SPIN_RESULT` and the first
+  `BONUS_STATE` arrive too close together for anything to observe one, and a
+  state nothing can observe is a state nothing can test); no `stopRequested`
+  on `spinning` (a spin cannot be skipped before its result exists — there is
+  nothing settled to skip *to*); and `revealing` rather than `evaluating`,
+  because nothing is evaluated client-side and "evaluating" is precisely
+  where a reader would look for the win computation this client must never
+  contain.
+
+  **One mutation survived the first pass, and the reason generalises.**
+  Iterating the live listener `Set` instead of a copy left every test
+  passing, including the one written for it. Measured rather than argued: a
+  `Set` deleting the **current** element mid-iteration still visits every
+  remaining one, so a self-unsubscribing listener cannot tell the two apart
+  — only a listener removing a **different, not-yet-reached** one can. That
+  case is now its own test. The general form is section D's fixture lesson
+  again: a test can name the right hazard and still construct an input that
+  cannot reach it.
+- **`main.ts` is wired to the phase model**, with the enablement write
+  extracted to `ui/controls.ts` — 9 tests, **all 5 mutations caught**.
+
+  The extraction is the point rather than tidiness. Left inside `GameApp`,
+  that write would be reachable only by standing up a socket and a canvas —
+  so the phase model would have tests and the code acting on it would not,
+  which is **F24's shape exactly** and this item's own closing caution.
+  Being right about what *should* be enabled and actually writing it to the
+  button are different claims.
+
+  Three real behaviour changes fell out of the rewiring, each one a bug the
+  scattered booleans allowed:
+
+  | Was | Now |
+  |---|---|
+  | Bet buttons stayed live during a round — only the spin button was disabled | Bets lock for the whole round, so a stake cannot change after the server priced it |
+  | Space and click read `renderer.isSpinning`, which is **false** between sending a spin and the result arriving — a second press started a **second round** | The phase decides, and `spinning` offers neither a spin nor a skip |
+  | A spent token and a dropped socket both merely disabled a button | `unrecoverable` vs `offline`, only one of which a reconnect can fix |
+
+  The spin button now relabels to "Skip" mid-reveal, treated as part of
+  enablement rather than as decoration: a live button reading "Spin" that
+  actually skips is worse than a disabled one, because the player presses it
+  believing they placed a bet. The label is asserted in both directions,
+  since a one-way change leaves an idle client reading "Skip" forever.
+- **The renderer is Pixi now.** `PixiReelRenderer` replaces the canvas-2D
+  `renderer.ts`, which is deleted rather than left beside it — two renderers
+  where one is dead is the duplicate-source drift F24 is about.
+
+  **The architecture was decided by measurement, not preference.** `jsdom`
+  returns `null` for **both** the `webgl2` and `2d` contexts, so a live
+  `Application` cannot be constructed in a test at all. Anything that can be
+  numerically wrong therefore lives outside the renderer, in `spinMotion.ts`
+  (36 tests) and `symbolStyle.ts` (12 tests), leaving `PixiReelRenderer`
+  holding sprite creation, positioning and teardown — which a screenshot
+  checks better than an assertion would. **All 14 mutations on that maths
+  are caught.**
+
+  **Two bugs were inherited from the reference as guards rather than
+  rediscovered**, both recorded in its own source because it shipped them:
+
+  | Bug | Symptom | Guard |
+  |---|---|---|
+  | Blur factor applied to a **pixel** delta calibrated in **row** units | Strength ~15x the filter default — reels did not look fast, they looked *gone* | `computeBlurStrength` normalises against cell size, and `MAX_BLUR_STRENGTH` caps it whatever the tuning |
+  | Settle distance "wrap-normalised" to always travel forward | Lands a full cycle from the target while looking arithmetically sensible | `settleDistance` is `target - current` and nothing else; a backward nudge is the accepted trade |
+
+  **Two more were found by running the client**, which is the part worth
+  keeping — neither was reachable from any test, and both are recorded in
+  the source where a later reader will meet them:
+
+  - **The grid rendered in the top-left corner at a fixed size.** Pixi's
+    `autoDensity` writes an **inline** `style.width`/`style.height` onto the
+    canvas, and an inline style beats the stylesheet's `width: 100%`.
+    Measuring the canvas then reads back the number Pixi just wrote — a
+    feedback loop pinning the grid at Pixi's default 800x600 however large
+    the window is. Measured live: an 800x600 canvas inside a 1280x596
+    `<main>`, with the grid **correctly centred inside the wrong box**,
+    which is why it reads as a centring bug and is not one. `layout()` now
+    measures the *parent*, via `measurementSource`.
+  - **Switching tabs mid-spin stranded the round permanently.** The settle
+    is detected inside the draw loop, and browsers throttle
+    `requestAnimationFrame` to **zero** in a hidden tab. Measured: 0 frames
+    in 500ms, and a reveal stuck for as long as it was observed — spin
+    disabled, button reading "Skip", status "Spinning…". The money was never
+    at risk, the server having settled the round before any of this ran,
+    which is exactly why the client must not be what strands it.
+    `shouldForceSettle` completes the reveal on becoming visible, and only
+    when the animation *would already have finished* — a tab hidden for a
+    moment still sees the rest of its reveal rather than having it snatched.
+
+  Verified against the live stack, not just the suite: a real spin through
+  the rebuilt container debited $1000→$999, a later round paid a $1 line win
+  with the winning cells outlined, and `e2e:spin` passes in full — including
+  idempotent retry, single-use launch tokens, and round recovery replaying
+  to the identical seed and outcome.
+- **The player is told what happened** (`ui/statusPresentation.ts`, 12
+  tests). A pure map from phase to wording, so the status line and the
+  buttons cannot disagree — a client reading "Ready" beside a disabled spin
+  button teaches the player the button is broken.
+
+  The wording is deliberately **not** asserted verbatim; pinning sentences
+  makes copy edits fail the suite, which trains people to ignore failures.
+  What is asserted is the contract: every terminal state is non-actionable,
+  every one of them names the single thing that helps, and an unrecognised
+  code still yields a usable sentence with the raw code appended for
+  support. The first version of the Pixi work made this concrete — a failed
+  graphics init showed a blank canvas with a working Spin button, which is a
+  player betting into nothing.
+- **Bonus parameters have a real form** — **F24's follow-up, now closed.**
+  F24 made every module selectable and stopped there, leaving their
+  parameters a free-form JSON blob. So a designer could reach `freeSpins`
+  and still had no way to learn it reads `spinCount`, `winMultiplier`,
+  `retriggerSpins`, `maxRetriggers` and `assumedBaseRtp` — that contract
+  lived only in the module's source, in the shape of
+  `typeof params.x === "number" ? params.x : DEFAULT`.
+
+  **Why that is worse than inconvenience, and the reason this is worth the
+  work:** every module *silently substitutes its own default* for anything
+  malformed. A typo'd key, a value below a module's minimum, a number typed
+  as text — none of them fails validation and none blocks a publish. The
+  game plays under numbers nobody chose and looks entirely successful doing
+  it. The form is the only place in the system where that is catchable.
+
+  `BonusModule` gained an optional `paramSchema`, declared **next to each
+  module** and served through the existing `/v1/bonus-modules` route via
+  `listBonusModuleSchemas()`. Declared there rather than in the backoffice
+  for exactly the reason F24 records: a list kept in a second place drifts,
+  and nothing fails when it does. A parameter list kept in a second place
+  would be the identical bug one level down, and quieter.
+
+  Tests: 16 on the registry (both mutations caught — returning specs by
+  reference, and dropping schema-less modules), 24 on the form and its two
+  pure helpers, 4 more on the route. Two decisions are pinned because they
+  are easy to get backwards:
+
+  - **An emptied field removes the key** rather than storing `0` or `[]`.
+    The module's fallback triggers on *absence*, so absence is the honest
+    representation of "use the default".
+  - **A module with no schema keeps the JSON editor.** An empty form would
+    read as "this module takes no parameters", which is a different and
+    false statement.
+
+  **Verified the way F24 says to verify** — by asking how a designer reaches
+  it, not just whether it is correct. Signed into the running backoffice,
+  opened `free-spins-5x3`, and confirmed all five parameters render as
+  labelled fields carrying the fixture's real stored values (including
+  `assumedBaseRtp: 0.81`, the measured base return). Setting "Free spins
+  awarded" to 0 produced **"below the minimum of 1 — the module will use
+  10"** live, which names both the violation and what the module will
+  silently do instead. The draft was left byte-identical to the published
+  document afterwards.
+- **A win counts up, and its tier scales the announcement**
+  (`render/winPresentation.ts` — 27 tests; `ui/winCountUp.ts` — 11 tests).
+  Thresholds are 15x and 50x of the **bet**, not absolute amounts: 500 minor
+  units is a large win on a 1-unit stake and a loss on a 50-unit one.
+
+  **This module handles money, so it is held to the money standard rather
+  than the presentation one — and the reference shipped exactly the bug that
+  standard exists to prevent.** Its own source records it: a mid-tween
+  counter was rendered with `toFixed(2)`, which formats decimal *places*
+  without converting minor units to major ones, so a 2000-unit win (20.00)
+  displayed as **"WIN 2000.00"** in front of a player. `countUpValueAt`
+  therefore returns an **integer count of minor units at every instant**, and
+  the suite asserts that across the whole animation rather than at its
+  endpoints — an implementation integral only at 0 and 1 is precisely the one
+  that fails in the middle, which is where every rendered frame lives.
+
+  Three decisions are pinned because each is a way to be quietly wrong:
+
+  | Decision | The failure it prevents |
+  |---|---|
+  | Tier is `none` when the stake is **zero** | A free spin costs nothing, so a bonus genuinely reports a win against a zero stake. Every threshold would be 0 and the loudest celebration would fire on the smallest possible amount. |
+  | Tier is derived from the value **on screen**, not the final win | Otherwise the celebration fires before the player has watched the number get there. |
+  | `tierCrossing` is **edge**-triggered | A level-triggered check fires on every frame above the threshold rather than once as it is crossed. |
+
+  **Mutation: 6 of 8 caught, and the two survivors are documented
+  equivalents established by measurement.** Both `Math.floor` and the
+  `elapsedMs >= durationMs` early return are unreachable under a cubic
+  ease-out, which never exceeds 1. They are kept deliberately: swapping in
+  the overshooting `easeOutBack` that `reelStrip.ts` already uses for the
+  reel settle makes both live immediately — measured, the count-up would then
+  display **up to 499 minor units over** a 5000-unit win, a 4.99
+  overstatement of a 50.00 payout. Dead code that stops a curve change from
+  silently reintroducing a money bug.
+
+  **A caution recorded in `index.html` for whoever verifies the tiers next.**
+  They cannot be read with `getComputedStyle` in a background or throttled
+  tab: transitions run on the same frame clock as `requestAnimationFrame`,
+  which such a tab stops, so a probe reads a *frozen* transition and reports
+  `matrix(1,0,0,1,0,0)` for a rule plainly declaring `scale(1.28)`. The tell
+  is that `text-shadow` — which has no transition — applies while `color` and
+  `transform` from the very same rule do not. Set `style.transition = "none"`
+  first. Measured that way all four tiers are correct: none/win flat, big
+  1.12x, mega 1.28x white with a glow.
+
+  Verified end to end by driving the shipped module frame by frame:
+  `$14.92 → $27.13 → … → $59.95 → $60.00`, decelerating, never overshooting,
+  landing exactly, with `win → big → mega` each firing once. `e2e:spin`
+  passes in full against the rebuilt container.
+- **Symbols can carry real artwork** (`render/symbolAssets.ts` — 19 tests,
+  **all 6 mutations caught**; `publicView.ts` — 5 new tests). `GameAssets`
+  is a new optional field on `GameDefinition`: symbol image URLs plus a
+  background.
+
+  **The separation is the design, not the plumbing.** Nothing in `assets`
+  reaches the evaluator, the RTP simulation or the publish gate — a game's
+  mathematics is its strips, weights, paytable and bonus params, and none of
+  those can be changed by uploading a picture. That is what makes artwork
+  safe to edit on a published game without re-running the gate, and it is
+  pinned by a test that diffs the whole public projection with and without
+  artwork and asserts **only** the `assets` key differs. It is also why this
+  is a separate field rather than a property on `SymbolRule`: a symbol's
+  *rule* is maths, and mixing the two invites a change to one being reviewed
+  as though it were the other.
+
+  **A missing picture must never hide a symbol.** Artwork is optional at
+  every level — no assets at all (every fixture here), a symbol absent from
+  the map, a URL that 404s, a whole asset host down — and each falls back to
+  the derived glyph. A blank cell on a reel a player is being paid on is a
+  far worse failure than an ugly one, because the player cannot tell what
+  they won. The fallback is **per symbol**, so one game legitimately mixes
+  art and glyphs; verified on screen, with `cherry`/`plum` drawn as sprites
+  beside `10/J/Q/K/A` as letters.
+
+  **URLs are filtered before they reach the loader.** A game definition is
+  data a designer edits, so its URLs reach `Assets.load` directly: `http`,
+  `https` and relative paths are allowed, `javascript:`, `data:` and `blob:`
+  refused. Refusing is safe precisely *because* of the fallback above — a
+  refused URL is a placeholder, not a broken game.
+
+  **The load report distinguishes "no artwork" from "artwork missing",** and
+  that distinction is the only thing that makes the warning worth printing.
+  Every game here ships none, so warning on absence would be noise by the
+  second day; a dead asset host renders placeholders everywhere and
+  otherwise looks like a styling choice nobody questions for a week. Proven
+  in the most direct way available: the first live attempt logged
+  **"6 of 6 symbol images failed to load … cherry, plum, bell, seven, wild,
+  scatter"**, which is what turned an invisible problem into a diagnosable
+  one. The cause was a hand-rolled PNG encoder in the *test fixture* writing
+  a bad CRC — `file` accepted the images and browsers refused to decode
+  them — not a defect in the renderer.
+
+  Verified against the live stack end to end: artwork set on the published
+  document, served through the real `/public/games/:id` allowlist, rendered
+  as sprites in the browser, then removed again so the shipped game is
+  byte-identical to before. `e2e:spin` passes in full.
+
+  Worth recording one unusual mutation result. Forcing the `assets` key to
+  be emitted unconditionally does not *survive* — it **crashes**, because
+  `gameDef.assets` is undefined for every shipped game and reading
+  `.symbolImageUrls` off it throws before a single test runs. The guard is
+  load-bearing at runtime rather than merely observed by an assertion, which
+  is a stronger position than a caught mutation.
+- **The bonus panel keeps its elements between steps** (`ui/bonusView.ts` —
+  22 tests, **all 7 mutations caught**; `ui/bonusPanel.ts` — 24 tests).
+  Replaces an `innerHTML` rebuild that ran on every `BONUS_STATE`.
+
+  **The rebuild was not merely untidy.** It destroyed and recreated every
+  tile each time a player picked one, so the element showing a result was a
+  different object from the one clicked — no reveal could animate, keyboard
+  focus was thrown away on every step, and a module's free-form `view`
+  values were interpolated straight into markup. Values are now set with
+  `textContent`, and elements are created once per round.
+
+  **Dispatch is on the shape of the view, never on a module id.** A view
+  carrying `remaining` is a free-spins round whatever it is called. Keying
+  off the id would put a second copy of the module list in the client, which
+  is F24's failure one layer over. A module this build cannot draw says so
+  rather than rendering an empty overlay — a bonus blocks the base game
+  until it resolves, so a blank panel reads as a frozen client.
+
+  **Two bugs found by running it, neither reachable from a test:**
+
+  - **A mutation survived that should not have.** Removing
+    `stepInFlight = true` from the click handler changed nothing, because
+    `syncTileEnablement` was called without a model and disabled everything
+    unconditionally — the flag was decorative on the click path. The panel
+    now remembers the last pick model so one rule decides enablement in both
+    directions, and the mutation is caught.
+  - **Focus was still lost on every pick**, despite the tiles surviving.
+    A browser blurs a focused element the moment it is disabled; **`jsdom`
+    does not**, so the test written for exactly this passed against a
+    stand-in more permissive than the real thing — the `fakeMongo` trap in
+    section D, in a new place. Focus is now tracked on `focusin` (which
+    bubbles, unlike `focus`) and restored only onto a tile still usable.
+
+  A caution for whoever re-checks that fix: **a programmatic `.focus()` does
+  not emit `focusin` in a headless pane**, so a probe that calls `.focus()`
+  and then picks a tile will see focus land on `<body>` and conclude the fix
+  is broken. It is not — a real Tab keypress fires the event. Dispatching
+  `focusin` alongside the call reproduces the keyboard path.
+
+  Two mutations survive as documented equivalents, both defence in depth
+  established by probe: the `if (button.disabled) return` guard (already
+  disabled by `syncTileEnablement`) and the `clearTimeout` before a resolved
+  dismissal (`hide()` clears every pending timer, and the first callback
+  calls `hide()`). Both are kept so each path is correct on its own terms
+  rather than only while another method keeps its promise.
+
+  Verified live on both module types: a pick round rendered 9 tiles, revealed
+  `×3` on the clicked one while the other eight stayed live, kept the **same
+  element objects** across the step, ran through to `Bonus complete`, hid
+  itself and returned the client to idle with the balance credited to
+  $1011.00. A free-spins round rendered "Free spins ×3 · 5 left · $0.00" with
+  a single enabled Spin button. `e2e:spin` passes in full.
+
+**The rule these tests follow**, stated because it is the difference between
+a component suite that earns its runtime and one that makes every visual
+change expensive: **assert behaviour a user depends on, never a token.** A
+test restating `t.accent` passes whatever the value is — it pins nothing and
+makes the palette harder to change. A test that a disabled publish button
+does not fire pins something real.
+
+- **Artwork can be set by a designer** (`gameBuilder/AssetsEditor.tsx` — 24
+  tests, **all 7 mutations caught**), which closes the last row on this
+  list. A per-symbol URL field plus a background field, on its own Artwork
+  tab, with the symbol list taken from `draft.symbols` rather than from the
+  artwork map — deriving it from the map would show only symbols that
+  *already* had artwork, leaving no way to add the first one, which is F24
+  in miniature on a screen that looked complete.
+
+  **A URL field rather than object storage, and the reference is the
+  argument for it.** Its `asset-storage` signs 24-hour URLs, and its own
+  `repair-corrupted-asset-urls.ts` records what that cost: `GET` returned
+  signed URLs, `updateDraft` blindly `$set` the client's `assets` object
+  back, and every "Save draft" overwrote the raw storage key with a signed
+  URL — **compounding on each save**, since the next GET re-signed the
+  already-corrupted value. This repo has the same blind spread in its
+  `PUT /v1/games/:gameId`. It is safe here for one reason, stated in the
+  source because a future upload feature would remove it: **what is read is
+  exactly what is written.** No signing step sits between them, so a round
+  trip cannot corrupt a value.
+
+  **Three silent drops were found on the way, none reachable from a test
+  that existed.** Two were allowlists omitting by default — `publishDraft`
+  built its `gameDef` field by field and never carried `assets`, so artwork
+  was accepted, saved, echoed back by every GET and **discarded at the one
+  step that makes it playable**; `draftFromPublished` dropped it in the
+  other direction, so reopening a live game to change a payout would have
+  erased its artwork without either step mentioning artwork. The third is
+  F25, and it took the live stack to see. All three are invisible from both
+  ends: the draft still holds the URLs, so the editor keeps showing them.
+
+  The URL rule now lives in `shared-types` beside `GameAssets` rather than
+  in the player client, so the screen that *writes* the field and the loader
+  that *reads* it share one definition. A second copy would not have stayed
+  equal, and nothing would have failed when it stopped being: the loader
+  refuses a bad URL silently and by design, so the editor could have stored
+  a value that renders as nothing, with a saved field and a clean publish
+  either side of it. The client's 19 existing tests pass unchanged against
+  the moved rule, which is what establishes the move was a refactor.
+
+  Verified against the live stack end to end, and against real MongoDB
+  rather than `fakeMongo`: artwork set on a draft of `reference-5x3`,
+  reloaded, **published as v5**, and served through the real
+  `/public/games/:id` allowlist. Then cleared — which is what surfaced F25
+  and F26 — and republished as v7 with the projection clean again, the live
+  document byte-identical to its own v7 snapshot, and `e2e:spin` passing in
+  full including idempotent retry and round recovery.
+
+**Open, in the order it is worth doing:**
+
+| # | What | Why it is next |
+|---|---|---|
+| 1 | Object storage and an upload button | Only worth doing when someone needs to host art *here* rather than at a URL they already have. Read F25, F26 and the reference's `repair-corrupted-asset-urls.ts` before starting: signing introduces a read shape that differs from the write shape, which is exactly the asymmetry this design currently does not have, and the reference shipped a compounding data-corruption bug on it. |
+
+**Responsive / mobile layout is explicitly deprioritised** (decided
+2026-08-17). Not an oversight and not blocked — a stated priority call, so
+that nobody reads its absence from the list above as something forgotten and
+"fixes" it ahead of the rows that matter.
+
+What already holds without any further work: `computeGridMetrics` fits the
+grid to **whichever axis is tighter** (7 tests, including a 2000x400 and a
+320x900 viewport), so the reels never crop on a narrow or short window —
+which is the half that would be a *correctness* problem, since a cropped reel
+hides symbols a player is being paid on. What is missing is the half that is
+purely presentational: the surrounding chrome does not adapt, and there is no
+rotate-device handling. When it is picked up, the reference drives that off
+`matchMedia("(orientation: portrait)")` rather than comparing width to
+height, so it reacts even when no breakpoint changes.
+
+**A caution for whoever picks this up**, and it is the section-D lesson in a
+new costume: a component test can mount a tree, assert on it, and still
+establish nothing about whether a *screen* uses that component. A primitive
+can be perfect and unmounted — which is F24 exactly, one layer down. Test the
+screen's own wiring, not just the parts it is assembled from.
 
 ### D. Test-infrastructure debt
 
@@ -876,7 +1390,7 @@ playing rounds out — item G's standing assumption, unchanged by this work.
   worst of them, because a test can show a field correctly written while
   production keeps or loses something else.
 - **`fakeMongo` is 562 lines and still has no test of its own.** It is
-  covered instead by **50 conformance cases run against real MongoDB**, which
+  covered instead by **53 conformance cases run against real MongoDB**, which
   is the more valuable half: a stand-in's only meaningful property is
   agreement with the thing it stands in for, and a unit test of the fake
   would pin its behaviour to itself. The file has roughly doubled in size
@@ -891,6 +1405,16 @@ playing rounds out — item G's standing assumption, unchanged by this work.
   data Mongo would have left alone. Only the silent group is unique to a
   stand-in; the rest are ordinary bugs that happen to live in test
   infrastructure.
+
+  **A fifth category showed up with F26, and it is not a divergence at
+  all:** the fake was missing `replaceOne` outright, so the *correct* fix
+  for a production bug threw `is not a function` in every publish test. That
+  fails loudly and is therefore the harmless kind — but it shapes the code
+  written against the fake, which is the quiet cost. `$set` is what the
+  publish path used, and `$set` was what the fake supported. A stand-in's
+  gaps do not only hide bugs; they also make the wrong call the path of
+  least resistance. `replaceOne` is now implemented and pinned by three
+  conformance cases against real Mongo.
 
   The fourth round added the destructive column its third member and is the
   one to watch: a test can show a field correctly written while production

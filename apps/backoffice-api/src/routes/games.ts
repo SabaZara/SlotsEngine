@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { Db } from "mongodb";
-import type { GameDefinition } from "@slots-engine/shared-types";
+import { REMOVABLE_DRAFT_FIELDS, type GameDefinition } from "@slots-engine/shared-types";
+import { listBonusModuleSchemas, listBonusModules } from "@slots-engine/math-engine";
 import { requireRole } from "../auth/middleware.js";
 import { blankDraft, draftFromPublished, getDraft, listDrafts, saveDraft, type GameDraft } from "../games/drafts.js";
 import { DraftValidationError, validateDraft } from "../games/validateDraft.js";
@@ -14,6 +15,33 @@ const PREVIEW_SIM_COUNT = 20_000;
 
 export function registerGameRoutes(app: FastifyInstance, db: Db): void {
   const designer = { preHandler: [requireRole("game_designer")] };
+
+  /**
+   * Which bonus modules this build can actually play.
+   *
+   * Served from `listBonusModules()` — the engine registry itself — rather
+   * than from a list maintained anywhere else. The backoffice used to
+   * hardcode its own copy, and it drifted the moment a third module shipped:
+   * `freeSpins` was registered in the engine and **could not be selected by a
+   * designer at all**, because the editor's array still named two.
+   *
+   * The drift is silent in both directions, which is why it has to be
+   * derived. A list that is short refuses a module that works; a list that is
+   * long offers one that does not exist, which publishes cleanly (the API
+   * cannot see the client's array) and then fails at spin time, in front of a
+   * player, on the money path.
+   */
+  app.get("/v1/bonus-modules", async (_request, reply) => {
+    // `schemas` carries the parameters each module reads. Served from the
+    // same route as the id list, and from the same registry, because they
+    // are the same fact at two levels of detail — a second endpoint could
+    // answer them inconsistently, and this route exists precisely because a
+    // second copy of this information drifted once already.
+    //
+    // `modules` is kept alongside it rather than derived by the client, so
+    // an older backoffice build reading only that field keeps working.
+    return reply.send({ modules: listBonusModules(), schemas: listBonusModuleSchemas() });
+  });
 
   /** Every game, published or draft, with the live version alongside — the
    * one screen a designer opens first. */
@@ -106,6 +134,35 @@ export function registerGameRoutes(app: FastifyInstance, db: Db): void {
         updatedAt: new Date().toISOString(),
         updatedByUserId: request.user!.userId,
       };
+
+      /*
+       * An explicit `null` removes an optional field. Found by running the
+       * live stack, and not reachable from any test that used this route
+       * the way the editor does.
+       *
+       * The merge above is a patch: an absent key means "leave unchanged",
+       * which is what lets the editor save one field at a time. But
+       * `undefined` does not survive `JSON.stringify` — `{assets:
+       * undefined}` goes on the wire as `{}` — so "remove this field" and
+       * "do not touch this field" arrive here **identical**, and `saveDraft`
+       * uses `$set`, which never unsets. The result was that artwork could
+       * be added through the API and then never cleared: the editor's own
+       * clear-the-last-symbol path returns `undefined`, which the network
+       * silently converted into a no-op. The screen showed the field
+       * emptied, the next reload brought the artwork back.
+       *
+       * `null` is used rather than a separate endpoint or a `$unset` list
+       * because it is the one value that both survives JSON and cannot be
+       * confused with a legitimate one — no field here is meaningfully
+       * null.
+       */
+      // Restricted to the known-removable fields rather than "any null in
+      // the body", so a stray null cannot delete something required and
+      // leave an unpublishable draft behind.
+      const body = (request.body ?? {}) as Record<string, unknown>;
+      for (const field of REMOVABLE_DRAFT_FIELDS) {
+        if (body[field] === null) delete next[field];
+      }
 
       // A draft is saved even when invalid — a designer must be able to
       // leave work half-finished. Validity is a publish-time gate, and the

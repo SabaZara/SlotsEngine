@@ -511,6 +511,41 @@ class FakeCollection {
     return { matchedCount: 0, modifiedCount: 0, upsertedCount: 0 };
   }
 
+  /**
+   * Replaces a whole document rather than merging fields into it.
+   *
+   * Added for F25's second site. `publishDraft` upserted the live game with
+   * `$set`, which leaves keys the new version does not have in place — so a
+   * field dropped between two publishes survived on the document players
+   * read, while `gameVersions` correctly recorded it as gone. `replaceOne`
+   * is how "the live game IS this gameDef" is stated, and the fake could not
+   * express it.
+   *
+   * `_id` is carried over from the replaced document, as Mongo does: a
+   * replacement may not change it, and dropping it here would hand out a new
+   * identity on every publish.
+   */
+  async replaceOne(
+    query: Record<string, unknown>,
+    replacement: Doc,
+    options: { upsert?: boolean } = {},
+  ): Promise<{ matchedCount: number; modifiedCount: number; upsertedCount: number }> {
+    const index = this.docs.findIndex((doc) => matches(doc, query));
+    if (index >= 0) {
+      const previous = this.docs[index];
+      const next = stripUndefined({ ...replacement, ...(previous._id !== undefined ? { _id: previous._id } : {}) }) as Doc;
+      this.assertUnique(next, previous);
+      this.docs[index] = next;
+      const changed = JSON.stringify(next) !== JSON.stringify(previous);
+      return { matchedCount: 1, modifiedCount: changed ? 1 : 0, upsertedCount: 0 };
+    }
+    if (options.upsert) {
+      await this.insertOne({ ...query, ...replacement } as Doc);
+      return { matchedCount: 0, modifiedCount: 0, upsertedCount: 1 };
+    }
+    return { matchedCount: 0, modifiedCount: 0, upsertedCount: 0 };
+  }
+
   async countDocuments(query: Record<string, unknown> = {}, options: { limit?: number } = {}): Promise<number> {
     const matched = this.docs.filter((doc) => matches(doc, query)).length;
     return options.limit ? Math.min(matched, options.limit) : matched;

@@ -112,6 +112,62 @@ function spinSeed(sessionSeed: string, spinIndex: number): string {
 export const freeSpinsModule: BonusModule = {
   moduleId: "freeSpins",
 
+  /**
+   * The module F24 was about, so the one whose form matters most.
+   *
+   * F24 made `freeSpins` selectable and stopped there — its five parameters
+   * stayed a JSON blob, documented nowhere a designer would look. Two of
+   * them are load-bearing beyond convenience and say so in their help text:
+   * `maxRetriggers`, which is what makes the worst case finite at all, and
+   * `assumedBaseRtp`, which feeds the publish gate directly.
+   */
+  paramSchema: [
+    {
+      key: "spinCount",
+      label: "Free spins awarded",
+      type: "integer",
+      defaultValue: DEFAULT_SPIN_COUNT,
+      min: 1,
+      help: "How many free spins the feature starts with. Each is a real spin on this game's own reels.",
+    },
+    {
+      key: "winMultiplier",
+      label: "Win multiplier",
+      type: "number",
+      defaultValue: DEFAULT_WIN_MULTIPLIER,
+      min: 1,
+      help:
+        "Every free-spin win is multiplied by this. Below 1 would make the feature pay less than the base game and is refused; the default doubles.",
+    },
+    {
+      key: "retriggerSpins",
+      label: "Spins added by a retrigger",
+      type: "integer",
+      defaultValue: DEFAULT_RETRIGGER_SPINS,
+      min: 0,
+      help: "Extra spins granted when a free spin triggers the feature again. Zero disables retriggering entirely.",
+    },
+    {
+      key: "maxRetriggers",
+      label: "Maximum retriggers",
+      type: "integer",
+      defaultValue: DEFAULT_MAX_RETRIGGERS,
+      min: 0,
+      help:
+        "A hard ceiling per session, and it is load-bearing rather than a safety net. A free spin can retrigger the feature because it is a real spin, so without a cap a high enough spin count or trigger chance produces a round that never ends and pays without bound.",
+    },
+    {
+      key: "assumedBaseRtp",
+      label: "Assumed base RTP",
+      type: "number",
+      defaultValue: 0.95,
+      min: 0.01,
+      max: 1.99,
+      help:
+        "This feature's return is the base game's own RTP, which the module cannot see — so it uses this figure when estimating its expected value for the publish gate. Set it to the RTP this game actually measures, or the gate is checking a number that does not describe the game.",
+    },
+  ],
+
   start({ params }): BonusStepOutput {
     const { spinCount, winMultiplier } = config(params);
 

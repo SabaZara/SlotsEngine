@@ -1,12 +1,23 @@
+import { useEffect, useState } from "react";
 import type { BonusModuleConfig, PaylineWinRule } from "@slots-engine/shared-types";
-import type { GameDraft } from "../api.js";
+import { api, type GameDraft } from "../api.js";
 import { Badge, Button, Field, NumberInput, Select, TextInput } from "../ui/primitives.js";
+import { BonusParamsForm, type BonusParamSpec } from "./BonusParamsForm.js";
 import { t } from "../ui/tokens.js";
 
-/** The modules the engine actually ships. Free text would let a designer
- * reference a module that does not exist — accepted at publish (the API
- * cannot see the client registry) and then failing at spin time. */
-const KNOWN_MODULES = ["wheel", "pick"];
+/**
+ * Last-resort list, used only when the registry has not arrived yet.
+ *
+ * This used to be *the* list, and it drifted the moment a third module
+ * shipped: `freeSpins` was registered in the engine and could not be selected
+ * by a designer at all. The real list now comes from `/v1/bonus-modules`,
+ * which reads the engine registry itself.
+ *
+ * Free text is still the wrong answer, for the reason the original comment
+ * gave — a module that does not exist publishes cleanly, because the API
+ * cannot see this file, and then fails at spin time in front of a player.
+ */
+const FALLBACK_MODULES = ["wheel", "pick", "freeSpins"];
 
 function BetOptionsEditor({ betOptions, onChange }: { betOptions: number[]; onChange: (options: number[]) => void }) {
   return (
@@ -45,9 +56,17 @@ function BetOptionsEditor({ betOptions, onChange }: { betOptions: number[]; onCh
 
 function BonusModulesEditor({
   modules,
+  available,
+  schemas,
   onChange,
 }: {
   modules: BonusModuleConfig[];
+  /** From the engine registry, via /v1/bonus-modules. */
+  available: string[];
+  /** Each module's own parameter list, from the same route and the same
+   * registry — see `BonusParamsForm` for why this is fetched rather than
+   * written down here. */
+  schemas: Record<string, BonusParamSpec[]>;
   onChange: (modules: BonusModuleConfig[]) => void;
 }) {
   const update = (index: number, patch: Partial<BonusModuleConfig>) =>
@@ -61,10 +80,18 @@ function BonusModulesEditor({
           style={{ border: `1px solid ${t.border}`, borderRadius: t.radiusSm, padding: 10, marginBottom: 8 }}
         >
           <div style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 8 }}>
-            <div style={{ width: 150 }}>
+            <div style={{ width: 170 }}>
               <Select
                 value={module.moduleId}
-                options={KNOWN_MODULES.map((id) => ({ value: id, label: id }))}
+                // A draft can name a module this build does not have — saved
+                // before the module was removed, or restored from an older
+                // deployment. Its own id is kept as an option so the select
+                // does not silently rewrite the draft to whatever happens to
+                // be first, which would change what the game pays without
+                // anyone choosing it.
+                options={(available.includes(module.moduleId) ? available : [module.moduleId, ...available]).map(
+                  (id) => ({ value: id, label: available.includes(id) ? id : `${id} — not in this build` }),
+                )}
                 onChange={(moduleId) => update(index, { moduleId })}
               />
             </div>
@@ -98,27 +125,19 @@ function BonusModulesEditor({
             </div>
           </div>
 
-          <div style={{ fontSize: 11, color: t.muted, marginBottom: 4 }}>
-            Parameters <span style={{ color: t.faint }}>· validated by the module itself</span>
-          </div>
-          <TextInput
-            mono
-            value={JSON.stringify(module.params)}
-            onChange={(value) => {
-              // Free-form because each module defines its own parameters and
-              // the API deliberately does not know their shapes. Invalid JSON
-              // is ignored rather than thrown away, so a half-typed edit
-              // doesn't wipe the field.
-              try {
-                update(index, { params: JSON.parse(value) as Record<string, unknown> });
-              } catch {
-                /* keep the previous value until the text parses */
-              }
-            }}
+          {/* Built from the module's own declared schema rather than a raw
+              JSON blob. F24's follow-up: making a module selectable does not
+              help if its parameters are undocumented anywhere a designer
+              looks — and every module silently substitutes a default for
+              anything malformed, so nothing downstream ever complains. */}
+          <BonusParamsForm
+            schema={schemas[module.moduleId] ?? []}
+            params={module.params}
+            onChange={(params) => update(index, { params })}
           />
         </div>
       ))}
-      <Button onClick={() => onChange([...modules, { moduleId: KNOWN_MODULES[0], params: {} }])}>
+      <Button onClick={() => onChange([...modules, { moduleId: available[0] ?? FALLBACK_MODULES[0], params: {} }])}>
         Add bonus module
       </Button>
     </div>
@@ -132,6 +151,36 @@ export function SettingsEditor({
   draft: GameDraft;
   onChange: (patch: Partial<GameDraft>) => void;
 }) {
+  // Read once per mount from the engine registry. On failure the fallback
+  // stands in rather than leaving the select empty — an editor that cannot
+  // offer any module is worse than one offering a slightly stale list, and
+  // the list only changes when the engine ships a new module.
+  const [available, setAvailable] = useState<string[]>(FALLBACK_MODULES);
+  /** Keyed by moduleId. Empty until the fetch lands, and an unknown module
+   * resolves to `[]` — which `BonusParamsForm` renders as the raw JSON
+   * editor, so a designer is never worse off than before the schema
+   * existed. */
+  const [schemas, setSchemas] = useState<Record<string, BonusParamSpec[]>>({});
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .listBonusModules()
+      .then(({ modules, schemas: fetched }) => {
+        if (cancelled) return;
+        if (modules.length > 0) setAvailable(modules);
+        // Tolerated as absent rather than required: an older API build
+        // serves `modules` without `schemas`, and the form degrades to the
+        // JSON editor rather than the screen failing to render.
+        if (fetched) setSchemas(Object.fromEntries(fetched.map((s) => [s.moduleId, s.params])));
+      })
+      .catch(() => {
+        /* keep the fallback */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   return (
     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(300px, 1fr))", gap: 24 }}>
       <div>
@@ -200,11 +249,14 @@ export function SettingsEditor({
           </div>
           <BonusModulesEditor
             modules={draft.bonusModules}
+            available={available}
+            schemas={schemas}
             onChange={(bonusModules) => onChange({ bonusModules })}
           />
           <div style={{ fontSize: 11, color: t.faint, marginTop: 8 }}>
-            <Badge>Note</Badge> A bonus needs a trigger symbol or a random trigger to ever fire. The RTP preview
-            estimates a bonus at a flat 20× the bet rather than playing it.
+            <Badge>Note</Badge> A bonus needs a trigger symbol or a random trigger to ever fire. The RTP preview does
+            not play the bonus out — it scores it from the module's own expected return, derived from these parameters
+            where the module can compute it and assumed where it cannot.
           </div>
         </div>
       </div>

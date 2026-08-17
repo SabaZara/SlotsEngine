@@ -52,4 +52,85 @@ describe("toPublicView", () => {
     const symbols = view.symbols as Array<{ symbol: string; paytable?: Record<number, number> }>;
     assert.deepEqual(symbols.find((s) => s.symbol === "seven")?.paytable, REFERENCE_GAME.symbols.find((s) => s.symbol === "seven")?.paytable);
   });
+
+  describe("artwork", () => {
+    /**
+     * Assets are public by nature — every player sees these images, and a
+     * URL a browser cannot fetch is useless. So the interesting property is
+     * not secrecy but that this stays an **allowlist**: a field added to
+     * `GameAssets` later must be a decision someone makes in this file
+     * rather than something that publishes itself.
+     */
+    it("omits the assets key entirely for a game with no artwork", () => {
+      /**
+       * Every fixture in this repo. An empty object would be a different
+       * document from one that never had assets, and the client's own
+       * fallback keys off absence.
+       *
+       * Worth recording how this behaves under mutation, because the result
+       * is unusual: forcing the key to be emitted unconditionally does not
+       * *survive*, it **crashes** — `gameDef.assets` is undefined for every
+       * shipped game, so reading `.symbolImageUrls` off it throws before a
+       * single test runs. The guard is load-bearing at runtime rather than
+       * merely observed by an assertion, which is a stronger position than
+       * a caught mutation.
+       */
+      assert.ok(!("assets" in view), "a game with no artwork should not carry an assets key");
+    });
+
+    it("carries configured symbol images and a background", () => {
+      const withArt = toPublicView({
+        ...REFERENCE_GAME,
+        assets: { symbolImageUrls: { seven: "https://cdn.example.com/seven.png" }, backgroundUrl: "https://cdn.example.com/bg.jpg" },
+      }) as unknown as Record<string, unknown>;
+
+      assert.deepEqual(withArt.assets, {
+        symbolImageUrls: { seven: "https://cdn.example.com/seven.png" },
+        backgroundUrl: "https://cdn.example.com/bg.jpg",
+      });
+    });
+
+    it("is an allowlist within assets too — a new asset field is withheld", () => {
+      // The same property as the outer projection, one level down. Spreading
+      // `gameDef.assets` would have published this automatically, which is
+      // the failure this file exists to prevent.
+      const withExtra = toPublicView({
+        ...REFERENCE_GAME,
+        assets: {
+          symbolImageUrls: { seven: "https://cdn.example.com/seven.png" },
+          // @ts-expect-error deliberately modelling a future field
+          internalUploadPath: "/var/uploads/secret",
+        },
+      }) as unknown as { assets: Record<string, unknown> };
+
+      assert.ok(!("internalUploadPath" in withExtra.assets), "a new asset field must not publish itself");
+      assert.ok("symbolImageUrls" in withExtra.assets);
+    });
+
+    it("omits an asset key the game did not set, rather than sending undefined", () => {
+      const partial = toPublicView({
+        ...REFERENCE_GAME,
+        assets: { symbolImageUrls: { seven: "https://cdn.example.com/seven.png" } },
+      }) as unknown as { assets: Record<string, unknown> };
+
+      assert.ok(!("backgroundUrl" in partial.assets));
+    });
+
+    it("does not let artwork reach anything the evaluator reads", () => {
+      /**
+       * The separation that makes artwork safe to change on a published
+       * game without re-running the publish gate: assets are presentation,
+       * and the game's mathematics is its strips, weights, paytable and
+       * bonus params. Asserted by comparing the whole projection with and
+       * without artwork — only the `assets` key may differ.
+       */
+      const withArt = toPublicView({
+        ...REFERENCE_GAME,
+        assets: { symbolImageUrls: { seven: "https://cdn.example.com/seven.png" } },
+      }) as unknown as Record<string, unknown>;
+
+      const { assets: _added, ...rest } = withArt;
+      assert.deepEqual(rest, view, "adding artwork changed something other than the assets key");
+    });
+  });
 });

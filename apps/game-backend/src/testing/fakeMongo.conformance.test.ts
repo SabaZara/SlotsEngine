@@ -202,6 +202,64 @@ describe("fakeMongo conformance with real MongoDB", () => {
     assert.deepEqual(real, fake, "the fake must agree with Mongo on $unset");
   });
 
+  it("drops the fields a replaceOne does not carry, rather than merging them", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    /*
+     * The distinction F25's second site turned on, and the whole reason
+     * `replaceOne` exists in the fake at all. `publishDraft` upserted the
+     * live game with `$set`, which leaves keys the new version does not
+     * have in place — so artwork removed before a publish went on being
+     * served to players, while `gameVersions` recorded it as gone. A
+     * `replaceOne` that quietly merged would restore that bug invisibly.
+     */
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).insertOne({ gameId: "g", version: 1, assets: { bg: "x.png" } });
+      await d.collection(collection).replaceOne({ gameId: "g" }, { gameId: "g", version: 2 });
+      const doc = await d.collection(collection).findOne({ gameId: "g" });
+      return { version: doc?.version, hasAssets: doc !== null && "assets" in doc, count: await d.collection(collection).countDocuments({}) };
+    });
+
+    assert.deepEqual(fake, { version: 2, hasAssets: false, count: 1 });
+    assert.deepEqual(real, fake, "the fake must agree with Mongo on replaceOne dropping absent fields");
+  });
+
+  it("keeps the _id across a replaceOne, rather than minting a new identity", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // Mongo forbids a replacement changing `_id` and carries the original
+    // over. A fake that generated a fresh one would let a document silently
+    // change identity on every publish — which nothing in a test would
+    // notice, and which would break any reference held to the old id.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      const inserted = await d.collection(collection).insertOne({ gameId: "g", version: 1 });
+      await d.collection(collection).replaceOne({ gameId: "g" }, { gameId: "g", version: 2 });
+      const doc = await d.collection(collection).findOne({ gameId: "g" });
+      return { same: String(doc?._id) === String(inserted.insertedId) };
+    });
+
+    assert.deepEqual(fake, { same: true });
+    assert.deepEqual(real, fake, "the fake must agree with Mongo on _id surviving a replace");
+  });
+
+  it("inserts on an upserting replaceOne when nothing matches", async function () {
+    if (!realDb) return this.skip(skipReason);
+
+    // The publish path upserts, so a game published for the first time takes
+    // this branch and every later publish takes the one above.
+    const { fake, real } = await bothEngines(async (db: never, collection) => {
+      const d = db as unknown as Db;
+      await d.collection(collection).replaceOne({ gameId: "new" }, { gameId: "new", version: 1 }, { upsert: true });
+      const doc = await d.collection(collection).findOne({ gameId: "new" });
+      return { version: doc?.version, count: await d.collection(collection).countDocuments({}) };
+    });
+
+    assert.deepEqual(fake, { version: 1, count: 1 });
+    assert.deepEqual(real, fake, "the fake must agree with Mongo on an upserting replaceOne");
+  });
+
   it("refuses an update operator it does not implement, instead of ignoring it", async function () {
     // No real-Mongo half: the point is precisely that the fake must NOT
     // quietly accept what it cannot do. Mongo would apply `$push`; the fake

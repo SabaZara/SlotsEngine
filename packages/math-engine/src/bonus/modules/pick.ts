@@ -58,6 +58,39 @@ function readState(state: Record<string, unknown>): PickState {
 export const pickModule: BonusModule = {
   moduleId: "pick",
 
+  // Mirrors `config()` above exactly — its guards are where these bounds
+  // come from, and a value outside them is silently replaced by the default
+  // at spin time rather than refused. Surfacing that is the point: a game
+  // can otherwise pay out under parameters nobody chose.
+  paramSchema: [
+    {
+      key: "rewardMultipliers",
+      label: "Reward multipliers",
+      type: "numberList",
+      defaultValue: DEFAULT_REWARDS,
+      min: 0,
+      help:
+        "The prizes hidden behind the non-blank tiles, as multiples of the bet. Dealt out across the prize tiles, so listing a value more than once makes it more likely.",
+    },
+    {
+      key: "tileCount",
+      label: "Tiles",
+      type: "integer",
+      defaultValue: DEFAULT_TILE_COUNT,
+      min: 2,
+      help: "How many tiles the player sees. Fewer than 2 leaves nothing to choose between, and is refused.",
+    },
+    {
+      key: "blankCount",
+      label: "Blank tiles",
+      type: "integer",
+      defaultValue: DEFAULT_BLANK_COUNT,
+      min: 1,
+      help:
+        "How many tiles end the round when revealed. The round has no other stopping rule, so at least one is required — and however many are configured, at least one prize tile is always left. More blanks means a shorter round and a lower expected return.",
+    },
+  ],
+
   start({ params, rng }): BonusStepOutput {
     const { rewards, tileCount, blankCount } = config(params);
 

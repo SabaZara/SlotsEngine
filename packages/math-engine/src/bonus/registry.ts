@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createRng, type Rng } from "@slots-engine/rng";
-import type { BonusModule } from "./types.js";
+import type { BonusModule, BonusParamSpec } from "./types.js";
 import { wheelModule } from "./modules/wheel.js";
 import { pickModule } from "./modules/pick.js";
 import { freeSpinsModule } from "./modules/freeSpins.js";
@@ -24,6 +24,31 @@ export function getBonusModule(moduleId: string): BonusModule {
 
 export function listBonusModules(): string[] {
   return [...modules.keys()];
+}
+
+/**
+ * Every registered module with the parameters it reads.
+ *
+ * The backoffice builds its bonus form from this, which is the whole point:
+ * F24 was a module list kept in a second place, and a *parameter* list kept
+ * in a second place would be the identical bug one level down — a form
+ * offering a field the module ignores, or omitting one it depends on, with
+ * nothing failing either way because every module silently falls back to a
+ * default.
+ *
+ * A module with no `paramSchema` reports an empty array rather than being
+ * omitted. The distinction matters to the caller: "this module takes no
+ * parameters I can describe" is an answer, and dropping the module entirely
+ * would make it unselectable — F24 exactly.
+ */
+export function listBonusModuleSchemas(): Array<{ moduleId: string; params: BonusParamSpec[] }> {
+  return [...modules.values()].map((module) => ({
+    moduleId: module.moduleId,
+    // Copied rather than handed back by reference — F18's shape, where
+    // returning internal state from the function meant to produce a safe
+    // view let a caller edit the registry in place.
+    params: (module.paramSchema ?? []).map((spec) => ({ ...spec })),
+  }));
 }
 
 /**

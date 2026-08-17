@@ -261,6 +261,39 @@ describe("request shape", () => {
     assert.equal(recorded[0].body, "{}");
   });
 
+  it("sends a cleared field as an explicit null, since undefined does not survive JSON", async () => {
+    /*
+     * F25, and the assertion is on the **bytes** deliberately — that is
+     * where the bug lived. `JSON.stringify({assets: undefined})` is `{}`,
+     * so a cleared field and an untouched one left the browser identical,
+     * and the API reads an absent key as "leave unchanged". Artwork could
+     * be set and then never cleared: the editor emptied the field, the save
+     * reported success, and the next reload brought the artwork back.
+     *
+     * Asserting on the serialised body rather than on the argument is what
+     * makes this test able to fail — the object handed to `saveDraft` was
+     * always correct.
+     */
+    setSessionToken("session-abc");
+    respond(200, { draft: {}, valid: true, errors: [] });
+    await api.saveDraft("g1", { assets: undefined });
+
+    assert.deepEqual(JSON.parse(recorded[0].body as string), { assets: null });
+  });
+
+  it("says nothing about a field a save does not mention", async () => {
+    // The complement, and what keeps per-field saving safe: only a key that
+    // is present-and-undefined becomes a null. Converting absent keys too
+    // would make every one-field save clear the rest of the draft.
+    setSessionToken("session-abc");
+    respond(200, { draft: {}, valid: true, errors: [] });
+    await api.saveDraft("g1", { name: "Renamed" });
+
+    const body = JSON.parse(recorded[0].body as string);
+    assert.deepEqual(body, { name: "Renamed" });
+    assert.equal("assets" in body, false, "an unmentioned field must not be nulled");
+  });
+
   it("url-encodes a game id, so an id with a slash cannot escape its path", async () => {
     // A gameId is user-supplied at creation. Without encoding, "a/b" would
     // address a different route entirely.

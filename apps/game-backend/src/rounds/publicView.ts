@@ -39,6 +39,16 @@ export interface PublicGameView {
   betOptions: number[];
   currency?: string;
   paylineWinRule?: string;
+  /**
+   * Artwork. Public by nature — every player sees these images, so there is
+   * nothing to withhold, and a URL a browser cannot fetch is useless anyway.
+   *
+   * Named explicitly here rather than spread from `gameDef.assets`, which is
+   * the whole point of this file being an allowlist: a field added to
+   * `GameAssets` later must be a decision someone makes here, not something
+   * that publishes itself.
+   */
+  assets?: { symbolImageUrls?: Record<string, string>; backgroundUrl?: string };
 }
 
 export function toPublicView(gameDef: GameDefinition): PublicGameView {
@@ -64,5 +74,17 @@ export function toPublicView(gameDef: GameDefinition): PublicGameView {
     betOptions: gameDef.betOptions,
     ...(gameDef.currency !== undefined ? { currency: gameDef.currency } : {}),
     ...(gameDef.paylineWinRule !== undefined ? { paylineWinRule: gameDef.paylineWinRule } : {}),
+    // Each key named rather than the object spread, so a field added to
+    // `GameAssets` cannot reach a browser without someone editing this line.
+    ...(gameDef.assets !== undefined
+      ? {
+          assets: {
+            ...(gameDef.assets.symbolImageUrls !== undefined
+              ? { symbolImageUrls: gameDef.assets.symbolImageUrls }
+              : {}),
+            ...(gameDef.assets.backgroundUrl !== undefined ? { backgroundUrl: gameDef.assets.backgroundUrl } : {}),
+          },
+        }
+      : {}),
   };
 }
