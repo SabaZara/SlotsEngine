@@ -31,7 +31,7 @@ reference client** (3,757 lines against 2,417) with roughly 38x the test
 coverage (4,189 lines of tests against 110). The reference modules still unbuilt here are deliberate
 non-decisions rather than gaps; section O names each and why.
 
-- **28 bugs found and fixed** (F1–F28), each recorded below with *how it was
+- **29 bugs found and fixed** (F1–F29), each recorded below with *how it was
   found*. **Not one was found by a test that already passed** — the closest
   is F17, where a mutation of existing code exposed a stand-in that had been
   silently ignoring an operator. Counted:
@@ -47,6 +47,7 @@ non-decisions rather than gaps; section O names each and why.
   | **Asking how a user reaches the feature** | **1** | **F24** |
   | **Reading configuration** | **1** | **F27** |
   | **Reading a shared component** | **1** | **F28** |
+  | **Reading the diffstat of my own commit** | **1** | **F29** |
 
   The same question that produced F24 — *how does a real user reach this?*
   — later produced item 10, which is not a bug row because nothing was
@@ -145,6 +146,32 @@ The three things standing between this and a running service, in order:
 
 ---
 
+### A fourth thing the verification standard should say
+
+`CLAUDE.md` ranks verification: mutation-verify, run it against the real
+stack, say what a test cannot establish. **F29 found a gap none of those
+three cover.**
+
+Every one of them runs against the working tree. The full suite, the build
+and the pre-push hook all passed on a commit that could not build on a
+clean checkout, because a `.gitignore` rule had silently excluded a source
+module from the commit while including the import of it. Nothing that
+executes locally can see that class of fault — the files are on disk.
+
+So the fourth check, and the only one that would have caught it:
+
+4. **Clone what you pushed.** `git clone` into a clean directory, install,
+   build, test. It is the only verification that runs against the
+   repository rather than against the machine, and it is cheap — one
+   command and about a minute.
+
+This is what CI has always done, which is why F3 and F4 were caught there
+and not locally. F29 is the same failure reaching `main` between CI runs.
+Worth adding to `CLAUDE.md`'s verification section, which is the user's
+file to change rather than mine.
+
+---
+
 ## ⚠️ Read this first: the reference repo
 
 This project is a response to a review of a larger existing codebase. That
@@ -232,6 +259,7 @@ existed matters more than the fix, and that reasoning is easy to lose.
 | F20 | `verifyPassword` **threw** on a stored cost that was not a power of two, or was large enough to exceed `maxmem` — Node's scrypt rejects both with `RangeError: Invalid scrypt params`. Its own docstring promised the opposite ("never throws on a malformed stored value — a corrupt hash must read as wrong password, not as a 500"). On the login path an uncaught throw is a 500 that confirms to an attacker that this particular account exists and is broken. Both are now refused before the scrypt call. | The same first tests. This is F13's shape exactly, one file over: a value parsed out of stored data and used without checking it is in the domain the callee accepts. Verified live — both cases return 401 through the running service. |
 | F18 | `toPublicUser` returned the source `roles` **array by reference**, so `publicUser.roles.push("super_admin")` edited the underlying user record in place — a privilege escalation through the one function whose job is producing a safe copy. Latent rather than live (no caller mutates it today), and the fix is a one-line spread. | Writing the first tests for `rbac.ts`. The test was originally drafted to *pin the weakness*, which is backwards; checking whether it was exploitable took one script, and it was, so it was fixed instead. |
 | F17 | `fakeMongo`'s `applyUpdate` handled `$set` and `$inc` and **silently dropped every other operator**. A `$unset` in a test did nothing, the document kept the field, and the test asserting on the missing-field fallback passed while asserting nothing. Same family as F16 — the stand-in more permissive than Mongo — but worse, because the test *looked* like it covered the branch. `$unset` is now implemented, and an unrecognised `$`-operator throws instead of being ignored. | Mutation testing the auth middleware. Changing `?? 0` to `?? -1` was the one mutation of twelve that survived; the test that should have caught it was the `$unset` one. Pinned now by two conformance tests, one of them against real Mongo. |
+| F29 | **A `.gitignore` rule silently excluded an entire source module from the commit that shipped its import.** The pattern was a bare `reports/`, which git matches at *any* depth — so `apps/backoffice-api/src/reports/` (six files: routes, query, CSV and their tests) was never added, while `app.ts`'s `import { registerReportRoutes } from "./reports/routes.js"` was. `main` could not build on a clean checkout. Now `/reports/`, anchored to the root, which is what the rule was always for — the reference keeps generated self-check output there. | **Reading the diffstat of my own commit**, which said 2 files changed when it should have said 8. Confirmed by cloning the pushed commit into a clean directory and finding the import with no module. Worth recording what did NOT catch it: the full suite, the build, and the pre-push hook all passed, because every one of them ran against a working tree the repository does not contain. Same family as F3 and F4 — works locally, broken on a fresh checkout — and the first one here caused by a file that is not code. Verification is now a real `git clone` plus `npm test`, which is the only check that could have seen it. |
 | F16 | `fakeMongo` ignored `projection` entirely, so `_id` survived in tests while the real routes correctly stripped it. **More permissive than Mongo**, which is the inverse of F1/F9 and just as misleading — a correct assertion ("no `_id` in the response") failed against correct code. The fake now honours `{ _id: 0 }` on `find` and `findOne`. | Writing route tests for `/v1/games/:gameId/versions`. The test failed, the route was right, and comparing the two engines directly showed real Mongo stripping `_id` and the fake keeping it. Now pinned by two conformance tests. |
 
 ---
