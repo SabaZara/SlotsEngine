@@ -3,4 +3,12 @@ dist/
 *.tsbuildinfo
 .env
 .DS_Store
-reports/
+# Generated self-check output at the repo root ONLY.
+#
+# The leading slash is load-bearing and was added after this rule silently
+# excluded `apps/backoffice-api/src/reports/` — an entire source module —
+# from a commit that shipped the import of it. A bare `reports/` matches a
+# directory of that name at ANY depth, so `git add` reported nothing amiss,
+# the local build passed against files still on disk, and `main` was broken
+# on a fresh clone. Verified by cloning it.
+/reports/
