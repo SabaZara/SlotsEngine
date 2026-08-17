@@ -2,6 +2,7 @@ import type { BonusPublicState, Round } from "@slots-engine/shared-types";
 import { GameClient, fetchGameView, type PublicGameView } from "./api.js";
 import { PixiReelRenderer } from "./render/pixiRenderer.js";
 import { GameStateMachine } from "./state/gameState.js";
+import { AUTOPLAY_SPIN_COUNTS, AutoplayController, type AutoplayStopReason } from "./state/autoplay.js";
 import { applyEnablement } from "./ui/controls.js";
 import { formatMoney } from "./ui/formatMoney.js";
 import { isTerminalCode, presentStatus } from "./ui/statusPresentation.js";
@@ -40,6 +41,24 @@ class GameApp {
   private cancelCountUp: (() => void) | null = null;
 
   /**
+   * The autoplay run, if any.
+   *
+   * Constructed unconditionally rather than lazily on first use, so the
+   * subscription below always has something to notify — a controller
+   * created on demand would miss the phase changes that happened before a
+   * player first opened the panel, and could resume against a state it
+   * never saw.
+   */
+  private readonly autoplay = new AutoplayController(
+    { phase: "offline" },
+    {
+      requestSpin: () => this.spin(),
+      onStopped: (reason) => this.handleAutoplayStopped(reason),
+      onChanged: () => this.renderAutoplay(),
+    },
+  );
+
+  /**
    * The single source for what the player may do.
    *
    * This replaced a `spinInFlight` boolean plus direct `disabled` writes
@@ -75,7 +94,11 @@ class GameApp {
     // with nobody listening — the player would get a dead button and no
     // explanation, which is the exact failure this wiring exists to
     // prevent.
-    this.state.subscribe(() => {
+    this.state.subscribe((next) => {
+      // Autoplay is told BEFORE the UI is updated, because it may stop
+      // itself in response — and a UI painted from a run that is about to
+      // end shows a "stop" button for a run that no longer exists.
+      this.autoplay.handleStateChange(next);
       this.applyEnablement();
       this.applyStatus();
     });
@@ -113,6 +136,7 @@ class GameApp {
     }
 
     this.buildBetControls();
+    this.buildAutoplayControls();
     this.buildPaytable();
 
     this.client = new GameClient(SOCKET_URL, {
@@ -194,22 +218,36 @@ class GameApp {
     );
   }
 
-  private spin(): void {
-    if (!this.game || !this.state.enablement.spinEnabled) return;
+  /**
+   * Returns whether a spin was actually sent.
+   *
+   * The boolean exists for autoplay. Every early return here is a real
+   * reason a run must stop rather than continue: no game loaded, the phase
+   * refusing, or a stake the balance cannot cover. A run that kept counting
+   * down through any of those would look busy while sending nothing — the
+   * failure `spinRefused` exists to prevent.
+   */
+  private spin(): boolean {
+    if (!this.game || !this.state.enablement.spinEnabled) return false;
 
     const bet = this.game.betOptions[this.betIndex];
     if (bet > this.balance) {
       this.setTransientStatus("Not enough balance for that bet");
-      return;
+      return false;
     }
 
     this.state.transition({ phase: "spinning" });
     el("win").textContent = "";
     this.client?.spin(bet);
+    return true;
   }
 
   private handleSpinResult(round: Round): void {
     this.lastRound = round;
+    // Told the BASE game's win, deliberately. A spin that triggers a bonus
+    // has already halted the run until the bonus resolves; stopping on the
+    // bonus credit as well would end it at a moment the player never chose.
+    this.autoplay.notifySpinResult(round.evaluation?.totalWin ?? 0);
     const matrix = round.resultMatrix;
     if (!matrix) return;
 
@@ -303,6 +341,74 @@ class GameApp {
   private setTransientStatus(text: string): void {
     el("status").textContent = text;
     el("status").dataset.tone = "bad";
+  }
+
+  /**
+   * Builds the autoplay controls once, then leaves them alone.
+   *
+   * Built rather than rebuilt for the reason `bonusPanel.ts` records: a
+   * rebuild replaces the element a player is interacting with, which throws
+   * away focus and makes a checkbox impossible to reach by keyboard.
+   * `renderAutoplay` only ever writes text and `disabled` onto these.
+   */
+  private buildAutoplayControls(): void {
+    const counts = el("autoplay-counts");
+    counts.innerHTML = "";
+    for (const count of AUTOPLAY_SPIN_COUNTS) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "autoplay-count";
+      button.textContent = String(count);
+      button.addEventListener("click", () => this.autoplay.setCount(count));
+      counts.append(button);
+    }
+
+    const stopOnWin = el("autoplay-stop-on-win") as HTMLInputElement;
+    stopOnWin.addEventListener("change", () => this.autoplay.setStopOnWin(stopOnWin.checked));
+
+    el("autoplay-toggle").addEventListener("click", () => this.autoplay.toggle());
+
+    this.renderAutoplay();
+  }
+
+  /** Pushes the controller's state onto the controls. The controller is the
+   * only source — no element here decides anything for itself. */
+  private renderAutoplay(): void {
+    const status = this.autoplay.status;
+    const settings = this.autoplay.currentSettings;
+
+    for (const button of el("autoplay-counts").querySelectorAll("button")) {
+      const isSelected = button.textContent === String(settings.count);
+      button.setAttribute("aria-pressed", String(isSelected));
+      button.disabled = !status.settingsEnabled;
+    }
+
+    const stopOnWin = el("autoplay-stop-on-win") as HTMLInputElement;
+    stopOnWin.checked = settings.stopOnWin;
+    stopOnWin.disabled = !status.settingsEnabled;
+
+    const toggle = el("autoplay-toggle") as HTMLButtonElement;
+    toggle.textContent = status.running ? "Stop" : "Start";
+    toggle.disabled = !status.toggleEnabled;
+
+    el("autoplay-remaining").textContent = status.running ? `${status.remaining} left` : "";
+  }
+
+  /**
+   * Says why a run ended, when the reason is not self-evident.
+   *
+   * A run that simply finished needs no announcement — the reels stopping
+   * is the message. The others do: a player watching a run halt with spins
+   * apparently remaining has no way to tell a deliberate stop-on-win from a
+   * dropped connection, and those call for opposite reactions.
+   */
+  private handleAutoplayStopped(reason: AutoplayStopReason): void {
+    this.renderAutoplay();
+    if (reason === "wonWhileStopOnWin") this.setTransientStatus("Autoplay stopped — you won");
+    else if (reason === "spinRefused") this.setTransientStatus("Autoplay stopped — the spin could not be placed");
+    // `sessionEnded` is deliberately silent: the phase change that caused it
+    // already writes its own status, and a second message would overwrite a
+    // more specific one with a vaguer one.
   }
 
   private buildBetControls(): void {

@@ -150,6 +150,16 @@
         .wheel-face { transition: none !important; }
       }
 
+      .autoplay { display: flex; align-items: center; gap: 12px; padding-top: 8px; flex-wrap: wrap; }
+      #autoplay-counts { display: flex; gap: 6px; }
+      .autoplay-count[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+      .autoplay-stop-on-win { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+      #autoplay-remaining { font-variant-numeric: tabular-nums; opacity: 0.8; font-size: 13px; }
+      /* Disabled controls are dimmed rather than hidden: a control that
+         vanishes mid-run reads as a broken panel, and its absence gives the
+         player no clue that it will come back. */
+      .autoplay button:disabled, .autoplay input:disabled { opacity: 0.5; cursor: default; }
+
       footer {
         display: flex;
         align-items: center;
@@ -211,6 +221,21 @@
         <div id="status">Starting…</div>
         <div id="win"></div>
       </div>
+      <!-- Collapsed by default. Autoplay is a deliberate choice rather than
+           an obvious button: it commits a player to a run of real bets, so
+           it should take a moment's intent to reach. -->
+      <details id="autoplay-panel">
+        <summary>Autoplay</summary>
+        <div class="autoplay">
+          <div id="autoplay-counts" role="group" aria-label="Number of spins"></div>
+          <label class="autoplay-stop-on-win">
+            <input type="checkbox" id="autoplay-stop-on-win" />
+            Stop on any win
+          </label>
+          <button id="autoplay-toggle" type="button">Start</button>
+          <span id="autoplay-remaining" aria-live="polite"></span>
+        </div>
+      </details>
       <details>
         <summary>Paytable</summary>
         <div id="paytable"></div>
