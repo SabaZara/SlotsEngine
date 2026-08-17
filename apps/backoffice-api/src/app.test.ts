@@ -384,78 +384,101 @@ describe("game authoring", () => {
     assert.equal(await ctx.raw.collection("games").findOne({ gameId: "my-game" }), null);
   });
 
-  it("saves artwork set by the builder, and hands it back on reload", async () => {
+  it("refuses to write artwork through the generic draft save", async () => {
     /*
-     * The path a designer actually travels, which is the thing F24 says to
-     * test rather than the module in isolation. The artwork editor is a
-     * controlled component: it renders whatever `draft.assets` holds, so if
-     * the round trip through this route lost the field, the screen would
-     * clear itself the moment it reloaded — the field would look accepted
-     * and then be empty, with nothing reporting an error.
-     */
-    await create();
-    const assets = {
-      symbolImageUrls: { seven: "https://cdn.example.com/seven.png" },
-      backgroundUrl: "https://cdn.example.com/bg.jpg",
-    };
-
-    const saved = await ctx.app.inject({
-      method: "PUT",
-      url: "/v1/games/my-game",
-      headers: auth(token),
-      payload: { assets },
-    });
-    assert.equal(saved.statusCode, 200);
-    assert.deepEqual(saved.json().draft.assets, assets);
-
-    const reloaded = await ctx.app.inject({ method: "GET", url: "/v1/games/my-game", headers: auth(token) });
-    assert.deepEqual(reloaded.json().draft.assets, assets);
-  });
-
-  it("clears artwork when the field is sent as null", async () => {
-    /*
-     * F25. Found by driving the live stack, and not reachable from any test
-     * that did not use this route the way the editor does.
+     * The most important assertion in this file once object storage
+     * exists, and it pins a bug the reference repo shipped to production.
      *
-     * This route merges a patch over the stored draft, so an absent key
-     * means "leave unchanged" — that is what lets the editor save one field
-     * at a time. But `JSON.stringify` drops `undefined`, so the editor's
-     * "artwork cleared" and "artwork not mentioned" arrived as identical
-     * bytes, and `$set` cannot unset. Artwork could be added and then never
-     * removed: the screen showed the field emptied and the next reload
-     * brought it back.
+     * Assets are stored as KEYS and served as short-lived SIGNED URLs, so
+     * what the editor reads is not what the server stores. Their
+     * `updateDraft` merged the client's `assets` object straight in, so
+     * every "Save draft" wrote the signed URL back over the raw key — and
+     * the next read signed the already-corrupted value, nesting one level
+     * deeper per save. It took a repair script with a recursive unwinder
+     * to recover.
+     *
+     * So this route ignores `assets` entirely. The dedicated upload and
+     * clear routes are the only writers, and they write keys they
+     * generated themselves.
      */
     await create();
-    const assets = { symbolImageUrls: { seven: "https://cdn.example.com/seven.png" } };
-    await ctx.app.inject({ method: "PUT", url: "/v1/games/my-game", headers: auth(token), payload: { assets } });
 
-    const cleared = await ctx.app.inject({
+    const response = await ctx.app.inject({
       method: "PUT",
       url: "/v1/games/my-game",
       headers: auth(token),
-      payload: { assets: null },
+      payload: { name: "Renamed", assets: { backgroundUrl: "https://signed.example/bg.png?X-Amz-Signature=abc" } },
     });
-    assert.equal(cleared.statusCode, 200);
-    assert.equal("assets" in cleared.json().draft, false, "a null must remove the key, not store null");
 
-    // The reload is the half that actually failed before: the response
-    // could look right while the stored document kept the old value.
-    const reloaded = await ctx.app.inject({ method: "GET", url: "/v1/games/my-game", headers: auth(token) });
-    assert.equal("assets" in reloaded.json().draft, false, "the cleared field came back on reload");
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().draft.name, "Renamed", "the rest of the patch must still apply");
+    assert.equal(
+      "assets" in response.json().draft,
+      false,
+      "a signed URL sent back by the editor must never be stored",
+    );
   });
 
-  it("leaves artwork alone when a save does not mention it", async () => {
-    // The other half of the same rule, and the one that makes per-field
-    // saving safe: only a key that is PRESENT and null removes anything.
-    // If absence meant removal, editing the name would wipe the artwork.
+  it("refuses an upload slot it does not know", async () => {
+    // Slots are enumerated so an upload cannot choose where in `assets` to
+    // write. A client naming its own field would be picking a destination
+    // in the document, which is the same class of problem as accepting the
+    // whole object.
     await create();
-    const assets = { symbolImageUrls: { seven: "https://cdn.example.com/seven.png" } };
-    await ctx.app.inject({ method: "PUT", url: "/v1/games/my-game", headers: auth(token), payload: { assets } });
 
-    await ctx.app.inject({ method: "PUT", url: "/v1/games/my-game", headers: auth(token), payload: { name: "Renamed" } });
+    const response = await ctx.app.inject({
+      method: "POST",
+      url: "/v1/games/my-game/assets",
+      headers: auth(token),
+      payload: { slot: "symbolImageUrls", contentType: "image/png", data: "AAAA" },
+    });
 
-    const reloaded = await ctx.app.inject({ method: "GET", url: "/v1/games/my-game", headers: auth(token) });
-    assert.deepEqual(reloaded.json().draft.assets, assets, "an unrelated edit must not clear artwork");
+    assert.equal(response.statusCode, 400);
+    assert.equal(response.json().error, "unknown_slot");
+  });
+
+  it("refuses a content type the slot does not accept", async () => {
+    // Stops the ordinary mistake — a PDF in a symbol slot, which would
+    // publish cleanly and render as a blank reel.
+    await create();
+
+    const response = await ctx.app.inject({
+      method: "POST",
+      url: "/v1/games/my-game/assets",
+      headers: auth(token),
+      payload: { slot: "symbol", symbol: "seven", contentType: "application/pdf", data: "AAAA" },
+    });
+
+    assert.equal(response.statusCode, 415);
+  });
+
+  it("refuses an audio type in an image slot", async () => {
+    await create();
+
+    const response = await ctx.app.inject({
+      method: "POST",
+      url: "/v1/games/my-game/assets",
+      headers: auth(token),
+      payload: { slot: "background", contentType: "audio/mpeg", data: "AAAA" },
+    });
+
+    assert.equal(response.statusCode, 415);
+  });
+
+  it("requires a symbol id when uploading into the symbol slot", async () => {
+    // Without one the key would collide across symbols and the write would
+    // land under an empty-string key.
+    await create();
+
+    const response = await ctx.app.inject({
+      method: "POST",
+      url: "/v1/games/my-game/assets",
+      headers: auth(token),
+      payload: { slot: "symbol", contentType: "image/png", data: "AAAA" },
+    });
+
+    assert.equal(response.statusCode, 400);
+    assert.equal(response.json().error, "symbol_required");
   });
 
   it("does not require artwork to be valid for a draft to be valid", async () => {

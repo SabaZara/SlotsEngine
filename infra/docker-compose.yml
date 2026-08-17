@@ -25,6 +25,35 @@ services:
       retries: 20
       start_period: 10s
 
+  # Object storage for game artwork and audio.
+  #
+  # The bucket is PRIVATE, and every read goes through a signed URL minted
+  # at serve time — so a URL that leaks stops working within the day rather
+  # than forever. `ensureBucket()` clears any bucket policy on every boot
+  # rather than only at creation, because a bucket that already exists from
+  # an earlier deployment would otherwise keep a public-read policy
+  # indefinitely; that is the reference repo's recorded mistake.
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data", "--console-address", ":9011"]
+    environment:
+      MINIO_ROOT_USER: ${ASSET_ACCESS_KEY:-dev-asset-key}
+      MINIO_ROOT_PASSWORD: ${ASSET_SECRET_KEY:-dev-asset-secret-change-me}
+    ports:
+      # Published because a BROWSER fetches signed URLs directly — unlike
+      # mongo, this one genuinely has to be reachable from the host. The
+      # staging overlay is where that becomes a real exposure decision.
+      - "${ASSET_HOST_PORT:-9010}:9000"
+      - "${ASSET_CONSOLE_PORT:-9011}:9011"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 5s
+
   # Every buildable service carries BOTH `image:` and `build:`.
   #
   # `build:` is what a developer uses — `docker compose up --build` compiles
@@ -46,6 +75,15 @@ services:
         SERVICE: game-backend
     environment:
       PORT: 9002
+      # ASSET_ENDPOINT is the in-network address this service uses;
+      # ASSET_PUBLIC_ENDPOINT is the browser-reachable one a signed URL is
+      # signed against. They must differ, because a signature is computed
+      # against the host the request will actually be made to.
+      ASSET_ENDPOINT: ${ASSET_ENDPOINT:-http://minio:9000}
+      ASSET_PUBLIC_ENDPOINT: ${ASSET_PUBLIC_ENDPOINT:-http://localhost:9010}
+      ASSET_ACCESS_KEY: ${ASSET_ACCESS_KEY:-dev-asset-key}
+      ASSET_SECRET_KEY: ${ASSET_SECRET_KEY:-dev-asset-secret-change-me}
+      ASSET_BUCKET: ${ASSET_BUCKET:-game-assets}
       # Interpolated like every other variable here, and it was the one
       # exception: the value was hardcoded, so editing MONGO_URI in
       # `infra/.env` changed nothing and nothing said so. A setting that
@@ -126,6 +164,15 @@ services:
         SERVICE: backoffice-api
     environment:
       PORT: 9005
+      # ASSET_ENDPOINT is the in-network address this service uses;
+      # ASSET_PUBLIC_ENDPOINT is the browser-reachable one a signed URL is
+      # signed against. They must differ, because a signature is computed
+      # against the host the request will actually be made to.
+      ASSET_ENDPOINT: ${ASSET_ENDPOINT:-http://minio:9000}
+      ASSET_PUBLIC_ENDPOINT: ${ASSET_PUBLIC_ENDPOINT:-http://localhost:9010}
+      ASSET_ACCESS_KEY: ${ASSET_ACCESS_KEY:-dev-asset-key}
+      ASSET_SECRET_KEY: ${ASSET_SECRET_KEY:-dev-asset-secret-change-me}
+      ASSET_BUCKET: ${ASSET_BUCKET:-game-assets}
       # Interpolated like every other variable here, and it was the one
       # exception: the value was hardcoded, so editing MONGO_URI in
       # `infra/.env` changed nothing and nothing said so. A setting that
@@ -195,3 +242,4 @@ services:
 
 volumes:
   mongo-data:
+  minio-data:

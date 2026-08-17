@@ -1,5 +1,6 @@
 import { createLogger } from "@slots-engine/logging";
 import { applySchemas, connectMongo } from "@slots-engine/mongo-schemas";
+import { ensureBucket, isStorageConfigured } from "@slots-engine/asset-storage";
 import { buildApp } from "./app.js";
 import { seedInitialAdmin } from "./auth/users.js";
 
@@ -30,6 +31,29 @@ async function main(): Promise<void> {
 
   const { client, db } = await connectMongo();
   await applySchemas(db);
+
+  /*
+   * Created on every boot, not once — and the policy is cleared every time
+   * rather than only at creation. A bucket that already exists from an
+   * earlier deployment would otherwise keep whatever policy it had,
+   * including a public-read one, forever: the "create if missing" branch
+   * never runs again. That is the reference repo's own recorded mistake,
+   * inherited as a fix rather than rediscovered.
+   *
+   * Non-fatal when storage is unconfigured or unreachable. Uploads are one
+   * feature of this service, and refusing to boot over them would take the
+   * whole backoffice down — the upload route reports `storage_not_configured`
+   * on its own instead.
+   */
+  if (isStorageConfigured()) {
+    try {
+      await ensureBucket();
+    } catch (err) {
+      // `logger` rather than `app.log`: this runs before the Fastify
+      // instance exists, and reaching for it here was a compile error.
+      logger.error({ err }, "asset storage is configured but unreachable — uploads will fail");
+    }
+  }
 
   const seeded = await seedInitialAdmin(db);
   if (seeded.created) {

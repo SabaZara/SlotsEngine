@@ -1,3 +1,15 @@
+import { randomUUID } from "node:crypto";
+import {
+  EXTENSION_FOR_TYPE,
+  buildAssetKey,
+  isAllowedForSlot,
+  isStorageConfigured,
+  isStorageKey,
+  isUploadSlot,
+  signAssetUrl,
+  uploadAsset,
+  type UploadSlot,
+} from "@slots-engine/asset-storage";
 import type { FastifyInstance } from "fastify";
 import type { Db } from "mongodb";
 import { REMOVABLE_DRAFT_FIELDS, type GameDefinition } from "@slots-engine/shared-types";
@@ -12,6 +24,93 @@ import { writeAuditLog } from "../audit/log.js";
 /** Preview runs are smaller than the official pre-publish run — a designer
  * tuning a paytable wants an answer in a second, not a precise one. */
 const PREVIEW_SIM_COUNT = 20_000;
+
+/**
+ * The largest asset accepted, in bytes.
+ *
+ * A ceiling rather than a considered limit: a slot machine symbol is a few
+ * kilobytes and a music loop a few megabytes, so 8MB is generous for
+ * everything legitimate while stopping a single request from buffering an
+ * arbitrary amount into memory. Base64 inflates the wire size by about a
+ * third, so the request body may reach ~11MB.
+ */
+const MAX_ASSET_BYTES = 8 * 1024 * 1024;
+
+/**
+ * Puts a storage key into the right field of `assets`, or removes it.
+ *
+ * `null` clears. Kept as one function so the upload and clear routes cannot
+ * disagree about where a slot lives — two mappings would be the F24 shape
+ * again, and the symptom would be an upload that appears to work and a
+ * clear that misses.
+ *
+ * Returns `undefined` when nothing is left, matching every other consumer:
+ * absence is how "no artwork" is expressed, and an empty object claims
+ * artwork that resolves to nothing.
+ */
+function withUploadedAsset(
+  assets: GameDraft["assets"],
+  slot: UploadSlot,
+  symbol: string | undefined,
+  key: string | null,
+): GameDraft["assets"] {
+  const next = {
+    ...(assets?.symbolImageUrls !== undefined ? { symbolImageUrls: { ...assets.symbolImageUrls } } : {}),
+    ...(assets?.backgroundUrl !== undefined ? { backgroundUrl: assets.backgroundUrl } : {}),
+    ...(assets?.musicUrl !== undefined ? { musicUrl: assets.musicUrl } : {}),
+    ...(assets?.spinSoundUrl !== undefined ? { spinSoundUrl: assets.spinSoundUrl } : {}),
+  };
+
+  const field = { background: "backgroundUrl", music: "musicUrl", spinSound: "spinSoundUrl" } as const;
+
+  if (slot === "symbol") {
+    const symbols = { ...next.symbolImageUrls };
+    if (key === null) delete symbols[symbol ?? ""];
+    else symbols[symbol ?? ""] = key;
+    if (Object.keys(symbols).length === 0) delete next.symbolImageUrls;
+    else next.symbolImageUrls = symbols;
+  } else if (key === null) {
+    delete next[field[slot]];
+  } else {
+    next[field[slot]] = key;
+  }
+
+  return Object.keys(next).length === 0 ? undefined : next;
+}
+
+/**
+ * Swaps stored keys for freshly signed URLs, for display only.
+ *
+ * **Never persisted, and that is the whole discipline.** The result of this
+ * function must not travel back into a write — the draft PUT strips
+ * `assets` precisely so it cannot. A value that is already a URL rather
+ * than a key is left alone and flagged by `isStorageKey`, so a legacy
+ * hand-entered URL keeps working while an accidentally-stored signed URL
+ * is visible as such rather than being re-signed.
+ */
+async function withSignedAssets(draft: GameDraft): Promise<GameDraft> {
+  const assets = draft.assets;
+  if (!assets) return draft;
+
+  const sign = async (value: string | undefined): Promise<string | undefined> =>
+    value !== undefined && isStorageKey(value) ? signAssetUrl(value) : value;
+
+  const symbolEntries = await Promise.all(
+    Object.entries(assets.symbolImageUrls ?? {}).map(async ([symbol, value]) => [symbol, await sign(value)] as const),
+  );
+
+  return {
+    ...draft,
+    assets: {
+      ...(symbolEntries.length > 0
+        ? { symbolImageUrls: Object.fromEntries(symbolEntries.filter(([, v]) => v !== undefined) as [string, string][]) }
+        : {}),
+      ...((await sign(assets.backgroundUrl)) !== undefined ? { backgroundUrl: await sign(assets.backgroundUrl) } : {}),
+      ...((await sign(assets.musicUrl)) !== undefined ? { musicUrl: await sign(assets.musicUrl) } : {}),
+      ...((await sign(assets.spinSoundUrl)) !== undefined ? { spinSoundUrl: await sign(assets.spinSoundUrl) } : {}),
+    },
+  };
+}
 
 export function registerGameRoutes(app: FastifyInstance, db: Db): void {
   const designer = { preHandler: [requireRole("game_designer")] };
@@ -98,7 +197,10 @@ export function registerGameRoutes(app: FastifyInstance, db: Db): void {
     const draft = await getDraft(db, request.params.gameId);
     const published = await db.collection("games").findOne({ gameId: request.params.gameId }, { projection: { _id: 0 } });
     if (!draft && !published) return reply.code(404).send({ error: "game_not_found" });
-    return reply.send({ draft, published });
+    // Signed for display on the way out. The editor never sends these back
+    // — the PUT strips `assets` — so the read shape differing from the
+    // stored shape is safe here in a way it was not for the reference.
+    return reply.send({ draft: draft ? await withSignedAssets(draft) : draft, published });
   });
 
   /**
@@ -125,11 +227,31 @@ export function registerGameRoutes(app: FastifyInstance, db: Db): void {
       const existing = await getDraft(db, request.params.gameId);
       if (!existing) return reply.code(404).send({ error: "draft_not_found" });
 
+      /*
+       * `assets` is stripped from the generic patch, and this is the single
+       * most important line in this file once object storage exists.
+       *
+       * Uploaded assets are stored as **keys** and served as short-lived
+       * **signed URLs**, so what a client reads is not what the server
+       * stores. The reference repo had exactly this design and merged the
+       * client's `assets` object straight in — so every "Save draft" wrote
+       * the signed URL the editor had been shown back over the raw key, and
+       * the next read signed the already-corrupted value. It compounded one
+       * nesting level per save and needed a repair script with a recursive
+       * unwinder to undo.
+       *
+       * So the draft PUT does not accept `assets` at all. The dedicated
+       * upload and clear routes below are the only writers, and they write
+       * keys they generated themselves. `isStorageKey` is the second line
+       * of defence if this one is ever undone.
+       */
+      const { assets: _rejected, ...patch } = request.body ?? {};
+
       // gameId comes from the URL, never the body: a body-supplied id could
       // rename a game into another game's identity.
       const next: GameDraft = {
         ...existing,
-        ...request.body,
+        ...patch,
         gameId: existing.gameId,
         updatedAt: new Date().toISOString(),
         updatedByUserId: request.user!.userId,
@@ -176,6 +298,100 @@ export function registerGameRoutes(app: FastifyInstance, db: Db): void {
       }
 
       return reply.send({ draft: await saveDraft(db, next), valid: errors.length === 0, errors });
+    },
+  );
+
+  /**
+   * Uploads one asset and records its **key** on the draft.
+   *
+   * The only writer of `assets` besides the clear route below — see the
+   * PUT above for why that matters. The body carries base64 rather than
+   * `multipart/form-data` deliberately: multipart needs a Fastify plugin
+   * and a second parser, and the whole benefit would be avoiding a ~33%
+   * encoding overhead on files a designer uploads a handful of times.
+   * Base64 keeps the route testable with `inject` and adds no dependency.
+   *
+   * The key is generated here, never accepted from the client. A caller
+   * who could name their own key could write to another game's prefix.
+   */
+  app.post<{
+    Params: { gameId: string };
+    Body: { slot?: string; symbol?: string; contentType?: string; data?: string };
+  }>("/v1/games/:gameId/assets", designer, async (request, reply) => {
+    const draft = await getDraft(db, request.params.gameId);
+    if (!draft) return reply.code(404).send({ error: "draft_not_found" });
+
+    /*
+     * The request is validated BEFORE storage is consulted, deliberately.
+     * A malformed upload is malformed whether or not a bucket exists, and
+     * answering 503 to a request that names an unknown slot tells the
+     * caller to go and fix their infrastructure over a typo in their own
+     * payload.
+     */
+    const { slot, symbol, contentType, data } = request.body ?? {};
+    if (!isUploadSlot(slot)) return reply.code(400).send({ error: "unknown_slot" });
+    if (slot === "symbol" && !symbol?.trim()) return reply.code(400).send({ error: "symbol_required" });
+    if (typeof contentType !== "string" || !isAllowedForSlot(slot, contentType)) {
+      return reply.code(415).send({ error: "unsupported_content_type" });
+    }
+    if (typeof data !== "string" || data === "") return reply.code(400).send({ error: "no_data" });
+
+    const body = Buffer.from(data, "base64");
+    if (body.length === 0) return reply.code(400).send({ error: "no_data" });
+    if (body.length > MAX_ASSET_BYTES) return reply.code(413).send({ error: "asset_too_large" });
+
+    if (!isStorageConfigured()) {
+      // Said plainly rather than failing at the SDK, which would surface as
+      // a 500 and read as a bug rather than as configuration.
+      return reply.code(503).send({ error: "storage_not_configured" });
+    }
+
+    const normalisedType = contentType.split(";")[0].trim().toLowerCase();
+    const key = buildAssetKey(
+      draft.gameId,
+      slot === "symbol" ? `symbol-${symbol!.trim()}` : slot,
+      EXTENSION_FOR_TYPE[normalisedType] ?? "",
+      randomUUID(),
+    );
+    await uploadAsset(key, body, normalisedType);
+
+    const assets = withUploadedAsset(draft.assets, slot, symbol?.trim(), key);
+    const saved = await saveDraft(db, { ...draft, assets, updatedByUserId: request.user!.userId });
+
+    await writeAuditLog(db, {
+      actorUserId: request.user!.userId,
+      action: "game.asset.upload",
+      entityType: "game",
+      entityId: draft.gameId,
+      diff: { slot, ...(symbol ? { symbol: symbol.trim() } : {}), key, bytes: body.length },
+    });
+
+    // The signed URL is returned for display and deliberately NOT stored.
+    return reply.send({ key, url: await signAssetUrl(key), draft: await withSignedAssets(saved) });
+  });
+
+  /**
+   * Clears one asset slot.
+   *
+   * The object itself is left in storage. A published game may still
+   * reference the key, and a draft edit must never break a live game —
+   * the document is what says whether an asset is in use, and this route
+   * cannot know. Orphans are a storage-cost problem for a later sweep,
+   * not a correctness one.
+   */
+  app.delete<{ Params: { gameId: string }; Querystring: { slot?: string; symbol?: string } }>(
+    "/v1/games/:gameId/assets",
+    designer,
+    async (request, reply) => {
+      const draft = await getDraft(db, request.params.gameId);
+      if (!draft) return reply.code(404).send({ error: "draft_not_found" });
+
+      const { slot, symbol } = request.query ?? {};
+      if (!isUploadSlot(slot)) return reply.code(400).send({ error: "unknown_slot" });
+
+      const assets = withUploadedAsset(draft.assets, slot, symbol?.trim(), null);
+      const saved = await saveDraft(db, { ...draft, assets, updatedByUserId: request.user!.userId });
+      return reply.send({ draft: await withSignedAssets(saved) });
     },
   );
 

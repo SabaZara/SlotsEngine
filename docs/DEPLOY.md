@@ -94,6 +94,8 @@ being true.
 | `DEPLOY_SSH_KNOWN_HOSTS` | Output of `ssh-keyscan -H <host>`. Optional but recommended — see below. |
 | `SERVICE_AUTH_SECRET` | Signs internal service-to-service requests. |
 | `LAUNCH_TOKEN_SECRET` | Signs launch tokens. Must differ from the above. |
+| `ASSET_ACCESS_KEY` | Object-storage access key. Uploads fail with `storage_not_configured` without it; nothing else breaks. |
+| `ASSET_SECRET_KEY` | Object-storage secret key. |
 | `BACKOFFICE_JWT_SECRET` | Signs backoffice sessions. |
 | `BOOTSTRAP_ADMIN_PASSWORD` | First administrator's password. Change it after the first sign-in. |
 
