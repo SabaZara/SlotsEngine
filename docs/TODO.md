@@ -438,8 +438,31 @@ The socket's token buckets would need the same treatment.
 `SERVICE_AUTH_SECRET`, `LAUNCH_TOKEN_SECRET` and `BACKOFFICE_JWT_SECRET`
 are passed as plain env vars through compose. Fine for local development;
 not fine for production, where they belong in a secret manager with
-rotation. The startup guards already refuse weak or missing values, so the
-remaining gap is storage and rotation, not validation.
+rotation.
+
+**"The startup guards already refuse weak values" — corrected 2026-08-17,
+because they do not.** They check that a secret is present, at least 32
+characters, and different from its sibling. They do **not** check whether
+the value is publicly known, and the placeholders in `.env.example` are 53
+characters and differ from each other, so they **pass every check**.
+Measured, not assumed: a stack copied from the committed template boots
+successfully on a secret published in this repository, and every guard
+reports itself satisfied.
+
+That is arguably correct behaviour — a guard cannot enumerate every leaked
+string, and the template says "change-me-in-production" — but the previous
+wording here implied validation was a solved half of the problem, which
+would let someone deprioritise the storage work believing they were
+covered. **Rotation is now the whole of it, not the remainder.** A cheap
+partial mitigation, if this is picked up before a secret manager: refuse
+the exact placeholder literals in production mode, which turns the one
+known-bad value the repo actually ships into a boot failure rather than a
+silent acceptance.
+
+The local dev secrets were rotated to `openssl rand -hex 32` values on
+2026-08-17, and the old launch token was verified refused (`invalid_token`)
+afterwards — a rotation that does not invalidate the old credential is a
+file edit, not a rotation.
 
 Worth noting this is the same finding the review made about the reference
 architecture's encryption key — a fair characterisation there, and it

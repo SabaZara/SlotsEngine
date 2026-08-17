@@ -26,9 +26,19 @@ Then, with the stack running:
 npm test
 ```
 
+The e2e runs sign their own launch token, so they need the same secret the
+stack booted with. It is **read from `infra/.env`** rather than written out
+here: a secret pasted into a README is a secret every reader shares, and it
+survives any rotation of the file it was copied from.
+
 ```bash
-GAME_BACKEND_URL=http://localhost:9102 GAME_SOCKET_URL=ws://localhost:9103 LAUNCH_TOKEN_SECRET=dev-only-launch-secret-change-me-in-production-xyz789 npm run e2e:spin
+export LAUNCH_TOKEN_SECRET=$(grep -E "^LAUNCH_TOKEN_SECRET=" infra/.env | cut -d= -f2-)
+GAME_BACKEND_URL=http://localhost:9102 GAME_SOCKET_URL=ws://localhost:9103 npm run e2e:spin
 ```
+
+(Grepping the one line rather than `source`-ing the file is deliberate —
+`MONGO_URI` contains an unquoted `&`, which a shell would treat as a job
+control operator.)
 
 | Where | URL |
 |---|---|
@@ -219,6 +229,15 @@ a service that looks perfectly healthy while being wide open.
 `game-backend` refuses to start if `MONGO_URI`, `SERVICE_AUTH_SECRET` or
 `LAUNCH_TOKEN_SECRET` are missing or too short — and in production, if the two
 secrets match or `INITIAL_PLAYER_BALANCE` would hand out free money.
+
+**What the guards do not catch, stated because the gap is easy to miss:**
+they check length and difference, not *whether the value is publicly known*.
+The placeholders in `.env.example` are 53 characters and differ from each
+other, so they **pass every check** — a stack copied from the template boots
+happily on a secret published in this repository. The template says
+"change-me-in-production" for that reason, and it is the operator's job
+rather than the guard's. Generate real values with `openssl rand -hex 32`
+before anything is reachable from outside your machine.
 
 ---
 
