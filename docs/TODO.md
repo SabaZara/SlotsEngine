@@ -881,12 +881,30 @@ fails the base check, and a doubled `winMultiplier` fails the gate. A stable
 test that can no longer detect the thing it exists for would be a worse
 outcome than the flake.
 
-**Note for whoever republishes this fixture.** The live `free-spins-5x3`
-document still carries `assumedBaseRtp: 0.81`, because a published game is a
+**Republished, and the two-step is the point.** A published game is a
 snapshot and does not track source edits — which is exactly the property
-that makes a round auditable years later. The corrected 0.8024 reaches
-players only on the next publish, and until then the gate scores that game
-against a base return 0.0076 higher than it has.
+that makes a round auditable years later, and equally the reason correcting
+the constant in `free-spins-game.ts` did *nothing* for players on its own.
+The live document stored its own `0.81`, so the fix had to be made twice: in
+source, and as a real draft edit through `PUT /v1/games/:gameId` followed by
+a publish. Worth recording because the first fix looks complete and is not,
+and nothing anywhere reports the gap.
+
+Done 2026-08-17, through the real API rather than by writing to Mongo:
+`free-spins-5x3` is now **v2** carrying `assumedBaseRtp: 0.8024`. The gate
+ran a genuine 100k-spin simulation and passed at **0.9540 against a 0.95
+target**, `bonusReturnSource: derived` with the multiplier moving 40.5 →
+40.12 as the corrected base return feeds through. The audit entry records
+v1 → v2 with its run seed and `forcedPastRtpTolerance: false` — it passed on
+merit rather than being forced. Live document and v2 snapshot are
+byte-identical.
+
+Verified in a browser against the running stack, not only through scripts:
+the client loaded the game, the public projection served version 2 with the
+corrected parameter, a real spin debited **$1000.00 → $999.00** with a
+matching `debit` of 100 minor units and `balanceAfter: 99900` in the ledger,
+and the stored round records `gameVersion: 2`. Console clean, and
+`e2e:spin` passes in full against the republished game.
 
 **The interface change is the interesting part.** Free spins is the first
 module whose outcome is not a function of `params` alone — a free spin is a
