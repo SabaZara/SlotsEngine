@@ -1,0 +1,24 @@
+{
+  "name": "@slots-engine/integration-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@fastify/rate-limit": "^10.3.0",
+    "@slots-engine/launch-token": "*",
+    "@slots-engine/ledger": "*",
+    "@slots-engine/logging": "*",
+    "@slots-engine/mongo-schemas": "*",
+    "@slots-engine/secrets": "*",
+    "@slots-engine/shared-types": "*",
+    "fastify": "^5.2.0",
+    "mongodb": "^6.12.0"
+  }
+}

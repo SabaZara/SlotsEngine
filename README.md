@@ -84,6 +84,7 @@ not an obstacle. See [Startup guards](#startup-guards).
 | `game-backend` | 9002 | **Money and outcomes.** The system of record |
 | `game-socket` | 9003 | Realtime relay; establishes player identity |
 | `backoffice-api` | 9005 | Authoring, validation, the publish gate, audit |
+| `integration-api` | 9006 | **The operator boundary.** Signed wallet, launch and catalogue calls |
 | `game-frontend` | 9104 | The player's browser client (Canvas 2D, no deps) |
 | `backoffice-frontend` | 9106 | The designer's admin UI (React) |
 
@@ -93,6 +94,7 @@ not an obstacle. See [Startup guards](#startup-guards).
 | `rng` | CSPRNG seeding, xoshiro256\*\*, statistical test suite |
 | `ledger` | **Money.** Debit, credit, idempotency |
 | `launch-token` | Player token signing and verification |
+| `secrets` | **At-rest encryption** for credentials that must be recoverable |
 | `service-auth` | **Internal service-to-service HMAC** |
 | `mongo-schemas` | Collections and — importantly — every index |
 | `shared-types` | The cross-service contract |
@@ -286,6 +288,10 @@ npm run e2e:spin
 
 ```bash
 npm run e2e:backoffice
+```
+
+```bash
+npm run e2e:operator
 ```
 
 ```bash

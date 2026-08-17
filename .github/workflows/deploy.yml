@@ -59,7 +59,7 @@ jobs:
       fail-fast: false
       # Kept after the action-download failure it was introduced for was
       # fixed a different way (see the build step), because it is cheap and
-      # the five jobs contend for the same GHA cache backend regardless.
+      # the six jobs contend for the same GHA cache backend regardless.
       # It is NOT load-bearing: the run that followed it failed just as hard,
       # which is what proved concurrency was never the cause.
       max-parallel: 3
@@ -70,6 +70,8 @@ jobs:
           - service: game-socket
             dockerfile: infra/docker/service.Dockerfile
           - service: backoffice-api
+            dockerfile: infra/docker/service.Dockerfile
+          - service: integration-api
             dockerfile: infra/docker/service.Dockerfile
           - service: game-frontend
             dockerfile: infra/docker/frontend.Dockerfile
@@ -108,7 +110,7 @@ jobs:
       # build-push-action, killing a different random subset of services each
       # time.
       #
-      # `max-parallel: 3` was tried first, on the theory that five jobs
+      # `max-parallel: 3` was tried first, on the theory that parallel jobs
       # requesting the same archive at once was the trigger. The next run
       # disproved it: still three separate actions failing, and the ONE job
       # that succeeded was the one that happened to run last. Concurrency was
@@ -304,6 +306,11 @@ jobs:
           SERVICE_AUTH_SECRET=${{ secrets.SERVICE_AUTH_SECRET }}
           LAUNCH_TOKEN_SECRET=${{ secrets.LAUNCH_TOKEN_SECRET }}
           BACKOFFICE_JWT_SECRET=${{ secrets.BACKOFFICE_JWT_SECRET }}
+          # Decrypts operator API secrets. integration-api refuses to boot
+          # without it, so a missing repository secret fails the deploy's
+          # own health check rather than producing a service that starts and
+          # then rejects every operator. Must be exactly 64 hex characters.
+          SECRETS_ENCRYPTION_KEY=${{ secrets.SECRETS_ENCRYPTION_KEY }}
           BOOTSTRAP_ADMIN_EMAIL=${{ vars.BOOTSTRAP_ADMIN_EMAIL }}
           BOOTSTRAP_ADMIN_PASSWORD=${{ secrets.BOOTSTRAP_ADMIN_PASSWORD }}
           MONGO_DB=${{ vars.MONGO_DB || 'slots_engine' }}

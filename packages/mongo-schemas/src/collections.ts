@@ -308,6 +308,94 @@ export const COLLECTIONS: CollectionDefinition[] = [
     ],
   },
   {
+    /**
+     * The operators this platform serves — the referent for the
+     * `operatorId` that keys every round, transaction, player and bonus
+     * session. Until this collection existed, that key pointed at nothing:
+     * any string reaching the money path was accepted as an operator.
+     *
+     * `apiSecret` holds the `enc:` ciphertext from `@slots-engine/secrets`,
+     * never plaintext. The validator cannot enforce that — a `pattern` here
+     * would be a second place to change if the format ever moves, and
+     * `additionalProperties: true` is the house convention — so it is
+     * enforced at the one write path, in the backoffice's operator routes.
+     */
+    name: "operators",
+    validator: {
+      $jsonSchema: {
+        bsonType: "object",
+        required: ["operatorId", "name", "integrationType", "apiKeyId", "apiSecret", "enabledGameIds"],
+        additionalProperties: true,
+        properties: {
+          operatorId: { bsonType: "string" },
+          name: { bsonType: "string" },
+          integrationType: { enum: ["direct", "reverse"] },
+          apiKeyId: { bsonType: "string" },
+          apiSecret: { bsonType: "string" },
+          enabledGameIds: { bsonType: "array" },
+        },
+      },
+    },
+    indexes: [
+      { keys: { operatorId: 1 }, options: { unique: true, name: "operatorId_unique" } },
+      // Unique because this is the lookup key on every authenticated
+      // request: two operators sharing an `apiKeyId` would make
+      // "which secret verifies this signature" ambiguous, and `findOne`
+      // would resolve it by whichever document Mongo reached first. That
+      // is an authentication bypass in the shape of a data-entry mistake,
+      // so it is refused at write time rather than handled at read time.
+      { keys: { apiKeyId: 1 }, options: { unique: true, name: "apiKeyId_unique" } },
+    ],
+  },
+  {
+    /**
+     * Replay defence for the integration API.
+     *
+     * A signature covers the exact (timestamp, method, url, body) tuple, so
+     * a byte-identical replay necessarily carries a byte-identical
+     * signature. Recording each one and refusing a repeat is what makes a
+     * captured request unusable a second time — without this, only the
+     * money routes were replay-safe (via `transactionId` idempotency, which
+     * is a different mechanism and covers a different thing), and a
+     * captured GET could be replayed indefinitely inside the skew window.
+     *
+     * **The unique index is the mechanism, not a constraint on it.** The
+     * check is an `insertOne` that either succeeds or raises 11000; there
+     * is deliberately no find-then-insert, because two concurrent replays
+     * of the same request would both find nothing and both proceed. Same
+     * house idiom as the transactions idempotency index: let the index
+     * arbitrate the race.
+     *
+     * Keyed on `(operatorId, signature)` rather than `signature` alone.
+     * Two operators cannot realistically collide on an HMAC-SHA256 output,
+     * so this is not about collisions — it is so that one operator's
+     * traffic can never cause a refusal on another's, whatever ends up in
+     * this collection.
+     */
+    name: "usedRequestSignatures",
+    validator: {
+      $jsonSchema: {
+        bsonType: "object",
+        required: ["operatorId", "signature", "expireAt"],
+        additionalProperties: true,
+        properties: {
+          operatorId: { bsonType: "string" },
+          signature: { bsonType: "string" },
+          expireAt: { bsonType: "date" },
+        },
+      },
+    },
+    indexes: [
+      { keys: { operatorId: 1, signature: 1 }, options: { unique: true, name: "operator_signature_unique" } },
+      // Nothing needs remembering past the point the timestamp check would
+      // refuse the request anyway, so the TTL is the skew window plus a
+      // margin — set where the row is written. Unbounded growth here would
+      // otherwise be the cost of replay protection: this collection takes
+      // one row per authenticated request, forever.
+      { keys: { expireAt: 1 }, options: { expireAfterSeconds: 0, name: "expireAt_ttl" } },
+    ],
+  },
+  {
     // Append-only. Nothing in this codebase updates or deletes from here.
     name: "auditLogs",
     validator: {

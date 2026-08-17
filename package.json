@@ -21,6 +21,7 @@
     "dev:game-socket": "npm run dev -w apps/game-socket",
     "e2e:spin": "node scripts/e2e/spin-flow-check.mjs",
     "e2e:backoffice": "node scripts/e2e/backoffice-flow-check.mjs",
+    "e2e:operator": "node scripts/e2e/operator-flow-check.mjs",
     "e2e:load": "node scripts/e2e/money-load-check.mjs"
   },
   "devDependencies": {

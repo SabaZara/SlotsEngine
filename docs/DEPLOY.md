@@ -5,7 +5,7 @@ Three workflows, in the order they run:
 | Workflow | Trigger | What it does |
 |---|---|---|
 | `ci.yml` | every push and PR to `main` | Builds, typechecks, runs 1180 unit tests and three e2e suites against real services. |
-| `deploy.yml` | **CI finishing successfully** on `main` | Builds five images, pushes them tagged by commit SHA, ships them, verifies health, rolls back if unhealthy. |
+| `deploy.yml` | **CI finishing successfully** on `main` | Builds six images, pushes them tagged by commit SHA, ships them, verifies health, rolls back if unhealthy. |
 | `rollback.yml` | manual | Puts production back on a named earlier release. |
 
 ## The one design decision worth reading
@@ -94,6 +94,7 @@ being true.
 | `DEPLOY_SSH_KNOWN_HOSTS` | Output of `ssh-keyscan -H <host>`. Optional but recommended — see below. |
 | `SERVICE_AUTH_SECRET` | Signs internal service-to-service requests. |
 | `LAUNCH_TOKEN_SECRET` | Signs launch tokens. Must differ from the above. |
+| `SECRETS_ENCRYPTION_KEY` | Encrypts operator API secrets at rest. **Exactly 64 hex characters** (`openssl rand -hex 32`) — integration-api refuses to boot on anything else, so a truncated paste fails the deploy rather than the first operator request. Losing this value makes every stored operator credential unrecoverable; they must be re-issued through the backoffice. |
 | `ASSET_ACCESS_KEY` | Object-storage access key. Uploads fail with `storage_not_configured` without it; nothing else breaks. |
 | `ASSET_SECRET_KEY` | Object-storage secret key. |
 | `BACKOFFICE_JWT_SECRET` | Signs backoffice sessions. |

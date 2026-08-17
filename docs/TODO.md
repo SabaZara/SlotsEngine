@@ -16,6 +16,14 @@ than deleted because in almost every case the *reasoning* outlived the fix.
 storage decision, and a short list of presentation work nobody is blocked
 on.**
 
+**The platform is now reachable by an operator** (item 10). Until
+2026-08-17 it was not, and nothing on this list said so: the token-verifying
+half of the player handoff was complete and mutation-verified, while
+`signLaunchToken` had no non-test caller and no `operators` collection
+existed. That gap is closed by `packages/secrets` and `apps/integration-api`
+— signed wallet, launch and catalogue calls, verified over a real wire
+across three processes by `npm run e2e:operator`.
+
 The frontend is no longer the thin part. As of 2026-08-17 it carries a Pixi
 renderer, a phase model, artwork, per-game themes, audio, autoplay, a drawn
 wheel bonus and a rotate prompt — and is **larger in source than the
@@ -39,6 +47,14 @@ non-decisions rather than gaps; section O names each and why.
   | **Asking how a user reaches the feature** | **1** | **F24** |
   | **Reading configuration** | **1** | **F27** |
   | **Reading a shared component** | **1** | **F28** |
+
+  The same question that produced F24 — *how does a real user reach this?*
+  — later produced item 10, which is not a bug row because nothing was
+  broken: an entire service was **missing**, and every module around it was
+  complete enough that no test, coverage report or type error could have
+  pointed at the hole. Worth separating from the bugs for that reason. A
+  suite tells you whether what exists is correct; it is silent on what was
+  never written.
 
   **The last row is the first bug here no test could ever have caught**, and
   it is worth separating for that reason rather than for novelty. F27 is not
@@ -80,8 +96,12 @@ non-decisions rather than gaps; section O names each and why.
   is not a criticism of them — a test that never fails is doing its job as a
   regression guard — but it does mean the suite's value here has been in the
   *writing*, and its value from here on is in the *guarding*.
-- **1625 tests**, of which 53 are conformance cases run against real MongoDB
-  and 86 are React component tests.
+- **1720 tests** (1621 unit + 99 component), of which 53 are conformance
+  cases run against real MongoDB, 99 are React component tests, and a
+  further 45 run against real MongoDB directly — 15 schema/index cases, 27
+  integration-API cases, and 3 ledger concurrency cases. Counted from a
+  full run rather than carried forward, because a number nobody re-measures
+  is the first thing in this file to become untrue.
 - **Sections A, B and C are closed** — no source module with meaningful
   logic is without a direct test. **The React components are no longer the
   exception**: section C's stopping point ("needs a DOM environment and a
@@ -574,6 +594,86 @@ pointed at an unpublished bonus game.
 
 The same treatment covers section 3's skip (item 8, the overdraw random
 walk), which had the identical problem.
+
+---
+
+### ~~10. Nothing could hand a player to a game~~ — the operator integration shipped
+
+**The gap that was never written down.** `signLaunchToken` had **zero
+non-test callers.** The whole verifying half was built, tested and
+mutation-verified — `game-socket` verifies a token, consumes it single-use
+through game-backend, and mints a session token in return — but the only
+thing that ever *minted* one was `scripts/e2e/spin-flow-check.mjs`, which
+imports the signing package directly. There was no operator-facing
+entrypoint at all, and **no `operators` collection**: `operatorId` keyed
+every round, transaction, player and bonus session as a string that nothing
+in the codebase defined, issued or authenticated.
+
+This was not on this list, which is the part worth recording. It was not a
+deliberate non-decision like the Redis limiter or the second RNG algorithm —
+it was simply invisible, because every module *around* it was complete and
+every test passed. Found by asking the same question that found F24: not
+"is this covered" but **"how does a real user reach this"** — there, a
+designer reaching free spins; here, an operator reaching the platform at
+all.
+
+What shipped, adapted from the reference's `apps/integration-api` rather
+than transplanted:
+
+- **`packages/secrets`** — AES-256-GCM at rest for `Operator.apiSecret`,
+  which cannot be hashed the way a password is, because HMAC verification
+  needs the original bytes back. 19 tests, **8 of 8 mutations caught.**
+- **`apps/integration-api`** — HMAC request signing over a canonical
+  `timestamp.METHOD.url.rawBody`, a 5-minute skew window, a nonce table
+  making even a GET non-replayable, the four wallet operations, launch, and
+  the catalogue. 27 tests, **11 of 11 mutations caught.**
+- **Two collections**, `operators` and `usedRequestSignatures`, both with
+  the unique indexes that *are* the mechanism rather than a constraint on
+  it. 5 of 5 mutations caught against real Mongo.
+
+**Three things the reference got wrong here, and what was done instead:**
+
+| Its version | Here |
+|---|---|
+| Boot-seeds a demo operator from env vars. Until v0.19.0 this ran in *every* environment, so a production deploy silently gained a live operator whose secret was regenerated and logged in plaintext on each restart. | No seeding at all. Operators are created through the backoffice, where issuance is audited. |
+| `/health` is public; `/health/ready` is not. | Both public — a readiness probe cannot hold an operator credential, and a 401 reads to an orchestrator as a permanently unready instance. Pinned by a test; the mutation restoring the reference's behaviour is caught. |
+| Accepts a plaintext `apiSecret` if it finds one. | Refused, loudly, at the point of use. Accepting it would let a half-migrated collection keep authenticating and nothing would ever report it. |
+
+**Two mutations survived the first pass, and both were real gaps rather
+than equivalent mutants.** They are worth recording because the same blind
+spot produced both:
+
+1. **Re-serialising the raw body instead of keeping the received bytes**
+   survived every test in `app.test.ts`. The reason is the test helper: a
+   body it built with `JSON.stringify` round-trips through
+   `JSON.parse`/`stringify` **byte-identically**, so no test using it can
+   distinguish the two. A real client that pretty-prints or orders keys by
+   its struct definition breaks immediately. Closed by a test that signs a
+   hand-written body with deliberate whitespace — and this is the F25
+   lesson again, one layer over: *the suite establishes what the code
+   computes, not what survives the trip between two processes.*
+2. **Replacing the constant-time comparison with `===`** survived, because
+   nothing sent a signature differing only in hex case. Closed by a test
+   that does, which now fails if anyone reintroduces the string comparison.
+
+**Verified against the live stack, not `fakeMongo`.** `npm run e2e:operator`
+drives 23 checks over real HTTP across three processes, and the claim it
+exists to make is the one no unit test can: **a token minted by
+integration-api is accepted by game-socket**, a different process holding
+its own copy of the shared secret. Mutation-verified too — minting a
+reusable session token where a single-use launch token belongs is caught,
+and so is a deliberate secret mismatch. One mutation (minting for a
+nonexistent `gameId`) **survived and is a genuine equivalent mutant at
+JOIN**: the socket takes `gameId` from the verified token and does not
+check the game exists until spin time. Recorded rather than argued away.
+
+Still open, and deliberately: **a `reverse` integration** (we call the
+operator's wallet) is typed but unimplemented, because it cannot be built
+against a guess — each aggregator differs on idempotency key placement and
+rollback semantics. And **`SECRETS_ENCRYPTION_KEY` adds a fourth secret to
+item 4** rather than removing one; the key lives in an env var, which
+raises the bar from "read the database" to "read the database and the
+environment" without being a managed store.
 
 ---
 

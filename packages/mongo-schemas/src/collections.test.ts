@@ -328,4 +328,107 @@ describe("applySchemas", () => {
       "but a genuine retry must still be caught",
     );
   });
+
+  it("refuses two operators sharing an apiKeyId, because that would be an auth bypass", async function () {
+    if (!client) return this.skip(skipReason);
+
+    // `apiKeyId` is the lookup key on every authenticated request. Two rows
+    // carrying the same one makes "which secret verifies this signature"
+    // ambiguous, and `findOne` would settle it by whichever document Mongo
+    // reached first — an authentication bypass wearing the costume of a
+    // data-entry mistake. It has to be refused at write time; there is no
+    // correct way to resolve it at read time.
+    const db = await freshDb();
+    await applySchemas(db);
+
+    const operator = (extra: Record<string, unknown>) => ({
+      operatorId: randomUUID(),
+      name: "Test Operator",
+      integrationType: "direct",
+      apiKeyId: "shared-key",
+      apiSecret: "enc:aa:bb:cc",
+      enabledGameIds: [],
+      createdAt: new Date().toISOString(),
+      ...extra,
+    });
+
+    await db.collection("operators").insertOne(operator({}));
+    await assert.rejects(
+      () => db.collection("operators").insertOne(operator({})),
+      (err: { code?: number }) => err.code === 11000,
+      "a second operator with the same apiKeyId must be refused",
+    );
+  });
+
+  it("refuses an operator whose integrationType is not one of the two implemented modes", async function () {
+    if (!client) return this.skip(skipReason);
+
+    // The enum is worth asserting against real Mongo rather than trusting:
+    // F9 was a validator that rejected every write because the declared
+    // BSON type could not match what JavaScript actually serialises. A
+    // validator is only as real as the database's opinion of it.
+    const db = await freshDb();
+    await applySchemas(db);
+
+    await assert.rejects(
+      () =>
+        db.collection("operators").insertOne({
+          operatorId: "op-bad",
+          name: "Test Operator",
+          integrationType: "sideways",
+          apiKeyId: "k-bad",
+          apiSecret: "enc:aa:bb:cc",
+          enabledGameIds: [],
+          createdAt: new Date().toISOString(),
+        }),
+      "an unknown integrationType must fail validation",
+    );
+  });
+
+  it("refuses a replayed request signature but scopes the refusal to one operator", async function () {
+    if (!client) return this.skip(skipReason);
+
+    // Both halves matter, and only the pair establishes the design.
+    //
+    // The first is the replay guard itself: the integration API inserts a
+    // row per authenticated request and treats 11000 as "seen this one
+    // before". That is deliberately an insert rather than a find-then-
+    // insert, so this index is the entire mechanism — if it is not unique,
+    // there is no replay protection at all and nothing else notices.
+    //
+    // The second is that the key is the PAIR. Keyed on `signature` alone,
+    // one operator's recorded traffic could cause a spurious refusal on
+    // another's, which is a cross-tenant fault in a security control.
+    const db = await freshDb();
+    await applySchemas(db);
+
+    const row = { operatorId: "op-1", signature: "a".repeat(64), expireAt: new Date(Date.now() + 60_000) };
+
+    await db.collection("usedRequestSignatures").insertOne({ ...row });
+    await assert.rejects(
+      () => db.collection("usedRequestSignatures").insertOne({ ...row }),
+      (err: { code?: number }) => err.code === 11000,
+      "the same signature twice for one operator is a replay",
+    );
+
+    await assert.doesNotReject(
+      () => db.collection("usedRequestSignatures").insertOne({ ...row, operatorId: "op-2" }),
+      "the identical signature under a different operator must not be refused",
+    );
+  });
+
+  it("builds the replay collection's TTL index, without which it grows forever", async function () {
+    if (!client) return this.skip(skipReason);
+
+    // This collection takes one row per authenticated request. The TTL is
+    // not housekeeping — it is the only thing bounding the storage cost of
+    // replay protection, and its absence would be invisible until the
+    // collection was already large.
+    const db = await freshDb();
+    await applySchemas(db);
+
+    const index = (await db.collection("usedRequestSignatures").indexes()).find((i) => i.name === "expireAt_ttl");
+    assert.ok(index, "expireAt_ttl must exist");
+    assert.equal(index.expireAfterSeconds, 0, "0 means 'expire at the date in the field', not 'expire immediately'");
+  });
 });
