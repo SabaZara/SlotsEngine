@@ -67,8 +67,23 @@ const INNER_REEL = [
  *
  * Measured, not assumed — `free-spins-game.test.ts` fails if the base game
  * drifts away from it.
+ *
+ * **Corrected from 0.81 to 0.8024 on 2026-08-17, and the 0.81 is why its own
+ * test was flaky.** Re-measured over five independent 2,000,000-spin runs
+ * (0.8045, 0.8050, 0.8008, 0.8028, 0.7987 — mean 0.8024, good to ~0.0011):
+ * the true base return is 0.8024, so the old constant was biased high by
+ * 0.0076. That is **38% of the test's own 0.02 tolerance spent before a
+ * single spin is sampled**, which left roughly 1.5x headroom where the
+ * numbers suggest 3x, and produced an occasional red run that looked like
+ * noise and was really a slightly wrong constant.
+ *
+ * Worth stating because the docstring above was already right about what
+ * this value is for: it is an **input** to the number the publish gate
+ * checks, not documentation. A base return declared 0.0076 high makes the
+ * gate score the feature against a game that returns slightly more than
+ * this one does.
  */
-export const FREE_SPINS_BASE_RTP = 0.81;
+export const FREE_SPINS_BASE_RTP = 0.8024;
 
 export const FREE_SPINS_GAME: GameDefinition = {
   gameId: "free-spins-5x3",

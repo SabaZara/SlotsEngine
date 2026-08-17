@@ -853,6 +853,41 @@ The engine's first feature built as a feature rather than as a fix. Three
 bonus modules now: `wheel` (single-step), `pick` (multi-step, self-contained)
 and `freeSpins` (multi-step, **played on the game's own reels**).
 
+**A flaky test in this fixture turned out to be a wrong constant** (fixed
+2026-08-17). `free-spins-game.test.ts` failed roughly one run in fifteen,
+which read as sampling noise on an unseeded simulation and was not:
+`FREE_SPINS_BASE_RTP` declared **0.81** against a true base return of
+**0.8024**, re-measured over five independent 2,000,000-spin runs. The
+0.0076 bias spent 38% of that test's own 0.02 tolerance before a single spin
+was sampled, so the assertion had roughly half the margin its numbers
+implied. Both were fixed — the constant corrected, and the two assertions
+seeded, at sizes chosen by measuring rather than by raising a number until
+red went green.
+
+**The two tests needed different fixes, and measuring is what separated
+them.** For the base-return check there is no bonus contributing, so it is
+ordinary per-spin sampling and sd falls as sqrt(n) (0.0093 at 200k, 0.0026
+at 1M) — more spins genuinely helps, and 500k is the knee at 2.2x headroom
+across ten arbitrary seeds. For the gate check the bonus pays **40.5x the
+bet** on a rare trigger, so the run is dominated by how many triggers landed
+rather than by an average over 200k spins: sd is ~0.0066 at 200k and ~0.0077
+at 500k, **flat where real sampling noise would have fallen**. Raising the
+count there buys nothing, which is worth recording because it is the first
+thing anyone would try. Every seed tried passes both, so the pinned seeds
+are reproducibility rather than cherry-picking — checked, not assumed.
+
+Both tests were mutation-verified after the fix: a constant wrong by 0.03
+fails the base check, and a doubled `winMultiplier` fails the gate. A stable
+test that can no longer detect the thing it exists for would be a worse
+outcome than the flake.
+
+**Note for whoever republishes this fixture.** The live `free-spins-5x3`
+document still carries `assumedBaseRtp: 0.81`, because a published game is a
+snapshot and does not track source edits — which is exactly the property
+that makes a round auditable years later. The corrected 0.8024 reaches
+players only on the next publish, and until then the gate scores that game
+against a base return 0.0076 higher than it has.
+
 **The interface change is the interesting part.** Free spins is the first
 module whose outcome is not a function of `params` alone — a free spin is a
 real spin, drawn from the same strips, paylines, wilds and scatters the base
