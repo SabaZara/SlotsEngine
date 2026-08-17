@@ -202,7 +202,19 @@ export function GameBuilderScreen({
           <PaylinesEditor paylines={draft.paylines} grid={draft.grid} onChange={(paylines) => edit({ paylines })} />
         )}
         {tab === "artwork" && (
-          <AssetsEditor symbols={draft.symbols} assets={draft.assets} onChange={(assets) => edit({ assets })} />
+          <AssetsEditor
+            symbols={draft.symbols}
+            assets={draft.assets}
+            onChange={(assets) => edit({ assets })}
+            onUpload={async (slot, symbol, upload) => {
+              // The upload route returns the whole draft with signed URLs
+              // for display, so the screen takes its word rather than
+              // patching locally — the server is the only thing that knows
+              // the key it just generated.
+              const result = await api.uploadAsset(gameId, { slot, ...(symbol ? { symbol } : {}), ...upload });
+              setDraft(result.draft);
+            }}
+          />
         )}
         {tab === "theme" && <ThemeEditor theme={draft.theme} onChange={(theme) => edit({ theme })} />}
         {tab === "math" && (

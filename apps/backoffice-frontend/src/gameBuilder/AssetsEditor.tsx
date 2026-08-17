@@ -1,5 +1,6 @@
 import { isLoadableAssetUrl, type GameAssets, type SymbolRule } from "@slots-engine/shared-types";
 import { Field, TextInput } from "../ui/primitives.js";
+import { AssetUpload } from "./AssetUpload.js";
 import { t } from "../ui/tokens.js";
 
 /**
@@ -114,12 +115,17 @@ function UrlField({
   value,
   onChange,
   kind = "artwork",
+  upload,
 }: {
   label: string;
   hint?: string;
   value: string;
   onChange: (url: string) => void;
   kind?: "artwork" | "sound";
+  /** Present only when object storage is available. A field with no upload
+   * still takes a URL, which is what every game here used before storage
+   * existed and remains valid. */
+  upload?: { accept: string; onUpload: (u: { contentType: string; data: string }) => Promise<void> };
 }) {
   const warning = assetUrlWarning(value, kind);
   return (
@@ -134,6 +140,11 @@ function UrlField({
         placeholder="https://…  (leave empty for none)"
         onChange={onChange}
       />
+      {upload && (
+        <div style={{ marginTop: 6 }}>
+          <AssetUpload accept={upload.accept} onUpload={upload.onUpload} />
+        </div>
+      )}
       {/* `warn`, not `bad`, and matching `BonusParamsForm` deliberately: both
           say the same kind of thing — this saves and publishes fine, and then
           quietly does something other than what you asked. */}
@@ -142,10 +153,20 @@ function UrlField({
   );
 }
 
+/** MIME types each slot accepts, kept equal to the server's allowlist.
+ * A picker offering a type the route refuses is a dialog that leads to an
+ * error, which is worse than not offering it. */
+const ACCEPT = {
+  image: "image/png,image/jpeg,image/webp,image/avif",
+  symbol: "image/png,image/jpeg,image/webp,image/avif,image/svg+xml",
+  audio: "audio/mpeg,audio/ogg,audio/wav,audio/webm",
+} as const;
+
 export function AssetsEditor({
   symbols,
   assets,
   onChange,
+  onUpload,
 }: {
   /** Taken from the draft's own symbol rules rather than from the artwork
    * map, so the list is every symbol the game actually has. Deriving it from
@@ -155,6 +176,10 @@ export function AssetsEditor({
   symbols: SymbolRule[];
   assets: GameAssets | undefined;
   onChange: (assets: GameAssets | undefined) => void;
+  /** Absent when object storage is not configured, which hides every upload
+   * button rather than offering one that always fails. The URL fields keep
+   * working — they are what every game here used before storage existed. */
+  onUpload?: (slot: string, symbol: string | undefined, upload: { contentType: string; data: string }) => Promise<void>;
 }) {
   return (
     <div>
@@ -168,6 +193,7 @@ export function AssetsEditor({
         hint="Drawn behind the reels. Empty means the built-in gradient."
         value={assets?.backgroundUrl ?? ""}
         onChange={(url) => onChange(applyAssetEdit(assets, { kind: "background", url }))}
+        {...(onUpload ? { upload: { accept: ACCEPT.image, onUpload: (u) => onUpload("background", undefined, u) } } : {})}
       />
 
       <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.7, color: t.muted, margin: "16px 0 6px" }}>
@@ -183,6 +209,7 @@ export function AssetsEditor({
         hint="Looped quietly for the whole session."
         value={assets?.musicUrl ?? ""}
         onChange={(url) => onChange(applyAssetEdit(assets, { kind: "music", url }))}
+        {...(onUpload ? { upload: { accept: ACCEPT.audio, onUpload: (u) => onUpload("music", undefined, u) } } : {})}
       />
       <UrlField
         kind="sound"
@@ -190,6 +217,7 @@ export function AssetsEditor({
         hint="Looped only while the reels are moving, layered over the music."
         value={assets?.spinSoundUrl ?? ""}
         onChange={(url) => onChange(applyAssetEdit(assets, { kind: "spinSound", url }))}
+        {...(onUpload ? { upload: { accept: ACCEPT.audio, onUpload: (u) => onUpload("spinSound", undefined, u) } } : {})}
       />
 
       <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: 0.7, color: t.muted, margin: "16px 0 6px" }}>
@@ -201,6 +229,9 @@ export function AssetsEditor({
           label={symbol.symbol}
           value={assets?.symbolImageUrls?.[symbol.symbol] ?? ""}
           onChange={(url) => onChange(applyAssetEdit(assets, { kind: "symbol", symbol: symbol.symbol, url }))}
+          {...(onUpload
+            ? { upload: { accept: ACCEPT.symbol, onUpload: (u) => onUpload("symbol", symbol.symbol, u) } }
+            : {})}
         />
       ))}
       {symbols.length === 0 && (

@@ -228,6 +228,29 @@ export const api = {
       body: withExplicitRemovals(patch),
     }),
 
+  /**
+   * Uploads one asset and returns the draft with a signed URL for display.
+   *
+   * A separate route from `saveDraft` on purpose, and the separation is the
+   * feature rather than tidiness: the draft PUT refuses `assets` outright,
+   * because assets are stored as keys and shown as signed URLs — so a save
+   * that echoed the displayed value back would overwrite the key with a
+   * URL. That is the bug the reference repo shipped, compounding once per
+   * save. See `keys.ts` in `@slots-engine/asset-storage`.
+   */
+  uploadAsset: (gameId: string, upload: { slot: string; symbol?: string; contentType: string; data: string }) =>
+    request<{ key: string; url: string; draft: GameDraft }>(`/v1/games/${encodeURIComponent(gameId)}/assets`, {
+      method: "POST",
+      body: upload,
+    }),
+
+  clearAsset: (gameId: string, slot: string, symbol?: string) =>
+    request<{ draft: GameDraft }>(
+      `/v1/games/${encodeURIComponent(gameId)}/assets?slot=${encodeURIComponent(slot)}` +
+        (symbol ? `&symbol=${encodeURIComponent(symbol)}` : ""),
+      { method: "DELETE" },
+    ),
+
   simulate: (gameId: string, simCount: number) =>
     request<{ simulation: SimulationReport }>(`/v1/games/${encodeURIComponent(gameId)}/simulate`, {
       method: "POST",
