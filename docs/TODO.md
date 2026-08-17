@@ -1424,7 +1424,22 @@ does not fire pins something real.
 
 | # | What | Why it is next |
 |---|---|---|
-| 1 | Object storage and an upload button | Only worth doing when someone needs to host art *here* rather than at a URL they already have. Read F25, F26 and the reference's `repair-corrupted-asset-urls.ts` before starting: signing introduces a read shape that differs from the write shape, which is exactly the asymmetry this design currently does not have, and the reference shipped a compounding data-corruption bug on it. |
+| 1 | **A wheel is never drawn** | The clearest gap the reference survey found, and the only one on a **shipped, default-game** module. `reference-5x3` carries a `wheel` bonus, and `readBonusPanel` dispatches on view shape: a wheel view carries `segmentIndex`/`multiplier`/`segments`/`totalWin` — neither `remaining` nor `tileCount` — so it matches nothing. **Not a blank overlay, and that is worth knowing before anyone panics**: `wheel` is resolved-on-start, so `status === "resolved"` matches first and the player correctly sees "Bonus complete" with the amount won. The money is right and the feature is reachable; what is missing is the wheel itself — the segment table is sent, and the client shows a number instead of the thing that produced it. The reference's `wheelAngleMath.ts` is 17 lines and directly adaptable (`computeWheelFinalRotation`, with segment 0 at 12 o'clock); its `WheelBonusView` is the Pixi half. |
+| 2 | Object storage and an upload button | Only worth doing when someone needs to host art *here* rather than at a URL they already have. Read F25, F26 and the reference's `repair-corrupted-asset-urls.ts` before starting: signing introduces a read shape that differs from the write shape, which is exactly the asymmetry this design currently does not have, and the reference shipped a compounding data-corruption bug on it. |
+| 3 | Per-input names on multi-control rows | `Field` now names the *row* (`role="group"`), and `TextInput` accepts a `label`, but `SettingsEditor`'s multi-control rows do not pass one — so "Grid"'s reels and rows boxes are still anonymous to a screen reader. The primitive work is done; this is the caller-by-caller half, on screens with no tests of their own. |
+
+**Surveyed against the reference on 2026-08-17**, since "what is missing"
+was worth answering from its source rather than from memory. What it has and
+this client does not, with an honest read on whether each is worth copying:
+
+| Reference module | Lines | Verdict |
+|---|---:|---|
+| `ui/bonus/modules/WheelBonusView` + `wheelAngleMath` | ~17 (math) | **Worth doing** — row 1 above. The only gap affecting a module this repo actually ships. |
+| `audio/MusicManager` | 76 | Real gap, and honestly recorded in its own source as one the reference shipped late: uploading music did nothing for a while, and "the in-game mute icon flipped its own emoji with no actual sound to mute". Needs a `musicUrl` asset field first, so it is gated behind the artwork upload row rather than independent. |
+| `ui/overlay/RotateDeviceOverlay` | 47 | Belongs to the responsive work below, which is a stated priority call rather than an oversight. Its technique is the part to keep: `matchMedia("(orientation: portrait)")` rather than comparing width to height, so it reacts when no breakpoint changes. |
+| `ui/overlay/{OverlayManager,CenteredModal,AnchoredPopover,LoadingOverlay}` | 74/…/124 | **Deliberately not adapting.** This client has one overlay (the bonus panel) and one fatal state; a manager, a modal primitive and a popover primitive are infrastructure for a UI that does not exist here yet. Adapting them now would be transplanting, which `CLAUDE.md` names as the failure mode. |
+| `ui/customEffects/*` (registry, eventBus, plugin effects) | ~19 + | Same verdict, more strongly: a plugin system for per-game visual effects presumes games with bespoke art direction. Nothing here has that yet. |
+| `ui/celebration/WinCelebrationOverlay` | 93 | **Already covered** by `winPresentation.ts` + `winCountUp.ts` (38 tests), which additionally hold the money-formatting bug the reference shipped here — a mid-tween `toFixed(2)` printing "WIN 2000.00" for a 20.00 win. |
 
 **Responsive / mobile layout is explicitly deprioritised** (decided
 2026-08-17). Not an oversight and not blocked — a stated priority call, so
