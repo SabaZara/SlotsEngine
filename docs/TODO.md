@@ -96,7 +96,7 @@ non-decisions rather than gaps; section O names each and why.
   is not a criticism of them — a test that never fails is doing its job as a
   regression guard — but it does mean the suite's value here has been in the
   *writing*, and its value from here on is in the *guarding*.
-- **1784 tests** (1673 unit + 111 component), of which 53 are conformance
+- **1792 tests** (1681 unit + 111 component), of which 53 are conformance
   cases run against real MongoDB, 111 are React component tests, and a
   further 45 run against real MongoDB directly — 15 schema/index cases, 27
   integration-API cases, and 3 ledger concurrency cases. Counted from a
@@ -756,6 +756,65 @@ takes:** an operator created through the real backoffice API, its
 one-shot secret pasted into `infra/.env`, the demo started against it, and
 a real spin driven in the browser — balance $1000.00 → $999.00 on a $1.00
 bet, inside the demo's own iframe on port 9108.
+
+### ~~12. The integration document was a promise nothing checked~~ — pinned
+
+Found by auditing the reference repo for anything the operator work had
+missed. It ships `docs/openapi/integration-api.yaml`, which this repo has
+no equivalent of — and reading it turned up something more useful than the
+file itself.
+
+**Its spec disagrees with its own code.** It declares
+`amount: { type: number, exclusiveMinimum: 0 }`, while its wallet route
+requires `Number.isInteger`. An integrator generating a client from that
+spec produces one that sends `10.5` and is rejected by the service the spec
+describes. Nothing runs the file, so it has stayed wrong.
+
+That is F27's shape in a document — a value that looks authoritative, is
+not, and fails for *someone else* at a time when nobody is looking at the
+file that caused it. Worse than F27 in one respect: the person it fails is
+outside the building and cannot read the source to find out why.
+
+`docs/INTEGRATION.md` had the same structural weakness — accurate when
+written, and unable to stay that way. It is now pinned by
+`apps/integration-api/src/documentation.test.ts`, which checks the
+document against the code it describes: every error code the service emits
+appears in the error table and vice versa, the skew window and page limit
+match the constants, the canonical string matches what `canonicalRequest`
+builds, the three required headers are the three the middleware reads, and
+every route is documented.
+
+**Mutation-verified, 5 of 5 drift scenarios caught** — code changing under
+a stale document (skew, page limit), a renamed error code, a deleted table
+row, and the document claiming decimal amounts (the reference's actual
+defect).
+
+Two things the mutation pass established that writing the tests did not:
+
+- **The first version was weaker than it looked.** Deleting the
+  `replayed_request` row survived, because a plain `DOC.includes()` also
+  matched the prose paragraph that names the same code. Prose explains; the
+  **table** is what someone builds a `switch` from, so the table is what
+  must be complete. Now matched against table rows specifically.
+- **It must not pin prose.** A control edit — rewording a heading — is
+  confirmed to pass. A test that fails on copy edits teaches people to
+  ignore failures, which costs more than the drift it prevents. The tests
+  assert values and codes, never sentences. The first skew test broke this
+  rule by demanding the numeral `5` against a document that correctly said
+  "five", and was fixed rather than the document.
+
+**Deliberately not adding an OpenAPI spec.** It would be a third copy of
+the same facts — after the code and the document — and the reference
+demonstrates precisely how that copy rots. If one is ever wanted for client
+generation, it should be *generated* from the route definitions, not
+maintained alongside them.
+
+**The reference's `migrate-encrypt-operator-secrets.ts` is also not
+applicable**, and that is worth recording so nobody re-derives it: that
+script exists because the reference shipped plaintext `apiSecret` values
+first and retrofitted encryption at v0.8.0. This repo has never had an
+unencrypted operator row — `findOperatorByKeyId` refuses one outright — so
+there is nothing to migrate.
 
 ---
 

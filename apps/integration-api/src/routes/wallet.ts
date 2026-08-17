@@ -16,8 +16,12 @@ interface CashBody {
 
 /** How many statement rows one call may return. A statement is a paging
  * problem, not a dump; the cap is here so a large operator cannot make this
- * route stream an unbounded result set. */
-const TRANSACTION_PAGE_LIMIT = 200;
+ * route stream an unbounded result set.
+ *
+ * Exported so `docs/INTEGRATION.md` can be checked against it — an
+ * integrator paging on a documented limit that no longer matches the code
+ * silently misses rows. */
+export const TRANSACTION_PAGE_LIMIT = 200;
 
 /**
  * Validates the shape of a cash movement before any money is touched.
