@@ -284,8 +284,17 @@ services:
       # browser makes.
       INTEGRATION_API_URL: ${INTEGRATION_API_INTERNAL_URL:-http://integration-api:9006}
       OPERATOR_ID: ${DEMO_OPERATOR_ID:-demo}
-      OPERATOR_API_KEY_ID: ${DEMO_OPERATOR_API_KEY_ID}
-      OPERATOR_API_SECRET: ${DEMO_OPERATOR_API_SECRET}
+      # Defaulted to empty rather than left bare, and the difference is not
+      # cosmetic: a bare `${VAR}` makes compose warn on EVERY command in
+      # this file — `up`, `config`, `logs`, all of them — for a service that
+      # is profile-gated and usually not running at all. Warnings that fire
+      # on unrelated commands are how people learn to skip reading them.
+      #
+      # Empty is safe here because operator-demo refuses to start without
+      # real values, so the check that matters happens where it can say
+      # something useful, rather than as compose noise everyone else sees.
+      OPERATOR_API_KEY_ID: ${DEMO_OPERATOR_API_KEY_ID:-}
+      OPERATOR_API_SECRET: ${DEMO_OPERATOR_API_SECRET:-}
       DEMO_TOPUP_AMOUNT: ${DEMO_TOPUP_AMOUNT:-100000}
     ports:
       - "${OPERATOR_DEMO_HOST_PORT:-9108}:9008"
