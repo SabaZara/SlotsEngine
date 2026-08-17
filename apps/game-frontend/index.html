@@ -160,6 +160,32 @@
          player no clue that it will come back. */
       .autoplay button:disabled, .autoplay input:disabled { opacity: 0.5; cursor: default; }
 
+      #rotate-device {
+        position: fixed;
+        inset: 0;
+        z-index: 10;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(5, 7, 15, 0.94);
+        backdrop-filter: blur(6px);
+        text-align: center;
+      }
+      #rotate-device[hidden] { display: none; }
+      .rotate-inner { display: flex; flex-direction: column; align-items: center; gap: 10px; padding: 24px; }
+      .rotate-inner span { color: var(--muted); font-size: 14px; }
+      .rotate-icon { font-size: 44px; animation: rotate-hint 2.4s ease-in-out infinite; }
+      @keyframes rotate-hint {
+        0%, 40%, 100% { transform: rotate(0deg); }
+        60%, 90% { transform: rotate(-90deg); }
+      }
+      /* The icon's motion is the hint, so it is the one thing that must not
+         be dropped entirely — it is held still at the rotated angle instead,
+         which still shows what is being asked for. */
+      @media (prefers-reduced-motion: reduce) {
+        .rotate-icon { animation: none; transform: rotate(-90deg); }
+      }
+
       footer {
         display: flex;
         align-items: center;
@@ -213,6 +239,19 @@
       <canvas id="reels"></canvas>
       <div id="bonus" hidden></div>
     </main>
+
+    <!-- Hidden by default and shown only for a narrow portrait viewport.
+         Deliberately does NOT block play: `computeGridMetrics` already fits
+         the grid to whichever axis is tighter, so the reels are visible and
+         nothing a player is paid on can be cropped. This asks for a better
+         view, it does not gate one. -->
+    <div id="rotate-device" hidden>
+      <div class="rotate-inner">
+        <div class="rotate-icon" aria-hidden="true">📱</div>
+        <strong>Turn your device sideways</strong>
+        <span>This game is built for landscape.</span>
+      </div>
+    </div>
 
     <footer>
       <div id="bets"></div>

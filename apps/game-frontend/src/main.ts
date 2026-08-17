@@ -3,6 +3,7 @@ import { GameClient, fetchGameView, type PublicGameView } from "./api.js";
 import { PixiReelRenderer } from "./render/pixiRenderer.js";
 import { applyGameTheme } from "./render/theme.js";
 import { GameAudio } from "./ui/gameAudio.js";
+import { RotateDeviceOverlay } from "./ui/rotateDevice.js";
 import { GameStateMachine } from "./state/gameState.js";
 import { AUTOPLAY_SPIN_COUNTS, AutoplayController, type AutoplayStopReason } from "./state/autoplay.js";
 import { applyEnablement } from "./ui/controls.js";
@@ -123,6 +124,10 @@ class GameApp {
         ...(this.game.assets?.spinSoundUrl !== undefined ? { spinSoundUrl: this.game.assets.spinSoundUrl } : {}),
       });
       this.buildMuteControl();
+      // Constructed after the game view so it cannot flash before the page
+      // has a name to show behind it. It listens for the rest of the
+      // session; nothing else drives it.
+      new RotateDeviceOverlay({ overlay: el("rotate-device") }, window);
     } catch {
       // The underlying message is deliberately not shown. "Failed to fetch"
       // tells a player nothing they can act on, and the phase's own wording
