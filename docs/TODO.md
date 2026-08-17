@@ -1433,6 +1433,18 @@ does not fire pins something real.
 was worth answering from its source rather than from memory. What it has and
 this client does not, with an honest read on whether each is worth copying:
 
+**All four worth-doing rows are now closed** (2026-08-17). Autoplay,
+themes, audio and the rotate prompt shipped in that order — independence
+first, so nothing waited on a decision it did not need. Two of the four had
+a **surviving mutation that turned out to be a real gap rather than an
+equivalent mutant**, and both were the same shape: a guard that looked
+untested and was merely *under*-tested. Autoplay's decrement order changed
+only the counter after a refused send (7 remaining versus 8, measured), and
+the rotate prompt's non-finite guard is reachable only by `-Infinity`, since
+`NaN` and `Infinity` are already refused by the comparison itself. Worth
+remembering as a method: when a mutation survives, probe for the input that
+distinguishes the two versions before concluding they are equivalent.
+
 | Reference module | Lines | Verdict |
 |---|---:|---|
 | `ui/bonus/modules/WheelBonusView` + `wheelAngleMath` | ~17 (math) | **Worth doing** — row 1 above. The only gap affecting a module this repo actually ships. |
