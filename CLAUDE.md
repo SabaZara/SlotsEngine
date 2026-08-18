@@ -80,3 +80,31 @@ here passed a green suite. In order of how much they establish:
 - **Money is always integer minor units.** Never a float, anywhere.
 - Commit messages explain the reasoning and name what was verified. End
   with the `Co-Authored-By` trailer.
+
+## Branch, then PR — never commit straight to `main`
+
+Work on a branch and open a pull request. `main` is for merged work only.
+
+This is written down because it was not followed: a run of changes went
+directly to `main` — including a new dependency and a change to the only
+browser-facing route — each pushed the moment CI went green, so there was
+never a point at which anyone could have looked before it landed. The work
+was verified and the work was fine; that is not the issue. **A review point
+you can skip is not a review point**, and there is no branch protection
+here to enforce one (item 2 in `docs/TODO.md`, waiting on a paid plan), so
+the discipline has to live here instead.
+
+```bash
+git switch -c <short-descriptive-name>
+# ... work, commit as normal ...
+git push -u origin <name>
+gh pr create --fill
+```
+
+Then **stop, and let a human merge it** unless they have said otherwise.
+Reporting "the PR is open and CI is green" is finishing the task; merging
+it yourself is deciding on someone else's behalf that it was ready.
+
+Delete the branch after it merges. A merged branch left behind becomes a
+stale pointer nobody can tell from live work — `artwork-path` sat 44
+commits behind `main` for exactly that reason.
