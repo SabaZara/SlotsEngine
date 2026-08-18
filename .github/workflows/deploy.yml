@@ -77,6 +77,15 @@ jobs:
             dockerfile: infra/docker/frontend.Dockerfile
           - service: backoffice-frontend
             dockerfile: infra/docker/frontend.Dockerfile
+          # Built even though it is profile-gated and usually not running.
+          # An image absent from the registry is not a service that quietly
+          # stays down -- `docker compose pull` fails outright on the missing
+          # tag, which fails the deploy, and then fails the ROLLBACK too,
+          # because that pulls the same set from the previous SHA. Observed:
+          # enabling the demo profile without this entry took a healthy box
+          # to a failed deploy whose recovery path was equally broken.
+          - service: operator-demo
+            dockerfile: infra/docker/service.Dockerfile
     steps:
       # A `workflow_run` event checks out the DEFAULT branch unless told
       # otherwise, not the commit that triggered CI. Without this ref the
