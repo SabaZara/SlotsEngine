@@ -150,7 +150,9 @@
         .wheel-face { transition: none !important; }
       }
 
-      .autoplay { display: flex; align-items: center; gap: 12px; padding-top: 8px; flex-wrap: wrap; }
+      /* No `padding-top` — the .panel wrapper supplies the padding now that
+         this opens as an overlay rather than growing the footer. */
+      .autoplay { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; white-space: nowrap; }
       #autoplay-counts { display: flex; gap: 6px; }
       .autoplay-count[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
       .autoplay-stop-on-win { display: flex; align-items: center; gap: 6px; font-size: 13px; }
@@ -222,10 +224,47 @@
 
       #status { color: var(--muted); font-size: 13px; min-height: 1.5em; }
 
-      details { color: var(--muted); font-size: 13px; }
+      /* The footer's disclosure panels — Autoplay and Paytable.
+         Both open UPWARD as an overlay rather than growing the footer.
+         Left inline, `<details>` expands in the flex row and the footer
+         grew from 60px to 312px on open, pushing the reels up so the bottom
+         row sat on top of the controls and the paytable collided with the
+         grid. Anchoring the panel takes it out of flow, so opening one
+         changes nothing about the layout behind it. */
+      details { color: var(--muted); font-size: 13px; position: relative; }
       summary { cursor: pointer; }
-      #paytable table { border-collapse: collapse; margin-top: 8px; }
-      #paytable td { padding: 3px 14px 3px 0; font-variant-numeric: tabular-nums; }
+
+      details > .panel {
+        position: absolute;
+        /* Above the summary, not below: this sits at the bottom of the
+           viewport, so a downward panel would open off-screen. */
+        bottom: calc(100% + 10px);
+        right: 0;
+        z-index: 20;
+        padding: 12px 14px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        /* Fully opaque, because the reels animate behind it — a translucent
+           panel over moving symbols is unreadable at exactly the moment a
+           player is checking what a symbol pays. Measured: `--panel` alone
+           is `rgba(255,255,255,0.05)`, a *tint* meant to sit on the page
+           background, so using it here left the grid showing through the
+           payout numbers. Layering it over `--bg` keeps the same lift while
+           being genuinely opaque. */
+        background: linear-gradient(var(--panel), var(--panel)), var(--bg);
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+        /* Never taller than the space above it, and scrolls if the game has
+           enough symbols to need it. */
+        max-height: min(60vh, 420px);
+        overflow-y: auto;
+        overscroll-behavior: contain;
+      }
+
+      /* Wide enough not to wrap the payout columns, narrow enough to stay
+         on screen on a small landscape phone. */
+      #paytable { min-width: 260px; }
+      #paytable table { border-collapse: collapse; }
+      #paytable td { padding: 3px 14px 3px 0; font-variant-numeric: tabular-nums; white-space: nowrap; }
       #paytable td:first-child { color: var(--text); }
     </style>
   </head>
@@ -268,7 +307,7 @@
            it should take a moment's intent to reach. -->
       <details id="autoplay-panel">
         <summary>Autoplay</summary>
-        <div class="autoplay">
+        <div class="autoplay panel">
           <div id="autoplay-counts" role="group" aria-label="Number of spins"></div>
           <label class="autoplay-stop-on-win">
             <input type="checkbox" id="autoplay-stop-on-win" />
@@ -280,7 +319,7 @@
       </details>
       <details>
         <summary>Paytable</summary>
-        <div id="paytable"></div>
+        <div id="paytable" class="panel"></div>
       </details>
     </footer>
 

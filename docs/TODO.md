@@ -1419,6 +1419,43 @@ currency through the report response, which is a money-path schema change
 and belongs in its own piece of work — the same reasoning the summary route
 already applies to splitting deposits from winnings.
 
+### ~~22. Opening the paytable broke the game layout~~ — panels now overlay
+
+**Reported from the running game, not found by a test** — and no test could
+have found it, because it is a layout property of a `<details>` element and
+`jsdom` has no layout engine.
+
+The footer is a flex row and both disclosure panels (Autoplay, Paytable)
+were inline `<details>`. Opening one grew the footer **from 72px to 312px**,
+which pushed the reels up: the bottom row of symbols ended up drawn over
+the bet buttons, and the paytable collided with the grid.
+
+Both now open **upward as an anchored overlay** — `position: absolute`,
+`bottom: calc(100% + 10px)`, out of flow — so opening one changes nothing
+about the layout behind it. Measured after the fix: the footer grows by
+**0px**.
+
+Two details worth recording:
+
+- **Upward, not downward.** The footer sits at the bottom of the viewport,
+  so a panel opening downward would render off-screen.
+- **The background needed layering, and that was a measured correction.**
+  The first version used `var(--panel)`, which sounds right and is
+  `rgba(255,255,255,0.05)` — a *tint* meant to sit on the page background,
+  not an opaque surface. The reels showed straight through the payout
+  numbers while they animated, which is exactly when a player is reading
+  them. It is now `linear-gradient(var(--panel), var(--panel)), var(--bg)`:
+  same lift, genuinely opaque.
+
+The panel also caps at `min(60vh, 420px)` and scrolls internally, so a
+short landscape phone gets a usable panel rather than one running off the
+top.
+
+**Verified in the browser**, since that is the only place this is
+observable: footer height unchanged on open, panel fully on screen at both
+1280x800 and a 740x400 landscape phone, readable over moving reels
+mid-spin, and both panels behaving the same way.
+
 ## Open (accepted)
 
 ### 7. A passing load check is evidence, not proof
