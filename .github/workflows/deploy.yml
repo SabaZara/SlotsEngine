@@ -296,7 +296,7 @@ jobs:
           TAG=${{ github.event.workflow_run.head_sha || github.sha }}
           NODE_ENV=production
           # Compose reads COMPOSE_FILE exactly as if these were passed as -f
-          # flags, so every `docker compose` below stays bare. That is the
+          # flags, so every 'docker compose' below stays bare. That is the
           # point: the alternative is a -f pair at six call sites, and the one
           # that would eventually be forgotten is the rollback — which runs
           # when production is already broken. The overlay unpublishes Mongo's
