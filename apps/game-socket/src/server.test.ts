@@ -137,6 +137,17 @@ describe("the health endpoint", () => {
     assert.deepEqual(await response.json(), { service: "game-socket", status: "ok" });
   });
 
+  it("answers /health/ready, so the deploy can check one path across services", async () => {
+    // game-backend and backoffice-api both serve /health/ready, and the
+    // deploy's health check curls that path. This service answered 404 on
+    // it until an actual deploy exposed the inconsistency.
+    const { port } = await start();
+    const response = await fetch(`http://127.0.0.1:${port}/health/ready`);
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { service: "game-socket", status: "ready" });
+  });
+
   it("404s anything else, rather than serving it", async () => {
     const { port } = await start();
     assert.equal((await fetch(`http://127.0.0.1:${port}/`)).status, 404);

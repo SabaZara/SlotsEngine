@@ -58,9 +58,24 @@ export function createSocketServer(options: SocketServerOptions): SocketServer {
   const sessions = options.sessions ?? new Map<Connection, Session>();
 
   const httpServer = createServer((req, res) => {
+    // Liveness: the process is up. Deliberately does not touch a dependency
+    // — a liveness probe that fails on a downstream blip restarts a healthy
+    // process and makes an outage worse.
     if (req.url === "/health") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ service: "game-socket", status: "ok" }));
+      return;
+    }
+    // Readiness, and it reports the same thing liveness does — on purpose.
+    // This service owns no database handle and opens no connection at boot:
+    // once it is listening it can accept a handshake, so there is nothing
+    // further to prove. The path exists because every other service answers
+    // /health/ready, and a deploy that health-checks a uniform path should
+    // not have to special-case one service. Adding a real dependency here
+    // means giving this branch something to check.
+    if (req.url === "/health/ready") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ service: "game-socket", status: "ready" }));
       return;
     }
     res.writeHead(404).end();
