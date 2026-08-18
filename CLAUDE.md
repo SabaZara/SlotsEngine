@@ -81,30 +81,21 @@ here passed a green suite. In order of how much they establish:
 - Commit messages explain the reasoning and name what was verified. End
   with the `Co-Authored-By` trailer.
 
-## Branch, then PR — never commit straight to `main`
+## Commit straight to `main`
 
-Work on a branch and open a pull request. `main` is for merged work only.
+Commit and push to `main` directly. **Do not open pull requests** — the
+owner has asked for this explicitly: the branch-and-PR round trip was more
+ceremony than this project wants.
 
-This is written down because it was not followed: a run of changes went
-directly to `main` — including a new dependency and a change to the only
-browser-facing route — each pushed the moment CI went green, so there was
-never a point at which anyone could have looked before it landed. The work
-was verified and the work was fine; that is not the issue. **A review point
-you can skip is not a review point**, and there is no branch protection
-here to enforce one (item 2 in `docs/TODO.md`, waiting on a paid plan), so
-the discipline has to live here instead.
+This replaces an earlier rule here that said the opposite. It is recorded as
+a reversal rather than deleted, so the next reader does not "restore" the
+branch flow thinking it was lost by accident.
 
-```bash
-git switch -c <short-descriptive-name>
-# ... work, commit as normal ...
-git push -u origin <name>
-gh pr create --fill
-```
+What still holds, and is the part that mattered:
 
-Then **stop, and let a human merge it** unless they have said otherwise.
-Reporting "the PR is open and CI is green" is finishing the task; merging
-it yourself is deciding on someone else's behalf that it was ready.
-
-Delete the branch after it merges. A merged branch left behind becomes a
-stale pointer nobody can tell from live work — `artwork-path` sat 44
-commits behind `main` for exactly that reason.
+- **The verification standard is unchanged.** Straight-to-`main` raises the
+  cost of a mistake rather than lowering the bar — mutation-verify, run it
+  against the real stack, say what a test cannot establish, and check CI
+  after pushing.
+- **Delete branches once merged.** `artwork-path` sat 44 commits behind
+  `main` as a stale pointer nobody could tell from live work.

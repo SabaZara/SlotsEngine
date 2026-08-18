@@ -53,7 +53,46 @@ const MAX_LIMIT = 1000;
  * export that looks complete is the worst possible failure of this route:
  * the numbers reconcile against themselves and are simply missing rows.
  */
-const CSV_EXPORT_LIMIT = 50_000;
+export const CSV_EXPORT_LIMIT = 50_000;
+
+/**
+ * The truncation decision, split out from the route so it can be tested.
+ *
+ * **It could not be, before.** The branch lived inline and the only way to
+ * reach it was to export more than 50,000 rows, which no test does — so the
+ * slice, the `x-truncated` header and the `# TRUNCATED` row had never
+ * executed in the suite. That is exactly the gap the verification
+ * standard's fifth entry is about: a ceiling nothing is ever refused by is
+ * a ceiling nobody has demonstrated. And it matters here more than most,
+ * because the whole purpose of these signals is that **a truncated
+ * financial export must not look complete** — F31 is already the record of
+ * that signal being broken in a way no test caught.
+ *
+ * Takes `limit` as an argument rather than reading the constant, so a test
+ * can drive the boundary with three rows instead of fifty thousand and one.
+ * The route passes `CSV_EXPORT_LIMIT`; nothing else changes.
+ *
+ * The caller fetches `limit + 1` rows, so "more than the cap matched" is
+ * `rows.length > limit` — one extra row is the whole signal, and counting
+ * separately would be a second query racing the first.
+ */
+export function decideCsvTruncation<T>(
+  rows: readonly T[],
+  limit: number,
+): { truncated: boolean; exported: readonly T[]; notice?: string } {
+  const truncated = rows.length > limit;
+  return {
+    truncated,
+    // Sliced from the START, so the rows kept are the newest — the query
+    // sorts `createdAt` descending, and someone reconciling a recent period
+    // needs the recent end. Slicing from the other end would silently drop
+    // exactly the rows they came for.
+    exported: truncated ? rows.slice(0, limit) : rows,
+    ...(truncated
+      ? { notice: `# TRUNCATED: more than ${limit} rows matched. Narrow the date range.` }
+      : {}),
+  };
+}
 
 interface TransactionsQuery {
   operatorId?: string;
@@ -103,8 +142,7 @@ export function registerReportRoutes(app: FastifyInstance, db: Db): void {
           .limit(CSV_EXPORT_LIMIT + 1)
           .toArray();
 
-        const truncated = rows.length > CSV_EXPORT_LIMIT;
-        const exported = truncated ? rows.slice(0, CSV_EXPORT_LIMIT) : rows;
+        const { truncated, exported, notice } = decideCsvTruncation(rows, CSV_EXPORT_LIMIT);
 
         reply.header("content-type", "text/csv; charset=utf-8");
         reply.header("content-disposition", 'attachment; filename="transactions.csv"');
@@ -113,12 +151,8 @@ export function registerReportRoutes(app: FastifyInstance, db: Db): void {
         // is what most people do with it.
         if (truncated) reply.header("x-truncated", "true");
 
-        const csv = toCsv(exported, TRANSACTION_CSV_COLUMNS);
-        return reply.send(
-          truncated
-            ? `${csv}\n# TRUNCATED: more than ${CSV_EXPORT_LIMIT} rows matched. Narrow the date range.`
-            : csv,
-        );
+        const csv = toCsv([...exported], TRANSACTION_CSV_COLUMNS);
+        return reply.send(notice ? `${csv}\n${notice}` : csv);
       }
 
       const limit = clampLimit(limitParam, DEFAULT_LIMIT, MAX_LIMIT);

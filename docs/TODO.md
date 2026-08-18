@@ -207,16 +207,26 @@ not run* is not a section that passed.
 | Player stake/loss limits | Yes — `attemptBet` returns `refused`, and 20 concurrent bets against a ceiling of 10 pass exactly 10 |
 | `maxRetriggers` | Yes, now — item 24 |
 | Login and HTTP rate limits | Yes — their own suites assert the 429 |
-| **`CSV_EXPORT_LIMIT`** | **No.** Nothing in the suite exports more than 50,000 rows, so the truncation branch — `rows.length > CSV_EXPORT_LIMIT`, the slice, the `x-truncated` header, the appended `# TRUNCATED` comment row — has never executed in a test |
+| ~~`CSV_EXPORT_LIMIT`~~ | **Was no — now yes.** See below |
 
-That last row is a real gap rather than a stylistic one: the whole point of
-that header is that **a truncated financial export must not look
-complete**, and F31 is already the record of that signal being broken in a
-way no test caught. The code is written and reasoned about; it is simply
-never run. Left open deliberately rather than fixed here, because seeding
-50,001 rows is a slow test and the honest options (lowering the cap for a
-test build, or a unit test on the slice-and-header logic alone) are a
-design decision worth making on purpose.
+**`CSV_EXPORT_LIMIT` was a real gap, and is now closed.** The whole point of
+that header is that a truncated financial export must not look complete,
+and F31 is already the record of that signal being broken in a way no test
+caught. The code was written and carefully reasoned about; it simply never
+ran.
+
+The fix is not a slow test. `decideCsvTruncation(rows, limit)` is now a
+pure function taking the cap as an argument, so the boundary is driven with
+**three rows instead of fifty thousand and one** — and the route passes the
+real constant, which is pinned in the suite so the two cannot drift. Nine
+tests, **all five mutations caught**: moving the boundary to `>=`, never
+reporting truncation, shipping the extra row, keeping the *oldest* rows
+instead of the newest, and stripping the notice's marker and cap.
+
+The last two are the ones worth having. Slicing from the wrong end drops
+exactly the recent rows someone reconciling came for, and the file still
+opens cleanly with no sign anything is missing — the same silent-wrong-
+answer shape as F30, F31 and F32.
 
 
 
