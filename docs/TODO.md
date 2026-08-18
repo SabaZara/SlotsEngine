@@ -180,6 +180,46 @@ So the fourth check, and the only one that would have caught it:
 This is what CI has always done, which is why F3 and F4 were caught there
 and not locally. F29 is the same failure reaching `main` between CI runs.
 
+### And a fifth: a ceiling is only proved by something being refused
+
+Reaching a limit and being stopped by it are different events, and only the
+second demonstrates anything. Item 24 is the worked example: a free-spins
+session hit its 3-retrigger ceiling and was taken as proof the cap worked.
+It was not — only three triggers had occurred, so nothing was ever refused
+and the round ended because the spins ran out. The seed had to be replayed
+offline to see the difference, and a genuinely cap-binding case took
+204,489 sessions to find.
+
+So, for anything bounded:
+
+5. **Make the limit refuse something.** Drive past the ceiling, not up to
+   it, and assert on the refusal. A test that stops at the boundary is
+   consistent with the boundary not existing.
+
+The same shape as the load check's own caution that a section which *could
+not run* is not a section that passed.
+
+**Applied immediately to the other bounded things here, and it found one.**
+
+| Ceiling | Is a refusal asserted? |
+|---|---|
+| `clampLimit` (report paging) | Yes — `?limit=999999` is bounded, and F22 is the record of what happens when it is not |
+| Player stake/loss limits | Yes — `attemptBet` returns `refused`, and 20 concurrent bets against a ceiling of 10 pass exactly 10 |
+| `maxRetriggers` | Yes, now — item 24 |
+| Login and HTTP rate limits | Yes — their own suites assert the 429 |
+| **`CSV_EXPORT_LIMIT`** | **No.** Nothing in the suite exports more than 50,000 rows, so the truncation branch — `rows.length > CSV_EXPORT_LIMIT`, the slice, the `x-truncated` header, the appended `# TRUNCATED` comment row — has never executed in a test |
+
+That last row is a real gap rather than a stylistic one: the whole point of
+that header is that **a truncated financial export must not look
+complete**, and F31 is already the record of that signal being broken in a
+way no test caught. The code is written and reasoned about; it is simply
+never run. Left open deliberately rather than fixed here, because seeding
+50,001 rows is a slow test and the honest options (lowering the cap for a
+test build, or a unit test on the slice-and-header logic alone) are a
+design decision worth making on purpose.
+
+
+
 **Now item 4 of the verification standard in `CLAUDE.md`**, with the exact
 command. The heading above is kept because the reasoning is the useful
 part: the rule matters less than knowing *which* class of fault the other
@@ -1527,6 +1567,53 @@ tried and discarded (batch-and-hope, grind-then-race, bet-over-balance —
 the last fails because bet validation precedes the funds check). The
 current version bounds the drain and reports whether it ran, so a skip is
 visible rather than a silent pass. Observed: ran in 5 of 6 local runs.
+
+### ~~24. The free-spins retrigger had never been driven live~~ — verified, and the first attempt proved nothing
+
+The retrigger path had unit coverage and had never been exercised through
+the real socket. Driving it exposed no bug — but *how* it was reached, and
+one mistake along the way, are worth recording.
+
+**Reaching a ~4% event without spinning for hours.** A free spin's outcome
+is `sha256(sessionSeed:freespin:index)`, so an entire session is decided by
+its seed. Rather than spin and hope, seeds with the wanted outcome were
+found *offline*, planted on a genuinely-triggered live session, and played
+through the socket — every step still going through the server's own
+module, atomic claim and ledger path. Only the seed was chosen.
+
+That is a test instrument, not a defect. It is possible only because a
+session's randomness is stored and derived, which is the same property that
+lets any round be replayed for a fairness dispute. It needs direct database
+access; a player cannot do it.
+
+| Case | Result |
+|---|---|
+| 1 retrigger | spin 9 granted +5, remaining 2 → 6, 15 spins, won 540 |
+| 3 retriggers | spins 2/9/11 each +5, 25 spins, won 3,220 |
+| **Cap binds** | free spin 13 triggered and paid 600, granted **nothing** — remaining 13 → 12 |
+
+All three reconcile against the ledger, each bonus win landing as one
+`:bonus-credit` transaction matching the session's `accumulated` exactly,
+with the ×2 multiplier applied.
+
+**The mistake worth keeping.** The 3-retrigger session was first taken as
+proof the cap worked. It was not. It *reached* the ceiling and never
+*tested* it: only three triggers occurred across the session, so nothing
+was ever refused — the round ended because the spins ran out, not because
+the cap stopped anything. Replaying the seed offline is what showed the
+difference (`raw triggers: 3, refused: 0`).
+
+A genuinely cap-binding seed took **204,489 sessions** to find, and that is
+the run that establishes the guarantee: a fourth trigger lands, pays its
+win, and grants no spins.
+
+**The general form, which outlives this feature: "the limit was reached"
+and "the limit held" are different claims, and a test showing the first
+proves nothing about the second.** A ceiling is only demonstrated by
+something being refused by it. That is now the fifth entry in the
+verification standard above, where applying it across the other bounded
+things here immediately found one that has never been exercised —
+`CSV_EXPORT_LIMIT`.
 
 ### 9. `reference-5x3` cannot exercise a multi-step bonus
 **Accepted — solved by fixture, not by changing the reference game**
