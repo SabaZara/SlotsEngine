@@ -109,7 +109,7 @@ non-decisions rather than gaps; section O names each and why.
   is not a criticism of them — a test that never fails is doing its job as a
   regression guard — but it does mean the suite's value here has been in the
   *writing*, and its value from here on is in the *guarding*.
-- **2005 tests** (1860 unit + 145 component), counted from a full run
+- **2006 tests** (1861 unit + 145 component), counted from a full run
   rather than carried forward, because a number nobody re-measures is the
   first thing in this file to become untrue. Of these, 53 are conformance
   cases against real MongoDB, and a further 53 run against real MongoDB
@@ -1455,6 +1455,53 @@ top.
 observable: footer height unchanged on open, panel fully on screen at both
 1280x800 and a 740x400 landscape phone, readable over moving reels
 mid-spin, and both panels behaving the same way.
+
+### ~~23. Uploaded artwork never reached a player~~ — the public route now signs
+
+**Found by generating artwork, uploading it, and looking at the game** —
+the F24 question one more time, and it caught a real bug on the first try.
+
+Assets are stored as **keys** (`games/x/symbol-ten/….svg`) against a
+private bucket, and are signed on read. The backoffice does that
+(`withSignedAssets` in `routes/games.ts`); **`/public/games/:gameId` did
+not**, so it handed the raw key to the browser. A key is not a URL — it
+resolves relative to the game frontend and 404s — so every image a designer
+uploaded failed to load for every player.
+
+**It failed silently, and that is why it shipped.** The client falls back to
+its generated glyphs and logs one warning, so the game looked entirely
+correct; the artwork simply never appeared. Meanwhile the editor's own
+preview *worked*, because the backoffice signs — so a designer would upload
+art, see it render, publish, and be told nothing. Measured before the fix:
+`12 of 12 symbol images failed to load`.
+
+Signed at the route rather than inside `toPublicView`, deliberately. That
+function is the disclosure allowlist and is synchronous and pure; making it
+async to await a signature would put an I/O call inside the one place whose
+job is deciding what a browser may see. A value that is not a storage key
+passes through untouched, since `assets` also accepts plain external URLs
+and signing one would corrupt it.
+
+**Verified end to end** by doing the whole designer workflow: 12 generated
+SVG symbols and a PNG background uploaded through
+`POST /v1/games/:id/assets`, published as v10, then loaded as a player —
+`12 of 12` symbols and the 1600x900 background all fetch at 200, render on
+the reels, and animate correctly through a spin.
+
+Two things the upload path got right and are worth recording, because both
+were checked rather than assumed:
+
+- **The background rejected an SVG with `415`.** `ALLOWED_CONTENT_TYPES`
+  permits SVG for symbols and not for backgrounds, which is the correct
+  asymmetry — a background is stretched across the whole canvas, where an
+  SVG's arbitrary markup is a much larger surface than a 100x100 glyph.
+- **Keys are generated server-side and never accepted from the client**, so
+  the upload could not write into another game's prefix.
+
+The regression test states its own limit plainly: with no storage
+configured the route passes keys through unchanged, so the unit test
+asserts the *seam is exercised* rather than that a signature verifies. The
+live check above is what establishes the rest.
 
 ## Open (accepted)
 

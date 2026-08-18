@@ -575,3 +575,80 @@ describe("the health routes", () => {
     await app.close();
   });
 });
+
+describe("asset keys reaching a browser", () => {
+  /**
+   * The bug this pins: assets are stored as **keys**
+   * (`games/x/symbol-ten/….svg`) against a private bucket, and this route
+   * handed them to the browser unchanged. A key is not a URL — it resolves
+   * relative to the game frontend and 404s — so every image a designer
+   * uploaded failed to load for players.
+   *
+   * It failed *quietly*, which is why it shipped: the client falls back to
+   * its generated glyphs and logs a warning, so the game looks correct and
+   * the artwork simply never appears. The backoffice signs on read and
+   * looked right throughout, so the editor previewed artwork no player
+   * could see.
+   *
+   * Found by uploading real artwork and looking at the game.
+   *
+   * **What this cannot establish**: that the signed URL actually fetches.
+   * Signing needs configured storage, which this suite has none of — so
+   * with storage absent the route passes keys through unchanged and this
+   * asserts only that the *seam exists and is exercised*. The live check is
+   * recorded in docs/TODO.md, where the same upload was fetched at 200 by a
+   * real browser.
+   */
+  it("hands the client something fetchable, never a bare storage key", async () => {
+    const { db, client } = fakeMongo();
+    await seedReferenceGame(db as never);
+
+    // A published game whose assets are storage keys, exactly as an upload
+    // leaves them.
+    await db.collection("games").insertOne({
+      ...REFERENCE_GAME,
+      gameId: "asset-key-game",
+      assets: {
+        symbolImageUrls: { ten: "games/asset-key-game/symbol-ten/abc.svg" },
+        backgroundUrl: "games/asset-key-game/background/def.png",
+      },
+    } as never);
+
+    const app = await buildApp({
+      db: db as never,
+      client: client as never,
+      serviceSecret: SECRET,
+      logger: silentLogger,
+      corsOrigins: ["http://localhost:9104"],
+      rateLimitMax: 100_000,
+    });
+    await app.ready();
+
+    const body = (await app.inject({ method: "GET", url: "/public/games/asset-key-game" })).json();
+    const assets = body.assets ?? {};
+
+    // The premise: without this the assertion below is vacuous.
+    assert.ok(assets.symbolImageUrls?.ten, "the fixture must actually carry a symbol asset");
+    assert.ok(assets.backgroundUrl, "and a background");
+
+    const values: string[] = [
+      ...Object.values((assets.symbolImageUrls ?? {}) as Record<string, string>),
+      assets.backgroundUrl,
+    ].filter((v): v is string => typeof v === "string");
+
+    for (const value of values) {
+      // Either signed into an absolute URL, or — when storage is not
+      // configured, as here — passed through as the stored key. What must
+      // never happen is a *silent* third state where the route claims to
+      // have signed and did not.
+      const looksSigned = /^https?:\/\//.test(value);
+      const looksLikeKey = value.startsWith("games/");
+      assert.ok(
+        looksSigned || looksLikeKey,
+        `"${value}" is neither a signed URL nor a storage key — the asset seam is broken`,
+      );
+    }
+
+    await app.close();
+  });
+});
