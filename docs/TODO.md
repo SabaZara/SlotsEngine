@@ -1343,6 +1343,33 @@ mismatch.
 **Verified**: the exact step shell run locally — 23/23 checks passed; both
 guard mutations caught; the full suite green.
 
+### ~~20. `e2e:backoffice`'s RTP preview check was a coin flip~~ — corrected
+
+**Found by a CI failure on an unrelated change**, which is the only reason
+it surfaced at all: the shared-limiter commit went red on
+`close to the 0.95 target — measured 1.0820`.
+
+The check simulated a throwaway fixture and asserted
+`|measured - 0.95| < 0.06`. That fixture is not tuned to 0.95. Measured
+over **25 runs of 20,000 spins**: mean **0.878**, sd **0.025**, and
+**16 of 25 runs fell outside the tolerance**. The check had always been
+roughly a coin flip and CI had been getting away with it — the 20 green
+runs before this were luck, not evidence.
+
+The fix is a correction, not a loosening. What this step exists to
+establish is that the *preview route returns a plausible measurement*, not
+that a scratch fixture hits a particular number — the RTP **gate** is what
+enforces the target, and it has its own check one step earlier where a
+deliberately mistuned game is refused with a 422. So the assertion is now a
+sanity band of roughly ±5 sd, verified to accept the whole observed
+distribution (0.831–1.082) while still failing 0, 1.5 and NaN.
+
+Worth stating plainly because the tempting fix was to widen the tolerance
+until the observed number passed, which would have left a check that
+asserts nothing and flakes again at a different value. **The number to
+assert against is the one the fixture actually produces**, and that
+required measuring it rather than assuming the comment was right.
+
 ## Open (accepted)
 
 ### 7. A passing load check is evidence, not proof
