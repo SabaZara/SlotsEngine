@@ -51,6 +51,10 @@ const PLAYER = "report-test-player";
 
 /** Fixed timestamps, so range assertions are exact rather than relative to
  * when the suite happened to run. */
+/** Derived, not hardcoded, so reordering the export cannot silently point
+ * this assertion at the wrong column. */
+const AMOUNT_COLUMN = TRANSACTION_CSV_COLUMNS.indexOf("amount");
+
 const MARCH_1 = new Date("2026-03-01T00:00:00.000Z");
 const MARCH_15 = new Date("2026-03-15T00:00:00.000Z");
 const MARCH_31 = new Date("2026-03-31T00:00:00.000Z");
@@ -361,7 +365,14 @@ describe("the CSV export", () => {
     const rows = response.body.trim().split("\n").slice(1);
 
     assert.equal(rows.length, 3, "March's three rows");
-    assert.equal(response.body.includes("999"), false, "April's row must not be in the file");
+    // Checked against the `amount` column rather than against the whole
+    // file. `includes("999")` on the body also matches a transactionId that
+    // happens to contain those digits, and transactionId is a randomUUID --
+    // so the assertion failed on roughly 1 run in 62 with the filtering
+    // entirely correct. Measured, after it fired in CI: 1.6% of three-row
+    // exports contain "999" somewhere in a UUID.
+    const amounts = rows.map((row) => row.split(",")[AMOUNT_COLUMN]);
+    assert.equal(amounts.includes("999"), false, "April's row must not be in the file");
   });
 
   it("never carries another operator's rows", async function () {
