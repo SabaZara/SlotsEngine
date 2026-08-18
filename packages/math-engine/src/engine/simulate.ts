@@ -1,6 +1,7 @@
 import { createHmac } from "node:crypto";
 import { generateSeed } from "@slots-engine/rng";
 import type { GameDefinition } from "@slots-engine/shared-types";
+import { bonusSeedForSpin, playOutBonus } from "../bonus/playOut.js";
 import { evaluateSpin } from "./spin.js";
 
 export interface SimulationReport {
@@ -40,6 +41,16 @@ export interface SimulationOptions {
    * questions. Set from a module's own expected value.
    */
   bonusReturnMultiplier?: number;
+  /**
+   * Play the bonus module to resolution instead of scoring it at
+   * `bonusReturnMultiplier`. Defaults to true.
+   *
+   * Set false only to measure the base game in isolation — the separation
+   * `baseRtp`/`bonusRtp` already provides that in the report, so the flag
+   * is for a caller who wants the bonus excluded entirely rather than
+   * attributed.
+   */
+  playBonus?: boolean;
   /** Called with progress in [0,1] — a million spins is long enough that a
    * caller may want to report progress or abort. */
   onProgress?: (fraction: number) => void;
@@ -104,6 +115,10 @@ export function runSimulation(gameDef: GameDefinition, options: SimulationOption
     throw new Error(`runSimulation requires a positive integer betPerSpin, got ${betPerSpin}`);
   }
   const bonusReturnMultiplier = options.bonusReturnMultiplier ?? 0;
+  // Opt-out rather than opt-in: a caller that forgets the flag should get
+  // the measured figure, not the assumed one.
+  const playBonus = options.playBonus ?? true;
+  const moduleId = gameDef.bonusModules[0]?.moduleId;
 
   let baseReturned = 0;
   let bonusReturned = 0;
@@ -122,7 +137,22 @@ export function runSimulation(gameDef: GameDefinition, options: SimulationOption
     const seed = options.runSeed !== undefined ? derivedSeed(options.runSeed, i) : generateSeed();
     const spin = evaluateSpin(gameDef, seed, betPerSpin);
     const base = spin.evaluation.totalWin;
-    const bonus = spin.evaluation.bonusTriggered ? Math.floor(betPerSpin * bonusReturnMultiplier) : 0;
+    // Played, not assumed. `playBonus` defaults on so the reported RTP is
+    // the one a player would receive; the flat multiplier remains for the
+    // caller that deliberately wants the base game measured alone.
+    let bonus = 0;
+    if (spin.evaluation.bonusTriggered) {
+      if (playBonus && moduleId !== undefined) {
+        bonus = playOutBonus({
+          gameDef,
+          moduleId,
+          totalBet: betPerSpin,
+          sessionSeed: bonusSeedForSpin(seed),
+        }).totalWin;
+      } else {
+        bonus = Math.floor(betPerSpin * bonusReturnMultiplier);
+      }
+    }
 
     baseReturned += base;
     bonusReturned += bonus;

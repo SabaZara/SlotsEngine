@@ -154,6 +154,16 @@ describe("requestSimulation", () => {
   });
 });
 
+/*
+ * Item G is CLOSED, and these tests are kept as the record of what it was.
+ *
+ * The simulation now plays the bonus module to resolution
+ * (`playOutBonus`), so `bonusReturnMultiplier` only applies when a caller
+ * explicitly asks for the bonus to be excluded with `playBonus: false`.
+ * Every run below therefore passes that flag: they still measure the old
+ * constant's leverage, which is why it had to go, but they no longer
+ * describe how a publish is scored.
+ */
 describe("the assumed bonus multiplier's influence on the publish gate", () => {
   it("moves measured RTP by more than the tolerance the gate compares against", async () => {
     // TODO item G, measured rather than asserted from memory.
@@ -178,6 +188,7 @@ describe("the assumed bonus multiplier's influence on the publish gate", () => {
       rtp: runSimulation(REFERENCE_GAME, {
         simCount: 60_000,
         betPerSpin: BET,
+        playBonus: false,
         bonusReturnMultiplier: multiplier,
       }).resultRtp,
     }));
@@ -217,8 +228,8 @@ describe("the assumed bonus multiplier's influence on the publish gate", () => {
     // `runSeed` only became available when item G's reproducibility work
     // landed, so this was not an option when the test was first written.
     const seed = "seeded-split-check";
-    const low = runSimulation(REFERENCE_GAME, { simCount: 60_000, betPerSpin: BET, bonusReturnMultiplier: 5, runSeed: seed });
-    const high = runSimulation(REFERENCE_GAME, { simCount: 60_000, betPerSpin: BET, bonusReturnMultiplier: 50, runSeed: seed });
+    const low = runSimulation(REFERENCE_GAME, { simCount: 60_000, betPerSpin: BET, playBonus: false, bonusReturnMultiplier: 5, runSeed: seed });
+    const high = runSimulation(REFERENCE_GAME, { simCount: 60_000, betPerSpin: BET, playBonus: false, bonusReturnMultiplier: 50, runSeed: seed });
 
     const bonusChange = Math.abs(high.bonusRtp - low.bonusRtp);
 

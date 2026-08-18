@@ -150,7 +150,14 @@ export const FREE_SPINS_GAME: GameDefinition = {
       moduleId: "freeSpins",
       params: {
         spinCount: 10,
-        winMultiplier: 2,
+        // 5, not 2. At 2 this fixture returned 0.8619 against its declared
+        // target of 0.95 — a drift of 0.088, well outside the publish
+        // gate's +-0.05 — and it shipped because the gate scored the
+        // feature at the module's own overstated estimate of 40.12x rather
+        // than the 15.9x it actually pays. Both halves of that are now
+        // fixed, and this is the value the corrected measurement asks for:
+        // 0.9543, a drift of 0.004.
+        winMultiplier: 5,
         retriggerSpins: 5,
         // Capped so the round is finite and its worst case computable.
         // See the module's own note on why an uncapped retrigger is not a

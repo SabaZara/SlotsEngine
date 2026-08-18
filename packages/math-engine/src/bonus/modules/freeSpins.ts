@@ -319,9 +319,24 @@ export const freeSpinsModule: BonusModule = {
         ? params.assumedBaseRtp
         : 0.95;
 
-    // Upper bound on the spin multiplier from retriggering, per the note.
-    const retriggerFactor = 1 + (maxRetriggers * retriggerSpins) / spinCount;
-
-    return spinCount * assumedBaseRtp * winMultiplier * retriggerFactor;
+    // Retriggering is deliberately NOT folded in, and that is a correction
+    // rather than an omission.
+    //
+    // This returned `1 + (maxRetriggers * retriggerSpins) / spinCount` — an
+    // upper bound, assuming every round retriggers the maximum number of
+    // times. Treating a worst case as an expectation overstated the figure
+    // by 2.5x: 40.12 against a measured 15.93, now that `playOutBonus` can
+    // play the round rather than assume it. That single number is what let
+    // free-spins-5x3 report an RTP of 0.9480 and pass a +-0.05 gate while
+    // actually returning 0.8684.
+    //
+    // A retrigger needs the scatters to land again inside the feature, so
+    // its real contribution is the trigger probability compounded, not the
+    // cap. That probability is a property of the reel strips, which this
+    // function does not have -- it sees `params` alone. So the honest
+    // estimate is the un-retriggered expectation, which measures within
+    // 0.8% of the played figure (16.05 vs 15.93), and the remainder is left
+    // to `playOutBonus`, which does not have to estimate at all.
+    return spinCount * assumedBaseRtp * winMultiplier;
   },
 };

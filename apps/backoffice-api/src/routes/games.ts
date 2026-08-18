@@ -202,6 +202,55 @@ export function registerGameRoutes(app: FastifyInstance, db: Db, publishRunSeed?
     return reply.code(201).send({ draft });
   });
 
+  /**
+   * Deletes a game — the draft, every published version, and the live row.
+   *
+   * **Refused once a round exists under the gameId.** A round names the
+   * game it was played under, and `gameVersions` is the record of what
+   * maths that round ran on; deleting either leaves a money record pointing
+   * at nothing, which is exactly the audit trail a regulator asks for. A
+   * game that has taken a bet is deactivated, not deleted, and the error
+   * says so rather than failing on a foreign key nobody can read.
+   *
+   * `force` is deliberately NOT offered. Every other destructive route here
+   * takes one, and this is the one place where the thing being protected is
+   * not the operator's convenience but someone else's ability to audit a
+   * payout years later.
+   */
+  app.delete<{ Params: { gameId: string } }>("/v1/games/:gameId", designer, async (request, reply) => {
+    const { gameId } = request.params;
+
+    const draft = await getDraft(db, gameId);
+    const published = await db.collection("games").findOne({ gameId });
+    if (!draft && !published) return reply.code(404).send({ error: "game_not_found" });
+
+    const roundCount = await db.collection("rounds").countDocuments({ gameId }, { limit: 1 });
+    if (roundCount > 0) {
+      return reply.code(409).send({
+        error: "game_has_rounds",
+        message:
+          `'${gameId}' has been played and cannot be deleted — its rounds reference it, and removing it ` +
+          `would leave money records pointing at a game that no longer exists. Deactivate it instead.`,
+      });
+    }
+
+    // Ordered so a failure part-way cannot leave a game live with its
+    // definition gone: the live row goes first, and everything after it is
+    // unreachable to a player.
+    await db.collection("games").deleteOne({ gameId });
+    await db.collection("gameVersions").deleteMany({ gameId });
+    await db.collection("gameDrafts").deleteOne({ gameId });
+
+    await writeAuditLog(db, {
+      actorUserId: request.user!.userId,
+      action: "game.delete",
+      entityType: "game",
+      entityId: gameId,
+    });
+
+    return reply.code(204).send();
+  });
+
   app.get<{ Params: { gameId: string } }>("/v1/games/:gameId", async (request, reply) => {
     const draft = await getDraft(db, request.params.gameId);
     const published = await db.collection("games").findOne({ gameId: request.params.gameId }, { projection: { _id: 0 } });

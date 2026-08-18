@@ -62,10 +62,18 @@ const MARGIN_SEED = "free-spins-fixture-margin";
  * — see that test for why more spins is the right fix there and not here. */
 const BASE_RTP_SEED = "free-spins-fixture-base";
 
+/**
+ * `bonusReturnMultiplier` is only consulted when the bonus is NOT played,
+ * so this passes `playBonus: false` alongside it. Before the bonus could
+ * be played, a multiplier of 0 was how a caller asked for the base game
+ * alone; it now means "score the played bonus at 0x", which is not the
+ * same thing and silently included the feature.
+ */
 function simulate(bonusReturnMultiplier: number, runSeed?: string): number {
   return runSimulation(FREE_SPINS_GAME, {
     simCount: SIM_COUNT,
     betPerSpin: 100,
+    playBonus: false,
     bonusReturnMultiplier,
     ...(runSeed !== undefined ? { runSeed } : {}),
   }).resultRtp;
@@ -105,7 +113,7 @@ describe("free-spins-5x3 fixture", () => {
     const measured = runSimulation(FREE_SPINS_GAME, {
       simCount: 500_000,
       betPerSpin: 100,
-      bonusReturnMultiplier: 0,
+      playBonus: false,
       runSeed: BASE_RTP_SEED,
     }).resultRtp;
 
@@ -167,7 +175,7 @@ describe("free-spins-5x3 fixture", () => {
     const referenceBase = runSimulation(REFERENCE_GAME, {
       simCount: SIM_COUNT,
       betPerSpin: 100,
-      bonusReturnMultiplier: 0,
+      playBonus: false,
     }).resultRtp;
 
     assert.ok(

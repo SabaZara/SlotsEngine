@@ -378,11 +378,21 @@ describe("freeSpins.expectedReturnMultiplier", () => {
     assert.ok(Math.abs(assumed - 5) < 1e-9, `expected 10 × 0.5 × 1 = 5, got ${assumed}`);
   });
 
-  it("overstates rather than understates when retriggering is possible", () => {
-    // Deliberate, and the direction matters. An overstated bonus return
-    // makes the publish gate STRICTER than reality: it refuses a game that
-    // is actually within tolerance, which a designer can investigate.
-    // Understating would let a game through that pays more than measured.
+  it("estimates the un-retriggered round, rather than the maximum a round could reach", () => {
+    /*
+     * This asserted the opposite — that a retriggerable round scores ABOVE
+     * a fixed one — on the reasoning that overstating makes the gate
+     * stricter and so errs safely. It does not, and this fixture is the
+     * counterexample: the estimate reached 40.12x against a played 15.93x,
+     * and the game whose RTP it inflated was let THROUGH the gate at 0.948
+     * while actually returning 0.868. An estimate wrong by 2.5x does not
+     * fail in a predictable direction, because the gate compares the total,
+     * and inflating the bonus half hides a shortfall in the base half.
+     *
+     * The estimate is now the un-retriggered expectation, which measures
+     * within 0.8% of the played figure. `playOutBonus` plays the round for
+     * anything that needs the real number.
+     */
     const withRetriggers = freeSpins.expectedReturnMultiplier!({
       spinCount: 10,
       winMultiplier: 1,
@@ -391,7 +401,11 @@ describe("freeSpins.expectedReturnMultiplier", () => {
     });
     const without = freeSpins.expectedReturnMultiplier!({ spinCount: 10, winMultiplier: 1, maxRetriggers: 0 });
 
-    assert.ok(withRetriggers > without, "a retriggerable round must be scored above a fixed one");
+    assert.equal(
+      withRetriggers,
+      without,
+      "the retrigger cap is a worst case, not an expectation — it must not inflate the estimate",
+    );
   });
 
   it("is finite and positive for every plausible configuration", () => {

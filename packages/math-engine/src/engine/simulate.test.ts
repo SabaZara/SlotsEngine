@@ -37,10 +37,30 @@ describe("runSimulation", () => {
     assert.ok(Math.abs(report.baseRtp + report.bonusRtp - report.resultRtp) < 1e-9);
   });
 
-  it("attributes nothing to bonus when no bonus return is configured", () => {
-    const report = runSimulation(REFERENCE_GAME, { simCount: 20_000, betPerSpin: 100 });
+  it("attributes nothing to bonus when the bonus is excluded outright", () => {
+    // `playBonus: false` is now the only way to get a bonus-free report.
+    // Omitting `bonusReturnMultiplier` used to mean the same thing, because
+    // the bonus was scored at a multiplier or not at all; it now means
+    // "play it", so the old form asserted the absence of a feature that is
+    // on by default.
+    const report = runSimulation(REFERENCE_GAME, {
+      simCount: 20_000,
+      betPerSpin: 100,
+      playBonus: false,
+    });
     assert.equal(report.bonusRtp, 0);
     assert.equal(report.baseRtp, report.resultRtp);
+  });
+
+  it("pays a measured bonus by default, rather than nothing or an assumption", () => {
+    // The change item G asked for: a caller that configures nothing gets the
+    // bonus PLAYED, not silently dropped and not scored at a constant.
+    const report = runSimulation(REFERENCE_GAME, { simCount: 20_000, betPerSpin: 100 });
+    assert.ok(report.bonusRtp > 0, "a game with a bonus module must attribute something to it");
+    assert.ok(
+      Math.abs(report.baseRtp + report.bonusRtp - report.resultRtp) < 1e-9,
+      "the split must still sum to the total",
+    );
   });
 
   it("reports frequencies as real proportions", () => {

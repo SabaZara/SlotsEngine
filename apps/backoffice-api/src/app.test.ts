@@ -519,6 +519,57 @@ describe("game authoring", () => {
   });
 });
 
+describe("deleting a game", () => {
+  let ctx: Awaited<ReturnType<typeof setup>>;
+  let token: string;
+
+  beforeEach(async () => {
+    ctx = await setup();
+    token = ctx.tokenFor(ctx.designer);
+    await ctx.app.inject({ method: "POST", url: "/v1/games", headers: auth(token), payload: { gameId: "g", name: "G" } });
+  });
+
+  const del = (gameId = "g") =>
+    ctx.app.inject({ method: "DELETE", url: `/v1/games/${gameId}`, headers: auth(token) });
+
+  it("removes the draft, so the game is gone from the list", async () => {
+    assert.equal((await del()).statusCode, 204);
+    const after = await ctx.app.inject({ method: "GET", url: "/v1/games/g", headers: auth(token) });
+    assert.equal(after.statusCode, 404, "a deleted game must not still be readable");
+  });
+
+  it("refuses a game that has been played, rather than orphaning its rounds", async () => {
+    // The claim that matters: a round names the game it ran under, and the
+    // published version is the record of what maths it ran on. Deleting
+    // either leaves a money record pointing at nothing.
+    await ctx.raw.collection("rounds").insertOne({
+      roundId: "r1", operatorId: "op", playerId: "p", gameId: "g", status: "settled",
+    });
+
+    const response = await del();
+    assert.equal(response.statusCode, 409);
+    assert.equal(response.json().error, "game_has_rounds");
+    const still = await ctx.app.inject({ method: "GET", url: "/v1/games/g", headers: auth(token) });
+    assert.equal(still.statusCode, 200, "a refused delete must leave the game intact");
+  });
+
+  it("404s a game that does not exist, rather than reporting a successful delete", async () => {
+    assert.equal((await del("no-such-game")).statusCode, 404);
+  });
+
+  it("refuses a caller without the designer role", async () => {
+    const viewer = ctx.tokenFor(ctx.viewer);
+    const response = await ctx.app.inject({ method: "DELETE", url: "/v1/games/g", headers: auth(viewer) });
+    assert.equal(response.statusCode, 403);
+  });
+
+  it("records who deleted it, so the removal is auditable", async () => {
+    await del();
+    const entry = await ctx.raw.collection("auditLogs").findOne({ action: "game.delete", entityId: "g" });
+    assert.ok(entry, "a deletion with no audit entry is an unexplained gap in the trail");
+  });
+});
+
 describe("publishing", () => {
   let ctx: Awaited<ReturnType<typeof setup>>;
   let token: string;
