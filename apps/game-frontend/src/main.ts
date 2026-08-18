@@ -1,5 +1,5 @@
 import type { BonusPublicState, Round } from "@slots-engine/shared-types";
-import { GameClient, fetchGameView, type PublicGameView } from "./api.js";
+import { GameClient, fetchGameView, gameIdFromLaunchToken, type PublicGameView } from "./api.js";
 import { PixiReelRenderer } from "./render/pixiRenderer.js";
 import { applyGameTheme } from "./render/theme.js";
 import { GameAudio } from "./ui/gameAudio.js";
@@ -92,7 +92,13 @@ class GameApp {
   async start(): Promise<void> {
     const params = new URLSearchParams(window.location.search);
     const token = params.get("token");
-    const gameId = params.get("gameId") ?? "reference-5x3";
+    // From the token, not from a query parameter. The launch URL an
+    // operator hands a player carries only `?token=`, so reading `gameId`
+    // from the query string meant every game fell through to the default
+    // below and rendered as reference-5x3 — right board, right name, wrong
+    // game. The id is in the signed payload; `?gameId=` stays supported as
+    // an override for opening a game directly during development.
+    const gameId = params.get("gameId") ?? (token ? gameIdFromLaunchToken(token) : null) ?? "reference-5x3";
 
     // Subscribed FIRST, before anything that can fail. Registering after
     // the guards below would mean an early failure transitions the phase

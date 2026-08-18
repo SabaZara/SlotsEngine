@@ -1,6 +1,6 @@
 import { beforeEach, afterEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { GameClient, type GameClientEvents } from "./api.js";
+import { GameClient, gameIdFromLaunchToken, type GameClientEvents } from "./api.js";
 
 /**
  * The socket client, and specifically the three things `docs/TODO.md`
@@ -367,5 +367,36 @@ describe("the connection lifecycle", () => {
     client.close();
 
     assert.equal(socket.readyState, FakeWebSocket.CLOSED);
+  });
+});
+
+describe("reading the game id out of a launch token", () => {
+  const tokenFor = (payload: unknown) => {
+    const b64 = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
+    return `${b64}.signature-not-checked-here`;
+  };
+
+  it("reads the id the operator signed, rather than falling back to a default", () => {
+    // The bug this pins: the id was read from a `gameId` query parameter
+    // that a launch URL does not carry, so every game rendered as the
+    // hardcoded reference-5x3 default — right board, wrong game.
+    assert.equal(gameIdFromLaunchToken(tokenFor({ gameId: "gold-rush-5x3", playerId: "p" })), "gold-rush-5x3");
+  });
+
+  it("returns null for a token carrying no game id, rather than inventing one", () => {
+    assert.equal(gameIdFromLaunchToken(tokenFor({ playerId: "p" })), null);
+  });
+
+  it("returns null for a malformed token rather than throwing into start-up", () => {
+    // A throw here would kill the boot path before the caller's own guard
+    // could report `invalid_token` in a way a player can act on.
+    assert.equal(gameIdFromLaunchToken("not-a-token"), null);
+    assert.equal(gameIdFromLaunchToken(""), null);
+    assert.equal(gameIdFromLaunchToken("%%%.sig"), null);
+  });
+
+  it("ignores a non-string game id, which a hand-edited token could carry", () => {
+    assert.equal(gameIdFromLaunchToken(tokenFor({ gameId: 42 })), null);
+    assert.equal(gameIdFromLaunchToken(tokenFor({ gameId: "" })), null);
   });
 });

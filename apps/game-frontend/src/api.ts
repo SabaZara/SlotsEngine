@@ -141,3 +141,34 @@ export class GameClient {
     this.socket?.close();
   }
 }
+
+/**
+ * Reads the game id out of a launch token.
+ *
+ * **Unverified, and that is safe here for one specific reason.** This does
+ * not check the signature — the browser has no secret to check it with —
+ * so the value is a hint about which game definition to fetch for display,
+ * never an authorisation. Every route that moves money re-verifies the
+ * token server-side and reads the id from the verified payload, so a forged
+ * token gets a mis-rendered board and a 401 on the first spin, not a payout
+ * under another game's maths.
+ *
+ * It exists because the id was previously read from a `gameId` query
+ * parameter that the launch URL does not carry, so every game rendered as
+ * the hardcoded `reference-5x3` default.
+ */
+export function gameIdFromLaunchToken(token: string): string | null {
+  const payloadB64 = token.split(".")[0];
+  if (!payloadB64) return null;
+  try {
+    // base64url -> base64, then pad. `atob` accepts neither on its own.
+    const b64 = payloadB64.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+    const payload = JSON.parse(atob(padded)) as { gameId?: unknown };
+    return typeof payload.gameId === "string" && payload.gameId.length > 0 ? payload.gameId : null;
+  } catch {
+    // A malformed token is not this function's problem to report: the
+    // caller's own guard fails it with a message a player can act on.
+    return null;
+  }
+}
