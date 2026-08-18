@@ -25,9 +25,29 @@ before(() => {
 
 const logger = createLogger("backoffice-api-test");
 
+/**
+ * Pins the publish simulation, so tests whose subject is not the sampling do
+ * not depend on the draw.
+ *
+ * The gate compares a measured RTP against a 0.05 tolerance. Unseeded, each
+ * publish is an independent 100k-spin sample, and measuring the tuned
+ * reference draft across 40 seeds puts the median drift at 0.0166 but the
+ * worst at 0.0497 — inside tolerance by 0.6%. So the suite passed almost
+ * always and failed occasionally on nothing but the draw, which is exactly
+ * what was observed in CI.
+ *
+ * This seed measures 0.9497, a drift of 0.0003. It is a stabiliser, not
+ * behaviour: the same reasoning and the same caveat as `STABLE_SEED` in
+ * `games/publish.test.ts`, including that mutation testing cannot protect
+ * it — deleting the passthrough leaves these tests passing, because the
+ * seed does not change what the gate decides, only whether it decides the
+ * same thing twice.
+ */
+const STABLE_PUBLISH_SEED = "app-test-38";
+
 async function setup() {
   const { db, raw } = fakeMongo();
-  const app = await buildApp(db as never, logger);
+  const app = await buildApp(db as never, logger, STABLE_PUBLISH_SEED);
   await app.ready();
 
   const designer = await createUser(db as never, {

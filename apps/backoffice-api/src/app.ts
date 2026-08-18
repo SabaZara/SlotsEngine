@@ -20,7 +20,11 @@ import { registerHealthRoutes } from "./routes/health.js";
  * directly — the auth hook and role guards are part of what needs testing,
  * and calling a handler in isolation skips exactly those.
  */
-export async function buildApp(db: Db, logger: Logger): Promise<FastifyInstance> {
+/**
+ * `publishRunSeed` is a test seam — see `registerGameRoutes`. Production
+ * calls `buildApp(db, logger)` and every publish draws a fresh sample.
+ */
+export async function buildApp(db: Db, logger: Logger, publishRunSeed?: string): Promise<FastifyInstance> {
   const app = Fastify({ logger: false, bodyLimit: 4_000_000 });
 
   // Fastify rejects a JSON content-type with an empty body as a 400 before
@@ -127,7 +131,7 @@ export async function buildApp(db: Db, logger: Logger): Promise<FastifyInstance>
 
   registerHealthRoutes(app, db);
   registerAuthRoutes(app, db);
-  registerGameRoutes(app, db);
+  registerGameRoutes(app, db, publishRunSeed);
   registerUserRoutes(app, db);
   registerAuditRoutes(app, db);
   registerOperatorRoutes(app, db);

@@ -112,7 +112,16 @@ async function withSignedAssets(draft: GameDraft): Promise<GameDraft> {
   };
 }
 
-export function registerGameRoutes(app: FastifyInstance, db: Db): void {
+/**
+ * `publishRunSeed` pins the simulation seed, and exists for tests only.
+ *
+ * It is a parameter rather than a request field on purpose. A seed a client
+ * could send is a seed a designer could shop for — re-rolling until a
+ * paytable draws a flattering 100k spins is precisely the gate this route
+ * exists to close. Production never passes it, so `publishDraft` generates a
+ * fresh one per publish and records it on the report.
+ */
+export function registerGameRoutes(app: FastifyInstance, db: Db, publishRunSeed?: string): void {
   const designer = { preHandler: [requireRole("game_designer")] };
 
   /**
@@ -427,7 +436,7 @@ export function registerGameRoutes(app: FastifyInstance, db: Db): void {
       if (!draft) return reply.code(404).send({ error: "draft_not_found" });
 
       try {
-        const result = await publishDraft(db, draft, request.user!.userId, { force: request.body?.force === true });
+        const result = await publishDraft(db, draft, request.user!.userId, { force: request.body?.force === true, runSeed: publishRunSeed });
         return reply.send(result);
       } catch (err) {
         if (err instanceof DraftValidationError) {

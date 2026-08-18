@@ -2791,6 +2791,28 @@ screen's own wiring, not just the parts it is assembled from.
   is a production change item G already tracks — it converts a confusing
   failure into an obvious one. Applied to all seven call sites whose subject
   is post-publish state rather than the gate.
+
+  **Now fixed, and the flake is gone.** It fired in CI on a commit that
+  touched only a compose file, which is what forced the measurement: across
+  40 seeds the tuned draft's drift has a median of 0.0166 but a maximum of
+  0.0497, against a tolerance of 0.05. The suite was passing with 0.6% of
+  headroom on its worst draw — rare, genuinely random, and nothing to do
+  with the code under test. `buildApp` and `registerGameRoutes` now take an
+  optional `publishRunSeed`, `app.test.ts` pins `app-test-38` (drift
+  0.0003), and eight consecutive full runs are clean.
+
+  The seed is a **parameter, not a request field**, and that distinction is
+  the whole design: a seed a client could send is a seed a designer could
+  shop for, re-rolling until a paytable draws a flattering 100k spins —
+  which is exactly the gate this route exists to close. Production still
+  calls `buildApp(db, logger)` and draws fresh.
+
+  Mutation-verified where it counts: replacing the gate's condition with
+  `false` fails 8 tests including "refuses a game whose measured RTP misses
+  its declared target", so pinning the seed did not neuter the assertions.
+  The seed itself is a stabiliser rather than behaviour and mutation testing
+  cannot protect it — the same caveat `STABLE_SEED` carries in
+  `games/publish.test.ts`.
 - **Both of the above were latent, and that is the point.** Neither operator
   nor subdocument query appears anywhere in this codebase today, so no test
   could have failed. They were found by *asking what the fake does with input
