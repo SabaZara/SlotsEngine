@@ -154,7 +154,24 @@ jobs:
           MONGO_TEST_URI: mongodb://localhost:27018/?directConnection=true
         run: npx tsx --test apps/game-backend/src/testing/fakeMongo.conformance.test.ts
 
-      - name: Ledger concurrency (real Mongo)
+      # EVERY suite that wants a real database, found by walking the tree
+      # rather than listed here.
+      #
+      # The three steps above name one file each, and that hand-maintained
+      # list silently drifted: five suites needing real Mongo — the player
+      # limit concurrency checks, the whole integration API, both reporting
+      # suites and launch-token consumption — were added afterwards and
+      # never ran against a database in CI at all. They skipped in the unit
+      # job (no Mongo there, by design) and were not named here, so a
+      # money-path concurrency guarantee was verified only on the author's
+      # laptop while CI reported success. That is the same shape as F4,
+      # where discovery quietly covered a fraction of the suite, and F24,
+      # where a second copy of a list drifted from the thing it mirrored.
+      #
+      # `--test-force-exit` because these open real driver connections; a
+      # suite that has passed but not closed a socket would otherwise hang
+      # the job rather than fail it.
+      - name: Every real-Mongo suite (discovered, not listed)
         env:
           # `directConnection=true`, NOT `replicaSet=rs0`. The set advertises
           # its member as `mongo:27017` — a name that resolves inside the
@@ -162,7 +179,26 @@ jobs:
           # host fails server selection and the tests SKIP. Verified: they
           # skip with that URI and pass with this one.
           MONGO_TEST_URI: mongodb://localhost:27018/?directConnection=true
-        run: npx tsx --test packages/ledger/src/wallet.concurrency.test.ts
+          SECRETS_ENCRYPTION_KEY: 00000000000000000000000000000000000000000000000000000000000000ce
+          LAUNCH_TOKEN_SECRET: ci-only-launch-secret-not-a-real-credential-0002
+          SERVICE_AUTH_SECRET: ci-only-service-secret-not-a-real-credential-003
+          BACKOFFICE_JWT_SECRET: ci-only-backoffice-secret-not-a-real-credential-04
+          DISABLE_RATE_LIMIT: "true"
+        run: |
+          set -euo pipefail
+          # Grep for the marker every real-database suite carries. A new one
+          # is picked up by existing, which is the whole point.
+          FILES=$(grep -rl MONGO_TEST_URI --include='*.test.ts' apps packages | sort)
+          echo "Real-Mongo suites discovered:"
+          echo "$FILES" | sed 's/^/  /'
+          test -n "$FILES" || { echo "Found none — that is a bug in this step, not a clean tree."; exit 1; }
+          # Piped through xargs rather than passed as `$FILES`. Unquoted it
+          # word-splits on whitespace (fine here, fragile the day a path has
+          # a space); quoted it becomes ONE newline-joined argument and the
+          # runner reports "Could not find '<all eight paths>'". Observed
+          # both ways before this line was written — the same class of
+          # shell-dependent breakage as F4.
+          echo "$FILES" | xargs npx tsx --test --test-force-exit
 
       - name: Spin flow
         env:

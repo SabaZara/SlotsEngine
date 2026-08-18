@@ -1201,6 +1201,44 @@ through the path that writes it is not verified through the paths that read
 it.** F24 is about a feature being unreachable; this is the quieter
 variant, where every surface is reachable and one of them is wrong.
 
+### ~~18. CI named its real-Mongo suites by hand, and the list had drifted~~ — closed
+
+**Found by reading a green CI run rather than a red one.** The e2e job
+reported success; the unit job reported `1851 tests, 0 fail, 177 skipped`.
+The skips are correct — that job has no database by design — but the
+question worth asking is which job picked those 177 up. Three of them did.
+
+The e2e job named **one file per step**, three steps, and that
+hand-maintained list had silently fallen behind the tree. Five suites
+needing real Mongo had been added since and ran against a database
+**nowhere in CI**:
+
+| Suite | What was going unverified |
+|---|---|
+| `rounds/limits.concurrency.test.ts` | the player-limit concurrency guarantee — 20 simultaneous bets against one ceiling |
+| `integration-api/app.test.ts` | the entire operator API, including limits and the cooling-off delay |
+| `reports/routes.test.ts` | keyset paging, the CSV export ceiling, the summary aggregate |
+| `reports/support.test.ts` | the player lookup |
+| `launch/consume.test.ts` | single-use launch-token consumption |
+
+They skipped in the unit job and were not named in the e2e job, so a
+money-path concurrency guarantee was verified only on the author's laptop
+while CI reported success on every push. Same shape as **F4** (discovery
+quietly covering a fraction of the suite) and **F24** (a second copy of a
+list drifting from the thing it mirrors) — and it is the sharper version of
+both, because the drift was in the check rather than in the code.
+
+Now discovered by walking the tree for the `MONGO_TEST_URI` marker every
+such suite already carries, so a new one is covered by existing. **71 tests
+across 3 files became 184 across 8**, none skipped.
+
+**Verified rather than assumed**, which mattered: the first draft passed
+`$FILES` directly and the runner reported `Could not find '<all eight
+paths>'` — quoted, it is one newline-joined argument. It goes through
+`xargs` now, and the reasoning is in the workflow. Then mutation-checked
+end to end: breaking `decideBet` so every bet is allowed makes the new step
+exit non-zero, where the old configuration would have shipped it green.
+
 ## Open (accepted)
 
 ### 7. A passing load check is evidence, not proof
