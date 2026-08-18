@@ -86,6 +86,23 @@ services:
   #
   # Until then a host firewall is the stopgap: allow 80/443 and the SSH port,
   # deny 9102-9106. Stated in docs/DEPLOY.md as a step, not left implied.
+
+  # 3. integration-api and minio were missing from this file entirely.
+  #
+  # Found by inspecting restart policies on the deployed box: these two were
+  # the only containers reporting `no`, because a service absent from this
+  # overlay inherits nothing from it. Both fail quietly rather than loudly.
+  # integration-api is the operator's entry point, so the stack would return
+  # from a reboot serving players while refusing every operator — a partial
+  # outage that reads as an integration bug. minio backs the asset volume,
+  # so its absence surfaces as a game with missing artwork rather than as a
+  # stopped service.
+  integration-api:
+    restart: always
+
+  minio:
+    restart: always
+
   game-backend:
     restart: always
 
