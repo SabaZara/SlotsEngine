@@ -18,6 +18,13 @@
  */
 
 export { LIMIT_PERIODS, periodKey, type LimitPeriod } from "./periods.js";
+export { applyTighteningsOnly, diffLimits, type LimitChange, type LimitChangeKind } from "./changes.js";
+export {
+  LOOSENING_DELAY_MS,
+  effectiveLimits,
+  isDue,
+  type PendingLimitChange,
+} from "./pending.js";
 export {
   decideBet,
   type LimitDecision,

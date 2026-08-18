@@ -1,41 +1,19 @@
-import { randomUUID } from "node:crypto";
 import type { Db } from "mongodb";
 import type { AuditLogEntry } from "@slots-engine/shared-types";
 
 /**
- * Appends one audit entry. There is deliberately no update or delete
- * anywhere in this module: a log its own users can rewrite answers no
- * question worth asking.
+ * The write moved to `@slots-engine/mongo-schemas`, which owns the
+ * `auditLogs` collection and its indexes, once the integration API started
+ * recording player-limit changes to the same collection. Two services
+ * writing one audit record through two copies of the same function is the
+ * drift F24 is about — and this is the record whose whole value is that its
+ * writers cannot shape it.
  *
- * Never throws into the caller's path. An audit write failing must not roll
- * back a publish that already succeeded — losing the record of a change is
- * bad, but losing the change itself because we couldn't describe it is
- * worse. The failure is surfaced to the caller's logger instead.
+ * Re-exported rather than replaced at every call site: the callers here are
+ * correct as written, and rewriting a dozen imports would be churn that
+ * hides the one change that matters in a diff.
  */
-export async function writeAuditLog(
-  db: Db,
-  entry: Omit<AuditLogEntry, "entryId" | "timestamp">,
-  onError?: (err: unknown) => void,
-): Promise<void> {
-  try {
-    await db.collection("auditLogs").insertOne({
-      // The caller's fields are spread FIRST so the generated identity and
-      // timestamp overwrite anything supplied, rather than being overwritten
-      // by it. `Omit<..., "entryId" | "timestamp">` already forbids passing
-      // them, so this only matters where the type has been cast around — but
-      // this is the one record whose value is that its writers cannot shape
-      // it, and "a caller could backdate an entry if it lied about its type"
-      // is not a sentence that should be true of an audit log. Same shape as
-      // F18: the ordering was the only thing standing between a safe-looking
-      // function and a forgeable one.
-      ...entry,
-      entryId: randomUUID(),
-      timestamp: new Date().toISOString(),
-    });
-  } catch (err) {
-    onError?.(err);
-  }
-}
+export { writeAuditLog } from "@slots-engine/mongo-schemas";
 
 export interface AuditQuery {
   entityId?: string;

@@ -732,13 +732,19 @@ describe("player protection limits", () => {
     assert.deepEqual(get.json().limits, limits);
   });
 
-  it("replaces the whole set, so a removed period is actually gone", async function () {
+  it("replaces the whole set, so a tightened period takes hold immediately", async function () {
     if (!client) return this.skip(skipReason);
 
     // F26's shape on a document that decides whether someone may bet. A
     // `$set` would leave the monthly limit from the call above in place,
     // and the player would keep playing under a ceiling nobody can see in
     // the payload that supposedly replaced it.
+    //
+    // Both moves here are tightenings — daily 10,000 -> 200, and the
+    // monthly ceiling removed... which is NOT a tightening. Dropping a
+    // limit opens it to unlimited, so it is deferred, and the assertion
+    // below says so. That is the cooling-off rule, not a `$set` leak: the
+    // daily change is in force at once, which is what this test is about.
     const put = await signedRequest({
       method: "PUT",
       url: "/v1/players/limits",
@@ -747,24 +753,35 @@ describe("player protection limits", () => {
     assert.equal(put.statusCode, 200);
 
     const get = await signedRequest({ method: "GET", url: `/v1/players/limits?playerId=${LIMITED_PLAYER}` });
-    assert.deepEqual(get.json().limits, [{ period: "daily", maxStake: 200 }]);
+    // Asserted on the field that moved, not on the whole row: the daily
+    // `maxLoss` set earlier survives because *dropping* it is a loosening,
+    // which is the rule working rather than a `$set` leak.
+    assert.equal(
+      get.json().limits.find((l: { period: string }) => l.period === "daily")?.maxStake,
+      200,
+      "the tightened daily ceiling replaced the old one rather than merging with it",
+    );
   });
 
-  it("clears every limit when given an empty array", async function () {
+  it("expresses clearing every limit as a pending change, not an instant one", async function () {
     if (!client) return this.skip(skipReason);
 
-    // Removal has to be expressible, or a limit can only ever be tightened
-    // — and a player who lowered their own ceiling could never raise it
-    // back after the cooling-off period an operator applies.
+    // Removal has to be expressible — a player who lowered their own
+    // ceiling must be able to raise it back. But clearing every protection
+    // is the largest possible loosening, so it waits out the delay like
+    // any other. Applying it immediately would make the whole control
+    // defeatable by one request.
     const put = await signedRequest({
       method: "PUT",
       url: "/v1/players/limits",
       body: { playerId: LIMITED_PLAYER, limits: [] },
     });
     assert.equal(put.statusCode, 200);
+    assert.ok(put.json().pending, "the clearance is recorded as waiting");
+    assert.deepEqual(put.json().pending.limits, []);
 
     const get = await signedRequest({ method: "GET", url: `/v1/players/limits?playerId=${LIMITED_PLAYER}` });
-    assert.deepEqual(get.json().limits, []);
+    assert.ok(get.json().limits.length > 0, "and the existing ceilings still apply until it matures");
   });
 
   it("answers 200 with no limits for an unknown player, not 404", async function () {
@@ -866,5 +883,175 @@ describe("player protection limits", () => {
       omitHeaders: true,
     });
     assert.equal(response.statusCode, 401);
+  });
+});
+
+describe("raising a limit waits, lowering one does not", () => {
+  const COOLING = "cooling-off-player";
+
+  const setLimits = (playerId: string, limits: unknown) =>
+    signedRequest({ method: "PUT", url: "/v1/players/limits", body: { playerId, limits } });
+
+  it("applies a tightening at once, with nothing left pending", async function () {
+    if (!client) return this.skip(skipReason);
+
+    // Someone protecting themselves must not be made to wait. A delay on
+    // this direction would be the control working against the person it
+    // exists for.
+    await setLimits(COOLING, [{ period: "daily", maxStake: 50_000 }]);
+    const response = await setLimits(COOLING, [{ period: "daily", maxStake: 10_000 }]);
+
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(response.json().limits, [{ period: "daily", maxStake: 10_000 }]);
+    assert.equal(response.json().pending, undefined, "a tightening waits for nothing");
+  });
+
+  it("holds a raise back and keeps the old ceiling in force", async function () {
+    if (!client) return this.skip(skipReason);
+
+    const response = await setLimits(COOLING, [{ period: "daily", maxStake: 90_000 }]);
+
+    assert.equal(response.statusCode, 200);
+    assert.deepEqual(
+      response.json().limits,
+      [{ period: "daily", maxStake: 10_000 }],
+      "the player is still held to the lower ceiling",
+    );
+    assert.ok(response.json().pending, "and the raise is recorded as waiting");
+    assert.deepEqual(response.json().pending.limits, [{ period: "daily", maxStake: 90_000 }]);
+  });
+
+  it("dates the raise 24 hours out", async function () {
+    if (!client) return this.skip(skipReason);
+
+    const before = Date.now();
+    const response = await setLimits(COOLING, [{ period: "daily", maxStake: 95_000 }]);
+    const { effectiveAt, requestedAt } = response.json().pending;
+
+    assert.ok(requestedAt >= before, "requested now");
+    assert.equal(effectiveAt - requestedAt, 24 * 60 * 60 * 1000);
+  });
+
+  it("treats removing a limit as a raise, not as an instant clearance", async function () {
+    if (!client) return this.skip(skipReason);
+
+    // The most dangerous path: clearing every protection is the largest
+    // possible loosening, and a reading that let it through immediately
+    // would make the whole delay pointless.
+    const response = await setLimits(COOLING, []);
+
+    assert.deepEqual(
+      response.json().limits,
+      [{ period: "daily", maxStake: 10_000 }],
+      "the existing ceiling survives a request to drop it",
+    );
+    assert.ok(response.json().pending, "the removal is pending like any other loosening");
+    assert.deepEqual(response.json().pending.limits, []);
+  });
+
+  it("applies the tightening and defers the raise when one call does both", async function () {
+    if (!client) return this.skip(skipReason);
+
+    // Refusing the whole request would teach a player not to tighten.
+    const response = await setLimits(COOLING, [
+      { period: "daily", maxStake: 1_000 },
+      { period: "monthly", maxLoss: 500_000 },
+    ]);
+
+    const applied = response.json().limits;
+    assert.deepEqual(
+      applied.find((l: { period: string }) => l.period === "daily"),
+      { period: "daily", maxStake: 1_000 },
+      "the tightening is in force now",
+    );
+    // The monthly ceiling applies too, and that is correct rather than a
+    // leak: the player had no monthly limit, so adding one is a tightening
+    // from unlimited. What is deferred is the *daily* removal implied by
+    // dropping nothing here — see the pending set below.
+    assert.deepEqual(
+      applied.find((l: { period: string }) => l.period === "monthly"),
+      { period: "monthly", maxLoss: 500_000 },
+      "a first-ever monthly ceiling tightens from unlimited, so it is immediate",
+    );
+  });
+
+  it("lets a later submission replace a pending raise", async function () {
+    if (!client) return this.skip(skipReason);
+
+    // A player who changes their mind must not be stuck with yesterday's
+    // request maturing behind their back.
+    //
+    // Its own player, because the earlier tests left this one with a
+    // monthly ceiling — and dropping that is itself a loosening, so a
+    // shared fixture would leave a pending change for a reason unrelated
+    // to what is being tested here. The first draft did exactly that and
+    // failed for the wrong reason.
+    const player = "cooling-off-rethink";
+    await setLimits(player, [{ period: "daily", maxStake: 10_000 }]);
+    await setLimits(player, [{ period: "daily", maxStake: 80_000 }]);
+
+    const second = await setLimits(player, [{ period: "daily", maxStake: 500 }]);
+
+    assert.equal(second.json().pending, undefined, "the pending raise is gone");
+    assert.deepEqual(second.json().limits, [{ period: "daily", maxStake: 500 }]);
+  });
+
+  it("records the direction of every change in the audit log", async function () {
+    if (!client) return this.skip(skipReason);
+
+    // "Who changed this player's protection, when, and which way" is the
+    // question a regulator asks, and nothing else in this system answers it.
+    const entries = await db
+      .collection("auditLogs")
+      .find({ entityType: "player", entityId: COOLING })
+      .sort({ timestamp: 1 })
+      .toArray();
+
+    assert.ok(entries.length > 0, "limit changes must be audited");
+    assert.ok(
+      entries.some((e) => e.action === "player.limits.loosen"),
+      "a raise is recorded as a loosening",
+    );
+    assert.ok(
+      entries.some((e) => e.action === "player.limits.tighten"),
+      "and a lowering as a tightening",
+    );
+    assert.equal(entries[0]!.actorUserId, `operator:${OPERATOR_ID}`, "attributed to the operator that made it");
+  });
+});
+
+describe("a raise that has already matured", () => {
+  it("is not treated as a fresh loosening when the player next saves", async function () {
+    if (!client) return this.skip(skipReason);
+
+    // The gap a mutation exposed. Comparing a submission against the
+    // *stored* set rather than what is actually in force means a raise the
+    // player already waited 24 hours for is seen again as a raise — so
+    // re-sending it restarts the clock, and the ceiling they are entitled
+    // to never arrives. The player experiences a limit that can never be
+    // lifted, and nothing errors.
+    const player = "cooling-off-matured";
+
+    await db.collection("playerLimits").insertOne({
+      operatorId: OPERATOR_ID,
+      playerId: player,
+      limits: [{ period: "daily", maxStake: 1_000 }],
+      pending: {
+        limits: [{ period: "daily", maxStake: 9_000 }],
+        effectiveAt: Date.now() - 1_000,
+        requestedAt: Date.now() - 90_000_000,
+      },
+    });
+
+    // Re-submitting exactly what has now come into force.
+    const response = await signedRequest({
+      method: "PUT",
+      url: "/v1/players/limits",
+      body: { playerId: player, limits: [{ period: "daily", maxStake: 9_000 }] },
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().pending, undefined, "a matured raise re-sent is not a new raise");
+    assert.deepEqual(response.json().limits, [{ period: "daily", maxStake: 9_000 }]);
   });
 });

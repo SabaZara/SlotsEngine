@@ -2,9 +2,11 @@ import type { ClientSession, Db } from "mongodb";
 import {
   LIMIT_PERIODS,
   decideBet,
+  effectiveLimits,
   periodKey,
   type LimitDecision,
   type LimitPeriod,
+  type PendingLimitChange,
   type PeriodUsage,
   type PlayerLimit,
 } from "@slots-engine/player-limits";
@@ -57,17 +59,40 @@ export class LimitExceededError extends Error {
 
 interface LimitsDoc {
   limits?: PlayerLimit[];
+  pending?: PendingLimitChange;
 }
 
-/** Reads a player's configured limits. Absent means unlimited — a player
- * with no document must be able to play, so this is the one place where
- * "no data" is a permissive answer rather than a suspicious one. */
-export async function readLimits(db: Db, operatorId: string, playerId: string, session?: ClientSession): Promise<PlayerLimit[]> {
+/**
+ * Reads the limits a player is actually held to right now.
+ *
+ * Absent means unlimited — a player with no document must be able to play,
+ * so this is the one place where "no data" is a permissive answer rather
+ * than a suspicious one.
+ *
+ * **A matured loosening is honoured here, not when someone next writes.**
+ * A raise takes 24 hours to come into force, and nothing runs at the moment
+ * it does; if this read used the stored set alone, the player would stay
+ * held to the old ceiling until some unrelated request happened to persist
+ * the change. That is a limit still binding after it expired, which is the
+ * failure a player notices and reports. `effectiveLimits` is the single
+ * place that answers "which ceilings apply", so the money path and the
+ * screens cannot disagree about it.
+ */
+export async function readLimits(
+  db: Db,
+  operatorId: string,
+  playerId: string,
+  at: Date,
+  session?: ClientSession,
+): Promise<PlayerLimit[]> {
   const doc = await db
     .collection("playerLimits")
-    .findOne<LimitsDoc>({ operatorId, playerId }, { projection: { _id: 0, limits: 1 }, ...(session ? { session } : {}) });
+    .findOne<LimitsDoc>(
+      { operatorId, playerId },
+      { projection: { _id: 0, limits: 1, pending: 1 }, ...(session ? { session } : {}) },
+    );
 
-  return doc?.limits ?? [];
+  return effectiveLimits(doc?.limits ?? [], doc?.pending, at.getTime());
 }
 
 /**
@@ -83,7 +108,7 @@ export async function stakeAgainstLimits(
   session: ClientSession,
   input: { operatorId: string; playerId: string; stake: number; at: Date },
 ): Promise<LimitDecision> {
-  const limits = await readLimits(db, input.operatorId, input.playerId, session);
+  const limits = await readLimits(db, input.operatorId, input.playerId, input.at, session);
 
   // Nothing configured: no counters to advance and nothing to decide. The
   // early return matters on a hot path — the overwhelming majority of

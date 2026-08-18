@@ -325,3 +325,50 @@ describe("the stake and win halves stay symmetric", () => {
     assert.equal(counters, 0, "an unlimited player's win must not create a counter");
   });
 });
+
+describe("a loosening that has waited out its delay", () => {
+  it("holds the player to the old ceiling while the raise is pending", async function () {
+    if (!db) return this.skip(skipReason);
+
+    // The control's whole purpose: a player who raises a limit mid-session
+    // must not get the benefit of it in that session.
+    const playerId = randomUUID();
+    await db.collection("playerLimits").insertOne({
+      operatorId: OPERATOR,
+      playerId,
+      limits: [{ period: "daily", maxStake: 100 }],
+      pending: {
+        limits: [{ period: "daily", maxStake: 100_000 }],
+        effectiveAt: Date.now() + 60_000,
+        requestedAt: Date.now(),
+      },
+    });
+
+    const at = new Date();
+    assert.equal(await attemptBet(playerId, 100, at), "allowed");
+    assert.equal(await attemptBet(playerId, 100, at), "refused", "the pending raise must not apply yet");
+  });
+
+  it("honours the raise once due, without anything having rewritten it", async function () {
+    if (!db) return this.skip(skipReason);
+
+    // Nothing runs at the moment a change matures — there is no sweep and
+    // no job. If the money path read only the stored set, the player would
+    // stay held to a ceiling that expired until some unrelated request
+    // happened to persist the change.
+    const playerId = randomUUID();
+    await db.collection("playerLimits").insertOne({
+      operatorId: OPERATOR,
+      playerId,
+      limits: [{ period: "daily", maxStake: 100 }],
+      pending: {
+        limits: [{ period: "daily", maxStake: 100_000 }],
+        effectiveAt: Date.now() - 1_000,
+        requestedAt: Date.now() - 90_000_000,
+      },
+    });
+
+    const at = new Date();
+    assert.equal(await attemptBet(playerId, 5_000, at), "allowed", "a matured raise applies on read");
+  });
+});

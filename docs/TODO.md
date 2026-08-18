@@ -109,7 +109,7 @@ non-decisions rather than gaps; section O names each and why.
   is not a criticism of them — a test that never fails is doing its job as a
   regression guard — but it does mean the suite's value here has been in the
   *writing*, and its value from here on is in the *guarding*.
-- **1951 tests** (1812 unit + 139 component), counted from a full run
+- **1985 tests** (1846 unit + 139 component), counted from a full run
   rather than carried forward, because a number nobody re-measures is the
   first thing in this file to become untrue. Of these, 53 are conformance
   cases against real MongoDB, and a further 53 run against real MongoDB
@@ -1085,7 +1085,77 @@ full.
 | Self-exclusion / cooling-off | Belongs with an operator-side account state, not a per-player ceiling; a limit of zero is not the same thing and must not be used as one |
 | Rolling windows ("any 24 hours") | Cannot be a keyed counter — every stake would have to be retained and re-summed per bet. Regulators specify calendar periods |
 | Operator-wide default limits | Every limit is per-player today. A default would be a second source for one fact, so it needs the precedence rule decided first |
-| A cooling-off delay on *raising* a limit | The control that stops a chasing player lifting their own ceiling mid-session. Needs a clock and an audit trail, and is the next thing worth building here |
+| ~~A cooling-off delay on *raising* a limit~~ | **Shipped** — see below |
+
+### ~~16. A player could lift their own limit mid-session~~ — cooling-off shipped
+
+Item 15's follow-up, and the row it left open. A limit that can be raised
+the moment it starts to bind is a speed bump: the player who lifts a
+ceiling while chasing losses is exactly the person it exists to stop.
+Every regulator mandating these controls therefore requires that
+*loosening* wait, while *tightening* takes effect immediately.
+
+**The asymmetry is the whole feature.** Delaying someone's decision to be
+safer would be the control working against the person it protects, so a
+tightening applies at once even when the same submission also loosens
+something — refusing the pair would teach a player not to tighten.
+
+**Absent means unlimited, and getting that backwards is the dangerous
+reading.** Removing a ceiling is the largest possible loosening; treating
+`undefined` as `0` would classify clearing every protection as the safest
+possible change and apply it instantly. Mutating the comparison that way is
+a caught mutation, and it is the one worth keeping in mind if this code is
+ever refactored.
+
+**What may apply immediately is built from what is in force, not from the
+proposal.** Rebuilding from the proposal would silently honour a dropped
+period — the removal path arriving through the back door. Starting from the
+current state means anything not explicitly tightened survives.
+
+**A pending change stores the whole target set, not a delta.** A delta
+would have to be re-derived when it matures, and the answer changes if the
+player tightened something in between — which is precisely the sequence
+this feature invites. It also makes the audit record self-explanatory: it
+says what the player will end up with.
+
+**Nothing runs when a change matures.** `effectiveLimits` is the single
+place answering "which ceilings apply", and both the money path and the
+route read through it. The alternative — waiting for a write to persist the
+change — leaves a window where a raise the player waited a day for is still
+being refused, which is the failure they notice and report.
+
+**A surviving mutation found a real coverage gap.** Comparing a submission
+against the *stored* set rather than the effective one survived the first
+pass. The consequence is subtle and bad: a raise the player has already
+waited 24 hours for is seen again as a raise when they next save, so
+re-sending it restarts the clock and the ceiling they are entitled to never
+arrives — a limit that can never be lifted, with nothing erroring. Now its
+own test, and the mutation is caught.
+
+**The audit writer moved to `mongo-schemas`.** Two services now write to
+`auditLogs`, and a second copy of "how an audit entry is written" is the
+drift F24 is about — on the one record whose value is that its writers
+cannot shape it. The backoffice re-exports rather than rewriting a dozen
+call sites, so the diff shows the change that matters.
+
+**24 hours is a constant, not an operator setting**, deliberately. A dial
+invites configuring it to zero, which makes the control meaningless while
+leaving every screen and audit record looking as though it exists.
+
+**Verified**: 24 new pure tests (6/6 mutations caught, including the
+absent-as-zero misreading and inverting the direction), 10 operator-API
+tests, 2 real-Mongo money-path tests; route and money-path mutations all
+caught. **Against the running stack**: a first limit and a lowering applied
+instantly, a raise and a full clearance both deferred 24 hours with the old
+ceiling still binding, `pending` accepted by the live schema validator (the
+F9 check), and the audit trail reading `tighten -> tighten -> loosen ->
+loosen`. `e2e:spin` and `e2e:operator` both pass in full.
+
+**Still open**, and unchanged by this: session-time limits and reality
+checks (need a session concept the socket does not keep), self-exclusion
+(an operator-side account state, not a ceiling — a limit of zero is not the
+same thing and must not be used as one), rolling windows, and operator-wide
+defaults.
 
 ## Open (accepted)
 

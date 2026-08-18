@@ -236,6 +236,20 @@ again, while this means topping up changes nothing. A client offering a
 deposit prompt against a responsible-gambling control is the worst response
 the feature could produce.
 
+**Tightening applies at once; loosening waits 24 hours.** A limit that can
+be lifted the moment it starts to bind is a speed bump, not a limit — so a
+raise is stored as a pending change and the old ceiling stays in force
+until it matures. The asymmetry is the point: delaying someone's decision
+to be *safer* would be the control working against the person it protects.
+Removing a ceiling counts as loosening, because absent means unlimited —
+reading it as "tightening to zero" would let a player clear every
+protection instantly, which is the one misreading that would matter most.
+
+Nothing runs when a change matures. `effectiveLimits` is the single place
+that answers "which ceilings apply", and both the money path and the
+screens read through it, so a matured raise is honoured on the next spin
+without a sweep having to persist it first.
+
 ### `launch-token` — hand-rolled HMAC, not a JWT library
 
 One fewer dependency, one less format for a reviewer to learn, and the whole

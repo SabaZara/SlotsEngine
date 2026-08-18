@@ -220,9 +220,45 @@ period, but a period must carry at least one. Amounts are integer minor
 units, like every amount in this API.
 
 **The array replaces the whole set.** Send every limit that should apply,
-not just the one that changed — an absent period is removed, and `[]`
-clears all of them. A partial update has no safe reading ("leave alone" or
-"remove"?), so it is not offered.
+not just the one that changed — an absent period is a request to remove it,
+and `[]` a request to clear all of them. A partial update has no safe
+reading ("leave alone" or "remove"?), so it is not offered.
+
+**Tightening applies at once. Loosening waits 24 hours.** This is the
+control that stops a player lifting their own ceiling in the moment it
+starts to bind, and the asymmetry is deliberate: protecting someone from a
+decision made under pressure must never mean delaying their decision to be
+safer.
+
+- **Lowering a ceiling, or setting one where there was none, is immediate.**
+- **Raising a ceiling is deferred**, and so is *removing* one — an absent
+  ceiling means unlimited, so dropping a limit is the largest possible
+  loosening, not a clearance.
+
+When anything is deferred, the response carries a `pending` block and
+`limits` shows what is **still in force**:
+
+```json
+{
+  "playerId": "p1",
+  "limits": [{ "period": "daily", "maxStake": 10000 }],
+  "pending": {
+    "limits": [{ "period": "daily", "maxStake": 90000 }],
+    "effectiveAt": 1700086400000,
+    "requestedAt": 1700000000000
+  }
+}
+```
+
+Read `limits` as the answer to "what applies now" and `pending` as "what
+will apply, and when". A submission with nothing deferred returns no
+`pending` key at all, so a client can branch on its presence — and an
+integrator who ignores it is never silently told a raise took effect.
+
+A later submission **replaces** any pending change rather than queueing
+behind it: the player has just said what they want, and it is not the raise
+they asked for yesterday. Every change is recorded in the audit log with
+its direction, attributed to your operator.
 
 Two things worth knowing before you set these:
 

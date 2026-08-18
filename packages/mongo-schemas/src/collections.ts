@@ -152,6 +152,31 @@ export const COLLECTIONS: CollectionDefinition[] = [
               },
             },
           },
+          /**
+           * A loosening that has been requested and is not yet in force.
+           *
+           * Declared here rather than left to `additionalProperties` because
+           * an undeclared field on a validated collection is a write that
+           * fails at runtime and nowhere else — F9 exactly, where the whole
+           * suite stayed green while the live service returned 500 on every
+           * attempt.
+           *
+           * `effectiveAt` is `number`, not `date`: it is epoch milliseconds
+           * so the comparison on the money path is integer arithmetic
+           * rather than a `Date` construction per spin. And every JavaScript
+           * number serialises to BSON **double**, so `number` is the only
+           * type that accepts what the driver actually sends — `int` or
+           * `long` here would reject every write.
+           */
+          pending: {
+            bsonType: "object",
+            required: ["effectiveAt", "limits", "requestedAt"],
+            properties: {
+              effectiveAt: { bsonType: "number" },
+              requestedAt: { bsonType: "number" },
+              limits: { bsonType: "array" },
+            },
+          },
         },
       },
     },
