@@ -15,6 +15,7 @@ movement of money audited and replayable.
 - [Quick start](#quick-start) — get it running
 - [Architecture](#architecture) — services, packages, and why the split is here
   (in depth: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md))
+- [The stack](#the-stack) — what it is built on, and why the dependency list is short
 - [Module decisions](#module-decisions) — the one call that shapes each module
 - [The money path](#the-money-path) — spin ordering and exactly-once
 - [Fairness and audit](#fairness-and-audit) — replayability, and what a browser never learns
@@ -159,6 +160,70 @@ complexity sits where bugs are cheap.
 
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) is the longer version: the same
 structure, with the reasoning behind each boundary worked through in full.
+
+---
+
+## The stack
+
+**TypeScript on Node 20, in an npm-workspaces monorepo.** Ten runtime
+dependencies across the whole platform, listed in full below — the count is
+low on purpose, and the reasoning is in the note after the table.
+
+| Layer | What it is |
+|---|---|
+| **Language** | TypeScript 5.7, `strict` — ES2022 target, `NodeNext` modules (native ESM) |
+| **Runtime** | Node 20 LTS (`.nvmrc`, and `engines` refuses older) |
+| **Repo** | npm workspaces — `apps/*` and `packages/*`, no Nx/Turbo/Lerna |
+| **HTTP** | Fastify 5, with `@fastify/cors` and `@fastify/rate-limit` |
+| **Realtime** | `ws` — a raw WebSocket server, no Socket.IO |
+| **Database** | MongoDB 7 (replica set), official `mongodb` driver, no ORM |
+| **Object storage** | S3-compatible via `@aws-sdk/client-s3` — MinIO locally, real S3 in production |
+| **Logging** | `pino`, with token redaction at the logger |
+| **Admin UI** | React 19 + Vite 6 |
+| **Player client** | PixiJS 8 (WebGL/WebGPU) + GSAP, built by Vite |
+| **Tests** | `node:test` + `node:assert` — no Jest or Vitest; jsdom + Testing Library for React |
+| **Type-stripping** | `tsx` for tests; `tsc` for builds |
+| **Containers** | Docker Compose; `node:20-alpine` for services, `nginx:1.27-alpine` for the two static frontends |
+| **CI/CD** | GitHub Actions on `ubuntu-latest` — build, typecheck, unit and Docker e2e suites, then image push and a rollback workflow |
+
+### Why so few dependencies
+
+The full runtime list is `fastify`, `@fastify/cors`, `@fastify/rate-limit`,
+`mongodb`, `ws`, `pino`, `react`, `react-dom`, `@aws-sdk/client-s3` and
+`@aws-sdk/s3-request-presigner`. Everything else is either a dev tool or
+written here.
+
+That is a deliberate posture rather than minimalism for its own sake. **A
+real-money platform gets audited**, and every dependency on the money path
+is something a reviewer has to take on trust or read themselves. So the
+five most correctness-critical packages have **no runtime dependencies at
+all**:
+
+| Package | What it would have pulled in |
+|---|---|
+| `launch-token` | a JWT library — replaced by one HMAC sign and one verify, ~95 lines of code in a single file |
+| `rng` | a stats library — the chi-squared and incomplete-gamma implementations are here and testable |
+| `secrets` | a crypto wrapper — `node:crypto` AES-256-GCM directly |
+| `service-auth` | an HMAC/signing library |
+| `shared-types` | nothing; it is the cross-service contract |
+
+The same reasoning explains three absences a reader might expect:
+
+- **No ORM.** Mongo's driver is the API, and in this system an *index* is a
+  correctness guarantee rather than a performance detail — idempotency,
+  single-use tokens and one-bonus-per-round each rest on one. An ORM that
+  manages indexes for you is managing the thing most worth reading.
+- **No test framework.** `node:test` ships with the runtime, so the suite
+  has no version to keep current and no transform to configure. The one
+  thing it cost is discovery, which is why `scripts/run-tests.mjs` walks the
+  tree rather than globbing — see the note in that file.
+- **No CSV or validation library.** RFC 4180 escaping is one rule and a
+  join; draft validation is domain-specific and would need writing against
+  any schema library anyway.
+
+Where a dependency genuinely earns its place it is used without hesitation:
+Fastify, the Mongo driver, React, PixiJS and the AWS SDK are all doing work
+that would be foolish to reimplement.
 
 ---
 
