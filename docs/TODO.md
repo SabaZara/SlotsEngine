@@ -1259,6 +1259,45 @@ breaks on a clean checkout. Worth noting the sequence: this step was added
 to close a gap CI could not see, and finding it immediately exposed a
 second gap in the same job.
 
+### ~~19. CI never ran the operator end-to-end check~~ — closed, and the drift is now guarded
+
+**The same gap as item 18, one layer up, found by looking for it.** Having
+just fixed a hand-maintained list of *unit* suites, the obvious next
+question was whether the e2e list had the same problem. It did:
+`npm run e2e:operator` shipped with the operator integration in `46daac7`
+and was never added to `ci.yml`, so **the entire external-facing surface**
+— signed wallet calls, the launch handoff, single-use token consumption,
+and the player-limit routes added since — was verified only on a
+developer's laptop while CI reported success on every push.
+
+Three of four e2e scripts ran. Nothing failed, because a check that is not
+wired up does not fail: it is absent, and the green tick looks identical
+either way.
+
+Adding the step alone would have re-created the same list, so the fix is
+`scripts/check-e2e-coverage.mjs`: every `e2e:*` script in `package.json`
+must appear in a `run:` line of the workflow. It runs in the unit job, so a
+drifted config fails in seconds rather than after six minutes of Docker.
+
+**The guard needed guarding, and that is the part worth recording.** The
+first version was a plain substring search over the whole workflow file —
+and it **passed with the operator step deleted**, because the comment
+explaining why the step exists also contains the string
+`npm run e2e:operator`. A guard satisfied by its own documentation is worse
+than no guard. It now strips comments and matches only `run:` lines, and
+both mutations are caught: deleting the step, and adding an `e2e:*` script
+nobody wired up.
+
+The key is also read from `infra/.env` rather than copied into the
+workflow, since a second copy of a secret's value drifts the first time the
+template changes. Measured rather than assumed: run against a stack booted
+on a different key, the operator flow fails with a 500 and "Cannot read
+properties of undefined", which reads like a broken route rather than a key
+mismatch.
+
+**Verified**: the exact step shell run locally — 23/23 checks passed; both
+guard mutations caught; the full suite green.
+
 ## Open (accepted)
 
 ### 7. A passing load check is evidence, not proof

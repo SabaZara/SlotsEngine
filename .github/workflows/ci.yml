@@ -45,6 +45,13 @@ jobs:
       # `npm test` runs the typecheck itself before the suite. That order is
       # deliberate and load-bearing: tsx strips types without checking them,
       # so the suite alone once gave a clean pass on a real type error.
+      # Cheap, and it runs in the job with no database so a drifted CI
+      # config fails fast rather than after six minutes of Docker. Guards
+      # the class of gap that produced this step and the real-Mongo one
+      # above: a check that exists and is simply never invoked.
+      - name: Every e2e script is wired into CI
+        run: node scripts/check-e2e-coverage.mjs
+
       - name: Typecheck and test
         run: npm test
 
@@ -227,6 +234,38 @@ jobs:
           BOOTSTRAP_ADMIN_EMAIL: admin@example.com
           BOOTSTRAP_ADMIN_PASSWORD: ci-admin-password
         run: npm run e2e:backoffice
+
+      # The operator boundary, over a real wire and across three processes:
+      # integration-api mints a launch token, game-socket accepts it, and
+      # the wallet calls move real money.
+      #
+      # This existed for a while and CI never ran it — the same
+      # hand-maintained-list drift as the real-Mongo step above, one layer
+      # up. `npm run e2e:operator` shipped with the operator integration
+      # and was simply never added here, so the entire external-facing
+      # surface (signed wallet, launch handoff, single-use tokens, and the
+      # player-limit routes) was verified only on a developer's laptop.
+      #
+      # `SECRETS_ENCRYPTION_KEY` is read from `infra/.env` rather than
+      # written here. The check inserts an operator credential straight into
+      # Mongo and the service has to decrypt it, so the two must agree — and
+      # a second copy of the value in this file is a copy that drifts the
+      # first time the template changes. Measured rather than assumed: run
+      # against a stack booted on a different key, the flow fails with a 500
+      # and "Cannot read properties of undefined", which reads like a broken
+      # route rather than a key mismatch.
+      - name: Operator integration flow
+        env:
+          INTEGRATION_API_URL: http://localhost:9107
+          GAME_SOCKET_URL: ws://localhost:9103
+          MONGO_URI: mongodb://localhost:27018/?directConnection=true
+        run: |
+          set -euo pipefail
+          # Grep the one line rather than sourcing the file: MONGO_URI in it
+          # contains an unquoted `&`, which a shell reads as job control.
+          export SECRETS_ENCRYPTION_KEY=$(grep -E "^SECRETS_ENCRYPTION_KEY=" infra/.env | cut -d= -f2-)
+          test -n "$SECRETS_ENCRYPTION_KEY" || { echo "SECRETS_ENCRYPTION_KEY missing from infra/.env"; exit 1; }
+          npm run e2e:operator
 
       # Concurrency on the money path. The unit tests model the races
       # against an in-memory stand-in; this runs them against real Mongo,
