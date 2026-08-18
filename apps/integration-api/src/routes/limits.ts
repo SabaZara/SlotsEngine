@@ -209,6 +209,19 @@ export function registerLimitRoutes(app: FastifyInstance, db: Db): void {
    * a missing resource; and a 404 here would confirm which player ids exist
    * to a caller enumerating them — the same disclosure rule the wallet
    * balance route follows.
+   *
+   * **Reports what is in force, through the same `effectiveLimits` the
+   * money path uses.** Returning the stored set instead would make this
+   * route disagree with the spin path for up to as long as it takes
+   * someone to save again: once a raise matures, the backend enforces the
+   * new ceiling while this said the old one. An operator's account page
+   * telling a player they are limited to 10 while the engine happily takes
+   * 90 is the kind of disagreement nobody reports as a bug, because each
+   * side looks right on its own.
+   *
+   * `pending` comes back too, and only when something is waiting — it is
+   * what lets an operator show "your new limit starts at 4pm tomorrow"
+   * rather than silently ignoring a request the player made.
    */
   app.get<{ Querystring: { playerId?: string } }>("/v1/players/limits", async (request, reply) => {
     const operatorId = request.operatorId!;
@@ -220,8 +233,20 @@ export function registerLimitRoutes(app: FastifyInstance, db: Db): void {
 
     const doc = await db
       .collection("playerLimits")
-      .findOne<{ limits?: PlayerLimit[] }>({ operatorId, playerId }, { projection: { _id: 0, limits: 1 } });
+      .findOne<StoredLimits>({ operatorId, playerId }, { projection: { _id: 0, limits: 1, pending: 1 } });
 
-    return reply.send({ playerId, limits: doc?.limits ?? [] });
+    const now = Date.now();
+    const inForce = effectiveLimits(doc?.limits ?? [], doc?.pending, now);
+
+    // A matured change is no longer pending — it *is* the answer above, and
+    // reporting it as still-waiting would have an operator show a countdown
+    // that already finished.
+    const stillWaiting = doc?.pending && doc.pending.effectiveAt > now ? doc.pending : undefined;
+
+    return reply.send({
+      playerId,
+      limits: inForce,
+      ...(stillWaiting ? { pending: stillWaiting } : {}),
+    });
   });
 }

@@ -115,6 +115,16 @@ export function SupportScreen({ client = api }: { client?: SupportApi }) {
                 "I have money, why was I refused?" An agent without this
                 sees funds and no reason, which is how a limit working
                 correctly turns into a complaint. */}
+            {/* Above the table, because it changes how the numbers below
+                should be read — and outside the empty check, since a player
+                whose pending change *clears* every limit has none in force
+                and still has something scheduled. */}
+            {result.pendingLimitChange && (
+              <Banner tone="warn">
+                A change to these limits takes effect {shortDate(new Date(result.pendingLimitChange.effectiveAt).toISOString())}.
+                Until then the limits below are what apply.
+              </Banner>
+            )}
             {result.limits.length === 0 ? (
               <EmptyState>No limits set. This player can stake any amount.</EmptyState>
             ) : (

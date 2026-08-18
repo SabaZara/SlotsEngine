@@ -291,3 +291,52 @@ describe("play limits", () => {
     assert.equal(screen.getAllByText("0.00").length, 2, "usage reads as zero rather than blank");
   });
 });
+
+describe("a limit change that is still pending", () => {
+  it("warns that the limits shown are about to change", async () => {
+    // Without this an agent reads the table, tells the customer their
+    // ceiling, and is wrong by tomorrow — with nothing on screen having
+    // suggested the answer had a shelf life.
+    const { client } = stub({
+      ...LOOKUP,
+      pendingLimitChange: {
+        effectiveAt: Date.parse("2026-03-16T09:00:00.000Z"),
+        requestedAt: Date.parse("2026-03-15T09:00:00.000Z"),
+        limits: [{ period: "daily", maxStake: 99_000 }],
+      },
+    });
+    await mount(client);
+    await searchFor("acme", "player-1");
+
+    assert.ok(screen.getByText(/takes effect 2026-03-16 09:00:00/));
+  });
+
+  it("shows the warning even when no limits are in force", async () => {
+    // A player whose pending change clears everything has an empty table
+    // and something scheduled. Nesting the banner inside the non-empty
+    // branch would hide exactly the case an agent most needs to know about.
+    const { client } = stub({
+      ...LOOKUP,
+      limits: [],
+      limitUsage: [],
+      pendingLimitChange: {
+        effectiveAt: Date.parse("2026-03-16T09:00:00.000Z"),
+        requestedAt: Date.parse("2026-03-15T09:00:00.000Z"),
+        limits: [],
+      },
+    });
+    await mount(client);
+    await searchFor("acme", "player-1");
+
+    assert.ok(screen.getByText(/No limits set/), "the empty state still renders");
+    assert.ok(screen.getByText(/takes effect/), "and the scheduled change is still announced");
+  });
+
+  it("says nothing when no change is scheduled", async () => {
+    const { client } = stub();
+    await mount(client);
+    await searchFor("acme", "player-1");
+
+    assert.equal(screen.queryByText(/takes effect/), null);
+  });
+});

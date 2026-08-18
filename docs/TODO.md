@@ -109,7 +109,7 @@ non-decisions rather than gaps; section O names each and why.
   is not a criticism of them — a test that never fails is doing its job as a
   regression guard — but it does mean the suite's value here has been in the
   *writing*, and its value from here on is in the *guarding*.
-- **1985 tests** (1846 unit + 139 component), counted from a full run
+- **1993 tests** (1851 unit + 142 component), counted from a full run
   rather than carried forward, because a number nobody re-measures is the
   first thing in this file to become untrue. Of these, 53 are conformance
   cases against real MongoDB, and a further 53 run against real MongoDB
@@ -1156,6 +1156,50 @@ checks (need a session concept the socket does not keep), self-exclusion
 (an operator-side account state, not a ceiling — a limit of zero is not the
 same thing and must not be used as one), rolling windows, and operator-wide
 defaults.
+
+### ~~17. Two surfaces could quote a ceiling the engine no longer enforced~~ — closed
+
+Found by asking the question item 15's own write-up recommends: *how does a
+real user reach this?* The cooling-off delay shipped and was verified end to
+end — but only through the **write** path. Both **read** surfaces still went
+straight to the stored `limits` field.
+
+The consequence is specific and silent. Nothing runs when a loosening
+matures, so between the maturity instant and the next write the stored set
+is *stale*: the money path enforced the new ceiling (it reads through
+`effectiveLimits`) while the operator's `GET /v1/players/limits` and the
+support screen both reported the old one. A player could be told they are
+limited to 10 while the engine happily took 90 — and neither side looks
+wrong on its own, which is why nobody would report it as a bug. Every test
+passed, because every test exercised the two halves separately.
+
+Also missing: neither read surface returned `pending` at all. An operator's
+account page could therefore show a player no sign of a raise they had
+requested — so they would request it again, and since a later submission
+*replaces* the pending one, checking their limits silently restarted their
+own 24 hours every time.
+
+Both now read through `effectiveLimits`, the same function the money path
+uses, and both report `pending` only while it is genuinely still waiting —
+a matured change is the answer, not a countdown that already finished. The
+support screen gets a banner above the table rather than inside the
+non-empty branch, because a player whose pending change *clears* every
+limit has an empty table and something scheduled, which is exactly the case
+an agent most needs to see.
+
+**Verified**: 3 operator-API tests, 2 support-route tests, 3 screen tests;
+6 mutations caught, including reporting the stored set instead of the
+effective one on both surfaces, reporting a matured change as still
+pending, and nesting the banner inside the non-empty branch. **Against the
+running stack**: a raise that matured a second earlier — the exact state the
+old code got wrong — read back as the new ceiling from the operator API,
+and a bet at 5x the old ceiling was accepted by the money path. Both
+honour it; before this they disagreed.
+
+The general lesson is item 15's, one turn further on: **a feature verified
+through the path that writes it is not verified through the paths that read
+it.** F24 is about a feature being unreachable; this is the quieter
+variant, where every surface is reachable and one of them is wrong.
 
 ## Open (accepted)
 

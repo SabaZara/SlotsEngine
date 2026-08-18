@@ -1055,3 +1055,75 @@ describe("a raise that has already matured", () => {
     assert.deepEqual(response.json().limits, [{ period: "daily", maxStake: 9_000 }]);
   });
 });
+
+describe("reading limits back", () => {
+  it("reports a pending raise, so an operator can show the player when it starts", async function () {
+    if (!client) return this.skip(skipReason);
+
+    // Without this an operator's account page can only show the current
+    // ceiling, so a player who requested a raise sees no sign of it and
+    // requests it again — which, since a later submission replaces the
+    // pending one, silently restarts their 24 hours every time they check.
+    const player = "read-back-pending";
+
+    await signedRequest({
+      method: "PUT",
+      url: "/v1/players/limits",
+      body: { playerId: player, limits: [{ period: "daily", maxStake: 1_000 }] },
+    });
+    await signedRequest({
+      method: "PUT",
+      url: "/v1/players/limits",
+      body: { playerId: player, limits: [{ period: "daily", maxStake: 9_000 }] },
+    });
+
+    const get = await signedRequest({ method: "GET", url: `/v1/players/limits?playerId=${player}` });
+
+    assert.deepEqual(get.json().limits, [{ period: "daily", maxStake: 1_000 }], "still held to the old ceiling");
+    assert.ok(get.json().pending, "and told about the raise that is waiting");
+    assert.deepEqual(get.json().pending.limits, [{ period: "daily", maxStake: 9_000 }]);
+  });
+
+  it("agrees with the money path once a raise has matured", async function () {
+    if (!client) return this.skip(skipReason);
+
+    // The disagreement this route used to allow. Nothing runs when a change
+    // matures, so reading the stored set would report the old ceiling while
+    // the spin path enforced the new one — an operator telling a player they
+    // are limited to 10 while the engine takes 90. Neither side looks wrong
+    // on its own, which is why nobody would report it.
+    const player = "read-back-matured";
+
+    await db.collection("playerLimits").insertOne({
+      operatorId: OPERATOR_ID,
+      playerId: player,
+      limits: [{ period: "daily", maxStake: 1_000 }],
+      pending: {
+        limits: [{ period: "daily", maxStake: 9_000 }],
+        effectiveAt: Date.now() - 1_000,
+        requestedAt: Date.now() - 90_000_000,
+      },
+    });
+
+    const get = await signedRequest({ method: "GET", url: `/v1/players/limits?playerId=${player}` });
+
+    assert.deepEqual(get.json().limits, [{ period: "daily", maxStake: 9_000 }], "the matured ceiling is what applies");
+    assert.equal(get.json().pending, undefined, "and it is no longer waiting for anything");
+  });
+
+  it("omits pending entirely when nothing is waiting", async function () {
+    if (!client) return this.skip(skipReason);
+
+    // So a client can branch on its presence rather than inspecting a null.
+    const player = "read-back-quiet";
+    await signedRequest({
+      method: "PUT",
+      url: "/v1/players/limits",
+      body: { playerId: player, limits: [{ period: "weekly", maxLoss: 4_000 }] },
+    });
+
+    const get = await signedRequest({ method: "GET", url: `/v1/players/limits?playerId=${player}` });
+    assert.equal(get.json().pending, undefined);
+    assert.deepEqual(get.json().limits, [{ period: "weekly", maxLoss: 4_000 }]);
+  });
+});

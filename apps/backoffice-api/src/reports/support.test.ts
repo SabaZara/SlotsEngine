@@ -379,3 +379,50 @@ describe("play limits on the lookup", () => {
     assert.deepEqual(body.limitUsage, []);
   });
 });
+
+describe("limits that are mid-change", () => {
+  it("reports what is enforced now, not what is stored", async function () {
+    if (!client) return this.skip(skipReason);
+
+    // Nothing runs when a loosening matures, so the stored set lags what
+    // the money path applies. An agent quoting the stored ceiling would
+    // tell a customer they are limited to an amount the engine no longer
+    // enforces — and every screen would look correct while they did it.
+    const player = "support-matured-limit";
+    await db.collection("players").insertOne({ operatorId: OPERATOR, playerId: player, balance: 1_000 });
+    await db.collection("playerLimits").insertOne({
+      operatorId: OPERATOR,
+      playerId: player,
+      limits: [{ period: "daily", maxStake: 1_000 }],
+      pending: {
+        limits: [{ period: "daily", maxStake: 9_000 }],
+        effectiveAt: Date.now() - 1_000,
+        requestedAt: Date.now() - 90_000_000,
+      },
+    });
+
+    const body = (await lookup(OPERATOR, player, tokens.ops)).json();
+
+    assert.deepEqual(body.limits, [{ period: "daily", maxStake: 9_000 }], "the matured ceiling is what applies");
+    assert.equal(body.pendingLimitChange, undefined, "and it is no longer waiting");
+  });
+
+  it("shows a raise that is still waiting, so an agent is not surprised by it", async function () {
+    if (!client) return this.skip(skipReason);
+
+    const player = "support-pending-limit";
+    const effectiveAt = Date.now() + 3_600_000;
+    await db.collection("players").insertOne({ operatorId: OPERATOR, playerId: player, balance: 1_000 });
+    await db.collection("playerLimits").insertOne({
+      operatorId: OPERATOR,
+      playerId: player,
+      limits: [{ period: "daily", maxStake: 1_000 }],
+      pending: { limits: [{ period: "daily", maxStake: 9_000 }], effectiveAt, requestedAt: Date.now() },
+    });
+
+    const body = (await lookup(OPERATOR, player, tokens.ops)).json();
+
+    assert.deepEqual(body.limits, [{ period: "daily", maxStake: 1_000 }], "still held to the old ceiling");
+    assert.equal(body.pendingLimitChange?.effectiveAt, effectiveAt);
+  });
+});

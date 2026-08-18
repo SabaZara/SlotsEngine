@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { Db } from "mongodb";
 import { requireRole } from "../auth/middleware.js";
+import { effectiveLimits, type PendingLimitChange, type PlayerLimit } from "@slots-engine/player-limits";
 
 /**
  * The one question support actually gets asked: *what happened to this
@@ -19,6 +20,12 @@ import { requireRole } from "../auth/middleware.js";
  * answers questions; it settles nothing.
  */
 const CAN_LOOK_UP_PLAYERS = requireRole("operations", "viewer");
+
+/** The stored shape: what is in force, plus any loosening still waiting. */
+interface StoredLimits {
+  limits?: PlayerLimit[];
+  pending?: PendingLimitChange;
+}
 
 /**
  * How much recent history to return.
@@ -51,7 +58,13 @@ export function registerSupportRoutes(app: FastifyInstance, db: Db): void {
       // Issued together rather than sequentially. Round trips in series is
       // multiplied latency for data that has no ordering dependency, and
       // this is a route someone runs while a customer is on the phone.
-      const [recentTransactions, recentRounds, limits, limitUsage] = await Promise.all([
+      // One reading for the whole response. Two `Date.now()` calls could
+      // straddle the instant a change matures and report it as both in
+      // force and still waiting — a millisecond-wide window, which is
+      // exactly the kind that shows up once and is never reproducible.
+      const now = Date.now();
+
+      const [recentTransactions, recentRounds, storedLimits, limitUsage] = await Promise.all([
         db
           .collection("transactions")
           .find({ operatorId, playerId }, { projection: { _id: 0 } })
@@ -72,7 +85,9 @@ export function registerSupportRoutes(app: FastifyInstance, db: Db): void {
         // without these two it cannot be answered from this screen at all
         // — the agent would see a healthy balance and no reason for a
         // refusal, which is precisely the case that becomes a complaint.
-        db.collection("playerLimits").findOne({ operatorId, playerId }, { projection: { _id: 0, limits: 1 } }),
+        db
+          .collection("playerLimits")
+          .findOne<StoredLimits>({ operatorId, playerId }, { projection: { _id: 0, limits: 1, pending: 1 } }),
         db
           .collection("playerLimitUsage")
           .find({ operatorId, playerId }, { projection: { _id: 0, period: 1, periodKey: 1, staked: 1, won: 1 } })
@@ -88,7 +103,19 @@ export function registerSupportRoutes(app: FastifyInstance, db: Db): void {
         player,
         recentTransactions,
         recentRounds,
-        limits: (limits as { limits?: unknown } | null)?.limits ?? [],
+        // Read through `effectiveLimits`, the same function the money path
+        // uses, rather than off the stored field. A raise matures with
+        // nothing running, so the stored set can lag what is actually
+        // enforced — and an agent quoting a ceiling the engine no longer
+        // applies is telling a customer something untrue while every
+        // screen looks correct.
+        limits: effectiveLimits(storedLimits?.limits ?? [], storedLimits?.pending, now),
+        // Only when it is still waiting, so an agent can say "their new
+        // limit starts tomorrow" instead of being surprised by a change
+        // they cannot see coming.
+        ...(storedLimits?.pending && storedLimits.pending.effectiveAt > now
+          ? { pendingLimitChange: storedLimits.pending }
+          : {}),
         limitUsage,
         // Stated rather than left for the caller to infer from the array
         // length: a list of exactly 50 is ambiguous between "that is all of

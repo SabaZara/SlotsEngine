@@ -246,9 +246,10 @@ reading it as "tightening to zero" would let a player clear every
 protection instantly, which is the one misreading that would matter most.
 
 Nothing runs when a change matures. `effectiveLimits` is the single place
-that answers "which ceilings apply", and both the money path and the
-screens read through it, so a matured raise is honoured on the next spin
-without a sweep having to persist it first.
+that answers "which ceilings apply", and the money path, the operator's
+read route and the support screen all go through it — so a matured raise is
+honoured on the next spin without a sweep having to persist it first, and
+no surface can quote a ceiling the engine is no longer enforcing.
 
 ### `launch-token` — hand-rolled HMAC, not a JWT library
 

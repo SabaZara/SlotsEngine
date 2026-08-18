@@ -160,6 +160,13 @@ export interface SupportLookup {
   limits: Array<{ period: string; maxStake?: number; maxLoss?: number }>;
   /** What they have actually staked and won, per period counter. */
   limitUsage: Array<{ period: string; periodKey: string; staked: number; won: number }>;
+  /** A loosening the player asked for that has not come into force yet.
+   * Present only while it is still waiting. */
+  pendingLimitChange?: {
+    effectiveAt: number;
+    requestedAt: number;
+    limits: Array<{ period: string; maxStake?: number; maxLoss?: number }>;
+  };
   truncated: { transactions: boolean; rounds: boolean };
   limit: number;
 }

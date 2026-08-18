@@ -277,9 +277,16 @@ deposit prompt** — see the note on `stake_limit_reached` below.
 
 ### `GET /v1/players/limits?playerId=p1`
 
-Reads them back. Returns `{ "playerId": "p1", "limits": [...] }`, with an
-empty array for a player who has none — a player with no limits is a normal
-state, not a missing one, so this is `200` rather than `404`.
+Reads them back, with an empty array for a player who has none — a player
+with no limits is a normal state, not a missing one, so this is `200`
+rather than `404`.
+
+**`limits` is always what is in force right now**, which is not necessarily
+what you last sent: a deferred raise matures on its own, and this route
+reports it the moment it does. It is the same answer the spin path
+enforces, so the two cannot disagree. `pending` comes back exactly as it
+does from the `PUT`, and disappears once the change has taken effect —
+so a countdown built on it ends when the change actually lands.
 
 ---
 
