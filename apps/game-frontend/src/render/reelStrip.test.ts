@@ -6,6 +6,7 @@ import {
   easeOutBack,
   easeOutCubic,
   reelStateAt,
+  spinningSymbolAt,
   totalSpinDurationMs,
 } from "./reelStrip.js";
 
@@ -182,5 +183,40 @@ describe("blurAmount", () => {
     const late = blurAmount({ phase: "settling", offset: 8, settleProgress: 0.9 });
     assert.ok(early > late, "blur should decrease as the reel slows");
     assert.ok(late < 0.5, "blur should be nearly gone by the end of the settle");
+  });
+});
+
+describe("the symbol shown while a reel spins", () => {
+  const filler = ["ten", "jack", "queen", "king", "ace"];
+  const outgoing = ["cherry", "bell", "star"];
+
+  it("starts from the symbols already on screen, rather than reloading the grid", () => {
+    // The bug this pins: at offset 0 the reel indexed straight into the
+    // filler, so the first frame of a spin replaced the visible column with
+    // an unrelated one and the whole grid appeared to reload.
+    for (let row = 0; row < 3; row++) {
+      assert.equal(
+        spinningSymbolAt(row, row, 0, filler, outgoing, 3),
+        outgoing[row],
+        `row ${row} must still show what the player was looking at`,
+      );
+    }
+  });
+
+  it("hands over to the filler once the reel has travelled a whole symbol", () => {
+    // Past one symbol-height the outgoing column has physically left the
+    // window, so continuing to draw it would be the opposite bug.
+    const s = spinningSymbolAt(1, 0, 1.2, filler, outgoing, 3);
+    assert.ok(!outgoing.includes(s as string), `still drawing the outgoing column at offset 1.2: ${s}`);
+    assert.ok(filler.includes(s as string), "should be drawing the filler strip by now");
+  });
+
+  it("wraps the filler rather than running off the end of it", () => {
+    assert.equal(spinningSymbolAt(filler.length, 0, 5, filler, undefined, 3), filler[0]);
+    assert.equal(spinningSymbolAt(-1, 0, 5, filler, undefined, 3), filler[filler.length - 1]);
+  });
+
+  it("survives a game with no symbols at all, rather than throwing into the draw loop", () => {
+    assert.equal(spinningSymbolAt(0, 0, 0, [], outgoing, 3), null);
   });
 });

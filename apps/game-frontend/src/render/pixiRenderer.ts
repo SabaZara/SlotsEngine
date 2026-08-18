@@ -1,6 +1,13 @@
 import { Application, Assets, BlurFilter, Container, Graphics, Sprite, Text, TextStyle, type Texture } from "pixi.js";
 import type { PublicGameView } from "../api.js";
-import { DEFAULT_TIMING, blurAmount, reelStateAt, totalSpinDurationMs, type SpinTiming } from "./reelStrip.js";
+import {
+  DEFAULT_TIMING,
+  blurAmount,
+  reelStateAt,
+  spinningSymbolAt,
+  totalSpinDurationMs,
+  type SpinTiming,
+} from "./reelStrip.js";
 import {
   GRID_FRAME_PADDING_PX,
   computeBlurStrength,
@@ -77,6 +84,9 @@ export class PixiReelRenderer {
   private restingGrid: string[][];
   private readonly filler: string[];
   private pendingResult: string[][] | null = null;
+  /** The grid on screen when the current spin began, so the first frames
+   * continue from it rather than jumping to filler. */
+  private outgoingGrid: string[][] | null = null;
   private spinStartedAt: number | null = null;
   private timing: SpinTiming = DEFAULT_TIMING;
   private highlights: WinLineHighlight[] = [];
@@ -340,6 +350,9 @@ export class PixiReelRenderer {
    * showing something other than what was paid.
    */
   spinTo(result: string[][], onSettled?: () => void): void {
+    // Captured before the spin starts: the reels have to scroll OUT of the
+    // grid the player is looking at, not cut to a filler column.
+    this.outgoingGrid = this.restingGrid;
     this.pendingResult = result;
     this.highlights = [];
     this.highlightLayer.clear();
@@ -430,7 +443,7 @@ export class PixiReelRenderer {
         const symbol =
           state.phase === "stopped"
             ? this.settledSymbol(reel, row)
-            : this.blendedSymbol(reel, row, Math.floor(state.offset) + row, state.settleProgress);
+            : this.blendedSymbol(reel, row, Math.floor(state.offset) + row, state.settleProgress, state.offset);
 
         if (symbol === null) {
           cellObjects.text.visible = false;
@@ -477,9 +490,25 @@ export class PixiReelRenderer {
    * that actually landed — the reel never visibly swaps its contents at the
    * instant it stops.
    */
-  private blendedSymbol(reel: number, row: number, index: number, settleProgress: number): string | null {
+  private blendedSymbol(
+    reel: number,
+    row: number,
+    index: number,
+    settleProgress: number,
+    offset: number,
+  ): string | null {
     if (settleProgress > 0.55 && row >= 0 && row < this.game.grid.rows) return this.settledSymbol(reel, row);
-    return this.filler[wrapIndex(index, this.filler.length)] ?? null;
+    // `outgoingGrid` is what was on screen when the spin started. Without
+    // it the first frame indexes straight into the filler and the whole
+    // grid appears to reload instead of starting to move.
+    return spinningSymbolAt(
+      index,
+      row,
+      offset,
+      this.filler,
+      this.outgoingGrid?.[reel],
+      this.game.grid.rows,
+    );
   }
 
   private settledSymbol(reel: number, row: number): string | null {

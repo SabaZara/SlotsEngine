@@ -134,3 +134,36 @@ export function blurAmount(state: ReelState, max = 6): number {
   if (state.phase === "spinning") return max;
   return max * (1 - easeOutCubic(state.settleProgress));
 }
+
+/**
+ * Which symbol sits at a given strip index while a reel is spinning.
+ *
+ * The subtlety is the first frames. A reel starts at offset 0, and indexing
+ * straight into the filler there replaces whatever the player was looking
+ * at with an unrelated column — the grid appears to reload rather than to
+ * start moving. `outgoing` is the column currently on screen, and it is
+ * returned for the indices that are still within the visible window on the
+ * frames before the reel has travelled a full symbol height.
+ *
+ * Symmetric with the settle, which already switches to the landed result
+ * before the reel stops so it does not swap contents at rest. The same
+ * argument applies at the other end and was missing: continuous out of the
+ * old grid, continuous into the new one.
+ */
+export function spinningSymbolAt(
+  index: number,
+  row: number,
+  offset: number,
+  filler: readonly string[],
+  outgoing: readonly string[] | undefined,
+  rows: number,
+): string | null {
+  if (filler.length === 0) return null;
+  // Still showing the outgoing column: the reel has not yet scrolled far
+  // enough for the old symbols to have left the window.
+  if (offset < 1 && outgoing && row >= 0 && row < rows) {
+    return outgoing[row] ?? null;
+  }
+  const wrapped = ((index % filler.length) + filler.length) % filler.length;
+  return filler[wrapped] ?? null;
+}
