@@ -18,7 +18,7 @@
 import { after, afterEach, describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { cleanup, fireEvent, interact, renderComponent, screen, uninstallDom } from "../testing/renderComponent.js";
-import { ReportsScreen, type ReportsApi } from "./ReportsScreen.js";
+import { ReportsScreen, browserDownload, type ReportsApi } from "./ReportsScreen.js";
 import type { ReportPage, ReportSummary, ReportTransaction } from "../api.js";
 
 afterEach(() => cleanup());
@@ -287,5 +287,80 @@ describe("the CSV export", () => {
     });
 
     assert.ok(screen.getByText(/downloaded/i));
+  });
+});
+
+describe("handing the file to the browser", () => {
+  /**
+   * `browserDownload` is the one part of the export path the screen tests
+   * never touch, because they inject a stub — so it shipped with two bugs.
+   * These drive the real function against jsdom.
+   */
+  function captureDownload() {
+    const revoked: Array<{ url: string; at: number }> = [];
+    const created: string[] = [];
+    let clickedWhileAttached: boolean | undefined;
+
+    const realCreate = URL.createObjectURL;
+    const realRevoke = URL.revokeObjectURL;
+    URL.createObjectURL = () => {
+      const url = `blob:mock-${created.length}`;
+      created.push(url);
+      return url;
+    };
+    URL.revokeObjectURL = (url: string) => revoked.push({ url, at: Date.now() });
+
+    // Records whether the anchor was in the document at the moment it was
+    // clicked — the property that decides whether Firefox honours it.
+    const realClick = HTMLAnchorElement.prototype.click;
+    HTMLAnchorElement.prototype.click = function (this: HTMLAnchorElement) {
+      clickedWhileAttached = document.body.contains(this);
+    };
+
+    const restore = () => {
+      URL.createObjectURL = realCreate;
+      URL.revokeObjectURL = realRevoke;
+      HTMLAnchorElement.prototype.click = realClick;
+    };
+
+    return { revoked, created, restore, wasAttached: () => clickedWhileAttached };
+  }
+
+  it("attaches the anchor before clicking it", () => {
+    // A detached anchor's click is ignored outright by Firefox, so the
+    // export silently produced no file there while working in Chrome.
+    const capture = captureDownload();
+    try {
+      browserDownload("transactions.csv", "a,b\n1,2");
+      assert.equal(capture.wasAttached(), true, "the anchor must be in the document when clicked");
+    } finally {
+      capture.restore();
+    }
+  });
+
+  it("leaves no anchor behind in the document", () => {
+    const capture = captureDownload();
+    try {
+      const before = document.querySelectorAll("a").length;
+      browserDownload("transactions.csv", "a,b\n1,2");
+      assert.equal(document.querySelectorAll("a").length, before, "the temporary anchor is removed again");
+    } finally {
+      capture.restore();
+    }
+  });
+
+  it("does not revoke the blob in the same tick as the click", () => {
+    // The bug this replaces: `click()` only *queues* the download, so
+    // revoking synchronously can invalidate the URL before the browser has
+    // read it — a failed or zero-byte file while the screen reports
+    // "Export downloaded."
+    const capture = captureDownload();
+    try {
+      browserDownload("transactions.csv", "a,b\n1,2");
+      assert.equal(capture.revoked.length, 0, "revoking synchronously can cancel the download");
+      assert.equal(capture.created.length, 1, "but a URL was created, so the file was offered");
+    } finally {
+      capture.restore();
+    }
   });
 });

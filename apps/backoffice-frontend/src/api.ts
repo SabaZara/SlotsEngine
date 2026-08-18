@@ -94,21 +94,21 @@ export interface ManagedUser extends SessionUser {
 }
 
 /**
- * An operator as every read returns it — **without `apiSecret`**.
+ * Filters every report call accepts.
  *
- * The omission is enforced by the type rather than left to discipline: the
- * create and rotate calls intersect this with `{ apiSecret: string }`, so a
- * screen that tries to read a secret off a listed operator fails to
- * compile. That matters because the mistake it prevents — building a UI
- * that displays a secret it can fetch on demand — would be a redesign to
- * undo, not a patch.
+ * **Deliberately no `format`.** It was here, and it was a trap: `request()`
+ * always parses the response as JSON, so a caller passing `format: "csv"`
+ * to `reportTransactions` or `reportSummary` would get a CSV body back and
+ * throw on the first comma. `reportTransactionsCsv` sets it itself, which
+ * makes the dedicated function the only way to ask for CSV — and removing
+ * the field is what lets the compiler enforce that instead of a comment
+ * asking people not to.
  */
 export interface ReportQuery {
   operatorId?: string;
   playerId?: string;
   from?: string;
   to?: string;
-  format?: string;
 }
 
 /** One ledger movement as a report returns it. `amount` and `balanceAfter`
@@ -183,6 +183,16 @@ function reportQueryString(params: object): string {
   return rendered ? `?${rendered}` : "";
 }
 
+/**
+ * An operator as every read returns it — **without `apiSecret`**.
+ *
+ * The omission is enforced by the type rather than left to discipline: the
+ * create and rotate calls intersect this with `{ apiSecret: string }`, so a
+ * screen that tries to read a secret off a listed operator fails to
+ * compile. That matters because the mistake it prevents — building a UI
+ * that displays a secret it can fetch on demand — would be a redesign to
+ * undo, not a patch.
+ */
 export interface ManagedOperator {
   operatorId: string;
   name: string;

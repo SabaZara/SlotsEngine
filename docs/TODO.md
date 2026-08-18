@@ -109,7 +109,7 @@ non-decisions rather than gaps; section O names each and why.
   is not a criticism of them — a test that never fails is doing its job as a
   regression guard — but it does mean the suite's value here has been in the
   *writing*, and its value from here on is in the *guarding*.
-- **2002 tests** (1860 unit + 142 component), counted from a full run
+- **2005 tests** (1860 unit + 145 component), counted from a full run
   rather than carried forward, because a number nobody re-measures is the
   first thing in this file to become untrue. Of these, 53 are conformance
   cases against real MongoDB, and a further 53 run against real MongoDB
@@ -1369,6 +1369,55 @@ until the observed number passed, which would have left a check that
 asserts nothing and flakes again at a different value. **The number to
 assert against is the one the fixture actually produces**, and that
 required measuring it rather than assuming the comment was right.
+
+### ~~21. The CSV export could hand the browser a file it never saved~~ — closed
+
+Two of the three findings deferred from the reporting code review, both in
+`browserDownload` — **the one function in the export path no test touched**,
+because every screen test injects a stub `DownloadFn`. That is the right
+shape for asserting *that* a download was offered, and it left the code
+that actually touches the DOM covered by nothing. Both bugs lived in
+exactly that gap.
+
+**The blob was revoked in the same tick as the click.** The comment claimed
+`click()` had already handed the file to the browser's download machinery;
+that is true in Chrome and guaranteed nowhere else. `click()` only *queues*
+the download, so a synchronous revoke can invalidate the URL before the
+browser reads it — producing a failed or zero-byte file while the screen
+reports "Export downloaded." Same class as the truncation bug (F31): a
+financial export that silently does not arrive.
+
+**The anchor was never attached to the document.** Firefox ignores a
+detached anchor's click outright, so the export produced no file at all
+there while working in Chrome — the kind of difference nobody notices until
+a user on the wrong browser reports that the button does nothing.
+
+Fixed by appending the anchor before clicking (and removing it after), and
+deferring the revoke by a second. The delay is deliberately not zero: a
+`setTimeout(0)` still lands in the same frame in some engines. Holding the
+file in memory for one second is the trade, and it is the right one against
+losing the download.
+
+`browserDownload` is now exported purely so it can be tested, with the
+reason recorded in its own doc comment. **All 3 mutations caught**:
+reverting to a synchronous revoke, clicking a detached anchor, and leaving
+the anchor behind.
+
+**Also removed: `format` from `ReportQuery`.** The field let a caller pass
+`format: "csv"` to `reportTransactions` or `reportSummary`, both of which
+parse the response as JSON and would throw on the first comma.
+`reportTransactionsCsv` sets it itself, so deleting the field makes the
+dedicated function the only way to ask for CSV — enforced by the compiler
+rather than by a comment. A stray doc block that had drifted away from
+`ManagedOperator` was put back while there.
+
+**Still open, and deliberately**: the third finding from that review —
+`formatMoney` defaulting to USD on every backoffice screen. It cannot be
+fixed here, because `transactions` carries no currency field, so there is
+nothing correct to pass. Doing it properly means threading the operator's
+currency through the report response, which is a money-path schema change
+and belongs in its own piece of work — the same reasoning the summary route
+already applies to splitting deposits from winnings.
 
 ## Open (accepted)
 

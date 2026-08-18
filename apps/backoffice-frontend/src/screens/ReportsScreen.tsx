@@ -65,16 +65,43 @@ export interface ReportsApi {
  * download was offered without a real DOM download happening. */
 export type DownloadFn = (filename: string, content: string) => void;
 
-function browserDownload(filename: string, content: string): void {
+/**
+ * Exported only so it can be tested. Every screen test injects a stub
+ * `DownloadFn`, which is right for asserting *that* a download was offered
+ * — and it left this function, the one that actually touches the DOM,
+ * covered by nothing. Both bugs it carried (a detached anchor and a
+ * same-tick revoke) lived in exactly that gap.
+ */
+export function browserDownload(filename: string, content: string): void {
   const url = URL.createObjectURL(new Blob([content], { type: "text/csv;charset=utf-8" }));
   const link = document.createElement("a");
   link.href = url;
   link.download = filename;
+
+  // Appended before clicking. A detached anchor's click is ignored outright
+  // by Firefox, so the export silently produced no file there while working
+  // in Chrome — the kind of difference nobody notices until a user on the
+  // wrong browser reports "the button does nothing".
+  link.style.display = "none";
+  document.body.appendChild(link);
   link.click();
-  // Revoked immediately: the click has already handed the blob to the
-  // browser's download machinery, and leaving the URL alive holds the whole
-  // file in memory for the life of the page.
-  URL.revokeObjectURL(url);
+  link.remove();
+
+  // Revoked on a later task, NOT synchronously.
+  //
+  // The previous comment here claimed the click had already handed the blob
+  // to the browser's download machinery. That is true in Chrome and not
+  // guaranteed anywhere else: `click()` only *queues* the download, so
+  // revoking in the same tick can invalidate the URL before the browser has
+  // read it — producing a failed or zero-byte file while the screen reports
+  // "Export downloaded." A financial export that silently does not arrive
+  // is the same class of failure as one that arrives truncated.
+  //
+  // The delay is deliberately not zero: a `setTimeout(0)` still lands in
+  // the same frame in some engines. Leaving the URL alive for a second
+  // holds the file in memory for that second, which is the trade — and it
+  // is the right one, because the alternative is losing the download.
+  setTimeout(() => URL.revokeObjectURL(url), 1_000);
 }
 
 export function ReportsScreen({
