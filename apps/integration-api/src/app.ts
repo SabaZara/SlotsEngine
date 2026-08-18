@@ -1,5 +1,6 @@
 import Fastify, { type FastifyInstance } from "fastify";
 import rateLimit from "@fastify/rate-limit";
+import { createRateLimitStore } from "@slots-engine/rate-limit-store";
 import type { Db, MongoClient } from "mongodb";
 import type { Logger } from "@slots-engine/logging";
 import { registerAuthHook } from "./auth/middleware.js";
@@ -92,7 +93,23 @@ export async function buildApp(options: BuildAppOptions): Promise<FastifyInstanc
    * Health is exempt: a limiter that can fail a readiness probe will
    * eventually take a healthy instance out of rotation for being busy.
    */
+  // Built here rather than at module scope so a test that builds several
+  // apps does not share one connection — and so `undefined` (no REDIS_URL)
+  // is the ordinary path rather than a special case.
+  const rateLimitStore = createRateLimitStore();
+  // Closed with the app. A connection left open holds the process alive,
+  // which is how a test run hangs after every assertion has passed.
+  if (rateLimitStore) app.addHook("onClose", () => rateLimitStore.close());
+
   await app.register(rateLimit, {
+    // Counters shared across instances when REDIS_URL is set, and
+    // per-process when it is not. Absent is a supported configuration: one
+    // instance counting in its own memory is correct, and every local test
+    // run has no Redis. `skipOnError` keeps a Redis outage from turning
+    // into a 500 on every request — the limiter degrades to allowing
+    // traffic, which is the right failure direction for a guard sitting in
+    // front of the money path.
+    ...(rateLimitStore ? { redis: rateLimitStore.redis, skipOnError: true } : {}),
     global: true,
     max: rateLimitMax,
     timeWindow: "1 minute",

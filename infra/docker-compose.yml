@@ -25,6 +25,39 @@ services:
       retries: 20
       start_period: 10s
 
+  # Shared counters for the HTTP rate limiters.
+  #
+  # **Only exists because a limit has to mean the same thing on every
+  # instance.** Each service counted in its own memory, so two instances
+  # behind a load balancer meant an effective ceiling of double the
+  # configured value, and a restart cleared every counter. That is fine on
+  # one instance and wrong the moment there are two — which is also why
+  # zero-downtime deploys were blocked, since those run two instances of a
+  # service at once by definition.
+  #
+  # Deliberately NOT persisted: no volume, and `--save ""` disables
+  # snapshotting. A rate-limit counter is worthless after a restart anyway
+  # (the window it belongs to has moved on), and writing it to disk would
+  # buy nothing while adding a file to back up and a way to run out of
+  # space. The login throttle, which genuinely must survive a restart,
+  # lives in Mongo for exactly this reason and is untouched by this.
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      # Published for the same reason Mongo's port is: the host-side checks
+      # need to reach it. Configurable so this stack can run beside another
+      # on one machine. The staging overlay unpublishes it — there is no
+      # authentication here, so a public address would let anyone read or
+      # reset every counter.
+      - "${REDIS_HOST_PORT:-6380}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
   # Object storage for game artwork and audio.
   #
   # The bucket is PRIVATE, and every read goes through a signed URL minted
@@ -108,6 +141,9 @@ services:
       # Requests per minute, keyed by service caller for /internal and by
       # IP for /public. Health is exempt.
       GAME_RATE_LIMIT: ${GAME_RATE_LIMIT:-600}
+      # Shared limiter counters. Absent = per-process, which is correct
+      # for a single instance and wrong for two — see the redis service.
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       NODE_ENV: ${NODE_ENV:-development}
     ports:
@@ -117,6 +153,8 @@ services:
       - "${GAME_BACKEND_HOST_PORT:-9102}:9002"
     depends_on:
       mongo:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:9002/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
@@ -195,6 +233,9 @@ services:
       SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY}
       BACKOFFICE_CORS_ORIGINS: ${BACKOFFICE_CORS_ORIGINS:-http://localhost:9106}
       BACKOFFICE_RATE_LIMIT: ${BACKOFFICE_RATE_LIMIT:-300}
+      # Shared limiter counters. Absent = per-process, which is correct
+      # for a single instance and wrong for two — see the redis service.
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
       # Login gets a far tighter ceiling than ordinary admin traffic.
       LOGIN_RATE_LIMIT: ${LOGIN_RATE_LIMIT:-10}
       # Per-account lockout, which the per-IP limit above cannot provide:
@@ -211,6 +252,8 @@ services:
       - "${BACKOFFICE_API_HOST_PORT:-9105}:9005"
     depends_on:
       mongo:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
   # The operator-facing edge: the one service a customer's servers talk to
@@ -244,12 +287,17 @@ services:
       # by IP — operators commonly share an egress address, and an IP bucket
       # lets one starve another. See the note in app.ts.
       INTEGRATION_RATE_LIMIT: ${INTEGRATION_RATE_LIMIT:-300}
+      # Shared limiter counters. Absent = per-process, which is correct
+      # for a single instance and wrong for two — see the redis service.
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       NODE_ENV: ${NODE_ENV:-development}
     ports:
       - "${INTEGRATION_API_HOST_PORT:-9107}:9006"
     depends_on:
       mongo:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://localhost:9006/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]

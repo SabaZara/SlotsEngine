@@ -109,7 +109,7 @@ non-decisions rather than gaps; section O names each and why.
   is not a criticism of them — a test that never fails is doing its job as a
   regression guard — but it does mean the suite's value here has been in the
   *writing*, and its value from here on is in the *guarding*.
-- **1993 tests** (1851 unit + 142 component), counted from a full run
+- **2002 tests** (1860 unit + 142 component), counted from a full run
   rather than carried forward, because a number nobody re-measures is the
   first thing in this file to become untrue. Of these, 53 are conformance
   cases against real MongoDB, and a further 53 run against real MongoDB
@@ -526,16 +526,61 @@ to raise a limit that cannot help is worse than the original confusion.
 Verified: with the lockout cleared, the suite runs **twice back to back and
 passes both times** — the exact case this item described as failing.
 
-### 3b. Rate limits are per-instance, held in memory
-**Severity: medium before horizontal scaling · Effort: low**
+### ~~3b. Rate limits are per-instance, held in memory~~ — shared store shipped
 
-Every limiter here counts in the process's own memory. Two instances behind
-a load balancer means an effective limit of double the configured value,
-and a restart clears every counter. Fine for one instance; wrong the moment
-there are two.
+Every HTTP limiter counted in its own process memory, so two instances
+behind a load balancer meant an effective ceiling of double the configured
+value. That is also what blocked zero-downtime deploys, since those run two
+instances at once by definition.
 
-`@fastify/rate-limit` supports a Redis store, which is the standard answer.
-The socket's token buckets would need the same treatment.
+`packages/rate-limit-store` now builds one ioredis client from `REDIS_URL`,
+and the three services registering `@fastify/rate-limit` pass it through.
+**Absent is a supported configuration, not an error**: a single instance
+counting in memory is correct, and every local test run has no Redis, so
+the store returns `undefined` and the plugin uses its in-memory default.
+
+**Two surfaces were deliberately left alone, and neither is an oversight:**
+
+| Surface | Why it stays as it is |
+|---|---|
+| The login throttle | Already in Mongo. It **must** survive a restart — a lockout that clears when a process bounces is one an attacker can trigger themselves — so a volatile store would be a regression |
+| The socket's token buckets | Per-**connection**, and a connection lives on exactly one instance. Per-process state is correct there by construction |
+
+**A real bug, found by driving a live Redis rather than by reading the
+code.** The first version set `enableOfflineQueue: false`, reasoning that a
+limiter should not replay stale counter writes after a disconnect. ioredis
+connects *asynchronously*, so every command issued between construction and
+`ready` is rejected outright — and a service starts serving the moment it
+boots, so the first requests land in exactly that window. With
+`skipOnError: true` the plugin swallows the rejection and counts in memory
+instead. **The limiter reported healthy and was silently not shared at
+all**: measured, Redis ended a full run holding zero keys.
+
+Worse, the unit test *passed*, because it asserted the option was set
+rather than that the store worked. That is the shape this repo keeps
+meeting — a test that pins the mechanism instead of the outcome — and the
+only thing that caught it was running the real thing. The test now asserts
+the opposite expectation, with the reasoning recorded.
+
+**Verified**: 9 unit tests, **6 of 6 mutations caught**. The claim that
+actually matters needs two processes and a real Redis, so it was measured
+directly: 8 requests across **two separate app instances** against a
+ceiling of 5 — per-process, each counted 4 and **0** were limited; with the
+shared store, **3** were limited and Redis held the counter key. Then
+against the live stack: services rebuilt, `e2e:spin` passes in full, and
+Redis reports `DBSIZE 2` — the running services are genuinely using it.
+
+Redis is unpersisted on purpose (`--save ""`, no volume): a rate-limit
+counter is worthless after a restart, since the window it belongs to has
+moved on. Its host port is published like Mongo's so host-side checks can
+reach it, and the staging overlay should unpublish it for the same reason
+it unpublishes Mongo — there is no authentication, so a public address
+would let anyone read the counters or `FLUSHALL` the lot, resetting every
+ceiling on demand. That is now in `docker-compose.staging.yml`, using
+`!reset []` for the reason recorded there: compose appends sequences, so
+`ports: []` would leave the mapping open while reading as though it had
+closed it. Verified against `docker compose config` rather than by reading
+the file — the base still publishes it, the overlay does not.
 
 ### 4. Secrets live in environment variables
 **Severity: medium · Effort: medium-high**

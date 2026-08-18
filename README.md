@@ -129,6 +129,7 @@ not an obstacle. See [Startup guards](#startup-guards).
 | `ledger` | **Money.** Debit, credit, idempotency |
 | `launch-token` | Player token signing and verification |
 | `player-limits` | **Player protection** — stake and loss ceilings per period |
+| `rate-limit-store` | Shared limiter counters, so a ceiling means the same on every instance |
 | `secrets` | **At-rest encryption** for credentials that must be recoverable |
 | `service-auth` | **Internal service-to-service HMAC** |
 | `asset-storage` | S3-compatible object storage for game artwork |
@@ -165,7 +166,7 @@ structure, with the reasoning behind each boundary worked through in full.
 
 ## The stack
 
-**TypeScript on Node 20, in an npm-workspaces monorepo.** Ten runtime
+**TypeScript on Node 20, in an npm-workspaces monorepo.** Eleven runtime
 dependencies across the whole platform, listed in full below — the count is
 low on purpose, and the reasoning is in the note after the table.
 
@@ -177,6 +178,7 @@ low on purpose, and the reasoning is in the note after the table.
 | **HTTP** | Fastify 5, with `@fastify/cors` and `@fastify/rate-limit` |
 | **Realtime** | `ws` — a raw WebSocket server, no Socket.IO |
 | **Database** | MongoDB 7 (replica set), official `mongodb` driver, no ORM |
+| **Rate-limit counters** | Redis 7 via `ioredis` — optional; absent means per-process, which is correct for one instance |
 | **Object storage** | S3-compatible via `@aws-sdk/client-s3` — MinIO locally, real S3 in production |
 | **Logging** | `pino`, with token redaction at the logger |
 | **Admin UI** | React 19 + Vite 6 |
@@ -189,9 +191,9 @@ low on purpose, and the reasoning is in the note after the table.
 ### Why so few dependencies
 
 The full runtime list is `fastify`, `@fastify/cors`, `@fastify/rate-limit`,
-`mongodb`, `ws`, `pino`, `react`, `react-dom`, `@aws-sdk/client-s3` and
-`@aws-sdk/s3-request-presigner`. Everything else is either a dev tool or
-written here.
+`mongodb`, `ws`, `pino`, `react`, `react-dom`, `ioredis`,
+`@aws-sdk/client-s3` and `@aws-sdk/s3-request-presigner`. Everything else is
+either a dev tool or written here.
 
 That is a deliberate posture rather than minimalism for its own sake. **A
 real-money platform gets audited**, and every dependency on the money path

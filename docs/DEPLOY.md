@@ -123,6 +123,7 @@ secret and are visible in logs, which is correct for all of them.
 | `BOOTSTRAP_ADMIN_EMAIL` | — | First administrator's email. |
 | `MONGO_DB` | `slots_engine` | Database name. |
 | `MONGO_URI` | `mongodb://mongo:27017/slots_engine?replicaSet=rs0` | Only needed to point the stack at a database **outside** this compose file — a managed cluster, say. The default addresses the `mongo` service in-network and is right for the bundled one. Do **not** add `directConnection=true`: it suppresses replica-set topology discovery, and the money path's transactions depend on that surviving a failover. |
+| `REDIS_URL` | `redis://redis:6379` | Where the HTTP rate limiters keep their counters. Absent is supported — each service counts in its own memory, which is correct for **one** instance. Set it before running two behind a load balancer, or the effective ceiling is double the configured value because neither instance sees the other's count. Required for a zero-downtime deploy, which runs two instances at once by definition. |
 | `GAME_CORS_ORIGINS` | — | Origins allowed to call game-backend. |
 | `SOCKET_ALLOWED_ORIGINS` | — | Origins allowed to open a WebSocket. |
 | `BACKOFFICE_CORS_ORIGINS` | — | Origins allowed to call backoffice-api. |

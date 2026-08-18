@@ -46,6 +46,23 @@ services:
     ports: !reset []
     restart: always
 
+  # Redis, for the same reason and with the same mechanism.
+  #
+  # It holds the rate-limit counters and has no authentication either, so a
+  # public address would let anyone read them or `FLUSHALL` the lot —
+  # resetting every ceiling on demand, which is a denial-of-service lever
+  # dressed as a cache. Its host port exists only so host-side checks can
+  # reach it locally; nothing on a deployed box needs it, and
+  # `docker exec infra-redis-1 redis-cli` covers real operational access.
+  #
+  # `!reset []` rather than `ports: []`, for the reason spelled out above:
+  # compose appends sequences, so the empty list would merge with the base
+  # mapping and leave the port open while reading as though it had closed
+  # it.
+  redis:
+    ports: !reset []
+    restart: always
+
   # 2. Everything else keeps its published port, and that is a decision.
   #
   # The internal API is signed (service-auth refuses an unsigned call with
