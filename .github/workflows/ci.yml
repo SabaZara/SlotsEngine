@@ -110,6 +110,19 @@ jobs:
             echo "LOGIN_RATE_LIMIT=2000"
           } >> infra/.env
 
+      # The workspace packages, built on the HOST.
+      #
+      # Docker builds its own copies inside the images, which is why this
+      # job got away without it for so long: the three original real-Mongo
+      # steps happened to import only files that tsx could resolve from
+      # source. The suites discovered below import `@slots-engine/*` for
+      # real, and a workspace package resolves through its `main` — which
+      # points at `dist/`, which `npm ci` alone never creates. Without this
+      # they fail at import with ERR_MODULE_NOT_FOUND, ~400ms in, before a
+      # single assertion runs. Observed exactly that on the first push.
+      - name: Build the workspace packages
+        run: npm run build:packages
+
       - name: Start the stack
         run: docker compose -f infra/docker-compose.yml up --build -d
 

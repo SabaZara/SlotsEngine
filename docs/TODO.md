@@ -1232,12 +1232,32 @@ Now discovered by walking the tree for the `MONGO_TEST_URI` marker every
 such suite already carries, so a new one is covered by existing. **71 tests
 across 3 files became 184 across 8**, none skipped.
 
-**Verified rather than assumed**, which mattered: the first draft passed
-`$FILES` directly and the runner reported `Could not find '<all eight
-paths>'` — quoted, it is one newline-joined argument. It goes through
-`xargs` now, and the reasoning is in the workflow. Then mutation-checked
-end to end: breaking `decideBet` so every bet is allowed makes the new step
-exit non-zero, where the old configuration would have shipped it green.
+**Verified rather than assumed**, which mattered twice.
+
+The first draft passed `$FILES` directly and the runner reported `Could not
+find '<all eight paths>'` — quoted, it is one newline-joined argument. It
+goes through `xargs` now, with the reasoning in the workflow. Then
+mutation-checked end to end: breaking `decideBet` so every bet is allowed
+makes the new step exit non-zero, where the old configuration would have
+shipped it green.
+
+**And it still failed on the first push — for a reason no local run could
+have shown.** The e2e job runs `npm ci` and goes straight to Docker; it
+never builds `packages/*/dist`, because Docker builds its own copies inside
+the images. The three original steps got away with it by importing only
+files `tsx` could resolve from source. The five newly-discovered suites
+import `@slots-engine/*` for real, which resolves through `main` → `dist/`,
+so all four backoffice/integration suites died at import with
+`ERR_MODULE_NOT_FOUND` about 400ms in, before a single assertion. Fixed
+with an explicit `npm run build:packages` on the host, and reproduced both
+directions locally by deleting every `dist/` first: fails identically
+without the step, 184/184 with it.
+
+That is **F3 wearing different clothes** — a build-order assumption that
+holds locally because the previous build's output is lying around, and
+breaks on a clean checkout. Worth noting the sequence: this step was added
+to close a gap CI could not see, and finding it immediately exposed a
+second gap in the same job.
 
 ## Open (accepted)
 
