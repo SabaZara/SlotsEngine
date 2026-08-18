@@ -100,6 +100,14 @@ services:
   integration-api:
     restart: always
 
+  # Profile-gated, so it only exists on a box whose .env sets
+  # COMPOSE_PROFILES=demo — but when it does exist it needs the same policy
+  # as everything else, for the reason above: a demo lobby that silently
+  # stays down after a reboot looks like a broken game, not a stopped
+  # container.
+  operator-demo:
+    restart: always
+
   minio:
     restart: always
 

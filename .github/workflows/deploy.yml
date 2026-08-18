@@ -303,6 +303,17 @@ jobs:
           # port (this stack has no database authentication) and sets
           # restart: always. See infra/docker-compose.staging.yml.
           COMPOSE_FILE=docker-compose.yml:docker-compose.staging.yml
+          # operator-demo is profile-gated, so a bare 'docker compose up'
+          # skips it and :9108 answers nothing. Compose reads COMPOSE_PROFILES
+          # exactly as if --profile had been passed, which keeps every
+          # 'docker compose' in this workflow and in rollback.yml bare — the
+          # same argument COMPOSE_FILE above is set for.
+          #
+          # It is the demo operator, and it tops a player up on launch. That
+          # is right for a box nobody has deposited real money into and wrong
+          # the moment one has; drop this line then, rather than leaving a
+          # free-money endpoint published because it was convenient once.
+          COMPOSE_PROFILES=demo
           SERVICE_AUTH_SECRET=${{ secrets.SERVICE_AUTH_SECRET }}
           LAUNCH_TOKEN_SECRET=${{ secrets.LAUNCH_TOKEN_SECRET }}
           BACKOFFICE_JWT_SECRET=${{ secrets.BACKOFFICE_JWT_SECRET }}
@@ -325,6 +336,20 @@ jobs:
           GAME_CORS_ORIGINS=${{ vars.GAME_CORS_ORIGINS }}
           SOCKET_ALLOWED_ORIGINS=${{ vars.SOCKET_ALLOWED_ORIGINS }}
           BACKOFFICE_CORS_ORIGINS=${{ vars.BACKOFFICE_CORS_ORIGINS }}
+          # operator-demo refuses to boot without real credentials, so these
+          # are secrets rather than defaulted-empty vars: an empty value here
+          # fails the container at startup where it can say why, instead of
+          # producing a lobby that 500s on the first launch.
+          # Where integration-api tells an operator to send the player. It
+          # defaults to http://localhost:9104 in the compose file, which is
+          # right on a laptop and silently wrong on a deployed box: every
+          # launchUrl handed to an operator would point at the player's own
+          # machine. Absent from this file until the demo lobby made it
+          # reachable enough to notice.
+          PUBLIC_GAME_FRONTEND_URL=${{ vars.PUBLIC_GAME_FRONTEND_URL }}
+          DEMO_OPERATOR_ID=${{ vars.DEMO_OPERATOR_ID }}
+          DEMO_OPERATOR_API_KEY_ID=${{ secrets.DEMO_OPERATOR_API_KEY_ID }}
+          DEMO_OPERATOR_API_SECRET=${{ secrets.DEMO_OPERATOR_API_SECRET }}
           EOF
 
       # Records what is running BEFORE the change, so a rollback has
