@@ -148,6 +148,29 @@ describe("the health endpoint", () => {
     assert.deepEqual(await response.json(), { service: "game-socket", status: "ready" });
   });
 
+  it("answers both health paths with a query string attached", async () => {
+    // `req.url` is the raw request target and carries the query string, so
+    // an `=== "/health/ready"` comparison misses `/health/ready?cb=1`. Every
+    // other service in this stack routes through Fastify, which matches on
+    // the path alone — this was the only one where the two differed, and it
+    // 404'd while being entirely healthy.
+    //
+    // The case is not contrived. A cache-busting query is exactly how you
+    // check that a 200 came from the origin rather than from a CDN edge
+    // replaying a cached response, which is how this was found: the same
+    // request without `?cb=` returned 200 through CloudFront and with it
+    // returned 404.
+    const { port } = await start();
+
+    const ready = await fetch(`http://127.0.0.1:${port}/health/ready?cb=abc123`);
+    assert.equal(ready.status, 200);
+    assert.deepEqual(await ready.json(), { service: "game-socket", status: "ready" });
+
+    const live = await fetch(`http://127.0.0.1:${port}/health?probe=1&t=2`);
+    assert.equal(live.status, 200);
+    assert.deepEqual(await live.json(), { service: "game-socket", status: "ok" });
+  });
+
   it("404s anything else, rather than serving it", async () => {
     const { port } = await start();
     assert.equal((await fetch(`http://127.0.0.1:${port}/`)).status, 404);

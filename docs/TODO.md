@@ -1753,6 +1753,78 @@ is still gettable directly. Nothing here changed the deployment's security
 posture — it changed what the documents say about it, and stopped one of
 them recommending an outage.
 
+### 27. The origin allowlist is generated but not applied
+
+**Open · Severity: medium (the exposure item 26 documented) · Effort: low,
+but needs AWS/SSH access · The rules exist; nothing has run them.**
+
+Item 26 said the replacement for the `ufw` command was an origin allowlist
+and left it as a sentence. `scripts/cloudfront-origin-allowlist.mjs` now
+generates it — `ufw` or security-group form, `--check` to verify a live box
+— and `docs/DEPLOY.md` section 1d documents it. **The rules have not been
+applied**: this session had no AWS session (expired) and no SSH key for the
+box, so the ports are still open exactly as item 26 describes.
+
+What remains is one person with access running the script, reading the
+output, applying it, and running `--check` with `ORIGIN_HOST` set.
+
+**The script exists rather than a documented command because all three ways
+of writing this by hand fail silently**, and each was measured against the
+live `ip-ranges.json` rather than reasoned about:
+
+| Trap | What happens |
+|---|---|
+| Filtering by the box's region | **Zero** prefixes — 44 of 46 are `GLOBAL`, and the only regional ones are `ap-northeast-2` and `me-central-1`. An empty allowlist denies everything and reads like a successful run. |
+| `CLOUDFRONT` instead of `CLOUDFRONT_ORIGIN_FACING` | Different sets, not nested: **34 of the 46 origin-facing prefixes are absent from the 211-prefix `CLOUDFRONT` set**. Wrong *and* more permissive. |
+| Ignoring IPv6 | 3 origin-facing v6 prefixes. On a v6-addressed box a v4-only list leaves v6 open or closed depending on the default policy. |
+
+The first trap is the one worth keeping: item 26's own text said
+`AWS_REGION`/`CLOUDFRONT_ORIGIN_FACING`, which implies exactly the filter
+that produces nothing. The fix for a documentation bug introduced a second
+documentation bug, and only generating the list from the real data caught
+it.
+
+The script refuses to emit rules when the prefix list comes back empty, for
+the same reason: every command would still run without error.
+
+**Deliberately no `--apply`.** Ordering — SSH allow before the default-deny,
+`enable` last — is the difference between a hardened box and one nobody can
+log into. That belongs with a human reading the output.
+
+**Nothing watches for AWS changing the ranges.** A prefix added after the
+rules are written is a distribution that quietly stops reaching the origin.
+Re-running the script is currently a thing someone has to remember.
+
+### ~~28. game-socket 404s its own health check when anything appends a query string~~ — fixed
+
+**Found by writing the allowlist verifier**, which appends `?cb=<random>` so
+that a 200 proves the *origin* answered rather than a CDN edge replaying a
+cached response. `game-socket` returned 200 for `/health/ready` and **404
+for `/health/ready?cb=1`** — through CloudFront and, once checked, against
+the local container too.
+
+It is the only service in the stack that routes with a raw `node:http`
+handler rather than Fastify, and it compared `req.url === "/health/ready"`.
+`req.url` is the raw request target and includes the query string, so
+Fastify's path-only matching made every other service tolerant of a query
+and this one intolerant. Now compares `req.url.split("?")[0]`.
+
+**Nothing was broken in production**, because the deploy's health check
+curls the bare path — which is exactly why this is worth recording. The
+service was healthy, the endpoint answered, and any monitor that
+cache-busts its probes (a normal thing to do, and the reason the verifier
+does it) would have reported this service down while it was fine. A false
+alarm on a health check is not harmless: it is the signal people learn to
+ignore.
+
+The existing test file already carried a note that this endpoint 404'd once
+before, "until an actual deploy exposed the inconsistency". The same
+endpoint, the same shape of bug, found the same way — by something real
+calling it differently than the tests did.
+
+Mutation-verified: reverting to `===` fails the new case. Confirmed against
+the rebuilt container, not only the test.
+
 ## Open (accepted)
 
 ### 7. A passing load check is evidence, not proof

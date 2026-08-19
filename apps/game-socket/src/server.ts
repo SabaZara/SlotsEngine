@@ -58,10 +58,23 @@ export function createSocketServer(options: SocketServerOptions): SocketServer {
   const sessions = options.sessions ?? new Map<Connection, Session>();
 
   const httpServer = createServer((req, res) => {
+    // Compared without the query string, because `req.url` is the raw
+    // request target and includes one. Every other service here routes
+    // through Fastify, which matches on the path alone, so `/health/ready`
+    // and `/health/ready?cb=1` are the same route to them and were NOT to
+    // this one — the only service in the stack that answered 404 to a
+    // cache-busted probe.
+    //
+    // Not hypothetical: found by a check that appends `?cb=<random>`
+    // precisely so a 200 proves the origin answered rather than a CDN edge
+    // replaying a cached response. Any monitor that cache-busts the same way
+    // would have reported this service down while it was healthy.
+    const path = (req.url ?? "").split("?")[0];
+
     // Liveness: the process is up. Deliberately does not touch a dependency
     // — a liveness probe that fails on a downstream blip restarts a healthy
     // process and makes an outage worse.
-    if (req.url === "/health") {
+    if (path === "/health") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ service: "game-socket", status: "ok" }));
       return;
@@ -73,7 +86,7 @@ export function createSocketServer(options: SocketServerOptions): SocketServer {
     // /health/ready, and a deploy that health-checks a uniform path should
     // not have to special-case one service. Adding a real dependency here
     // means giving this branch something to check.
-    if (req.url === "/health/ready") {
+    if (path === "/health/ready") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ service: "game-socket", status: "ready" }));
       return;

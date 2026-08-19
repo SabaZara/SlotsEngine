@@ -74,12 +74,11 @@ So the honest statement of where this stands:
   Item 3 (account lockout) and the rate limiter are what stand in front of
   it today; the port being open is not mitigated by them, only survivable.
 - **The replacement for `ufw` is an origin allowlist**, not a blanket deny:
-  restrict the fronted ports to CloudFront's published prefix list
-  (`AWS_REGION`/`CLOUDFRONT_ORIGIN_FACING` in the `ip-ranges.json` AWS
-  publishes), leaving SSH and denying everything else. That keeps the
-  distributions working while closing direct access. It is a security-group
-  or `ufw` rule per prefix and has to be re-applied when AWS updates the
-  list, which is why it is a real task rather than a one-liner here.
+  narrow the fronted ports to the source that legitimately uses them
+  instead of closing them. `scripts/cloudfront-origin-allowlist.mjs`
+  generates the rules — see **1d** below, which also records the three ways
+  of writing this by hand that produce a working-looking rule and a dark
+  stack.
 - **The end state is still item E** — a gateway terminating TLS on the box
   itself, at which point the app ports stop being published at all and the
   health check goes through the proxy.
@@ -161,6 +160,64 @@ Two things follow from this that are easy to get wrong:
 is the IP spelled as a hostname. Recreating them is manual, and so is
 updating the six repository variables above. An Elastic IP is the obvious
 guard and is not currently attached.
+
+### 1d. Closing the app ports to everyone except CloudFront
+
+**Not applied yet.** The ports are open as described in section 1. This is
+the task that closes them, written down and generated rather than left as a
+sentence, because every way of getting it wrong fails silently and fails
+minutes later.
+
+```bash
+node scripts/cloudfront-origin-allowlist.mjs              # ufw rules
+node scripts/cloudfront-origin-allowlist.mjs --format=sg  # AWS security group
+node scripts/cloudfront-origin-allowlist.mjs --check      # verify a live box
+```
+
+The script prints rules and never applies them, and has no `--apply` flag on
+purpose: the ordering below is the difference between a hardened box and one
+nobody can SSH into, and that belongs in a human's hands with the output in
+front of them.
+
+**Three traps, each measured against the live `ip-ranges.json` rather than
+reasoned about.** Each produces a rule that looks right and takes the stack
+down:
+
+1. **Do not filter by the box's region.** The intuitive rule — "the box is
+   in `eu-central-1`, so take `eu-central-1` prefixes" — yields **zero**
+   prefixes. 44 of the 46 origin-facing ranges are `GLOBAL`; the only two
+   regional ones are `ap-northeast-2` and `me-central-1`. An empty allowlist
+   denies everything and reads like a successful run. An earlier draft of
+   this document said `AWS_REGION`/`CLOUDFRONT_ORIGIN_FACING`, which implied
+   exactly this filter.
+2. **`CLOUDFRONT_ORIGIN_FACING`, not `CLOUDFRONT`.** Different sets, and not
+   by inclusion — **34 of the 46 origin-facing prefixes are absent from the
+   211-prefix `CLOUDFRONT` set**. `CLOUDFRONT` is the edge ranges that serve
+   *viewers*; the origin-facing set is the one that talks to *you*. Using
+   the bigger list is both wrong and more permissive.
+3. **IPv6 is a real branch.** There are 3 origin-facing IPv6 prefixes. If
+   the box has a v6 address, a v4-only allowlist leaves v6 either wide open
+   or fully closed depending on the default policy.
+
+**9107 is deliberately not in the list.** `integration-api` has no
+distribution in front of it because operators call it server-to-server with
+a signed request, never from a browser — allowlisting CloudFront to it would
+close it to its only real callers. Narrowing 9107 is a separate decision
+about operator source addresses.
+
+**Verify from off the box, and verify both halves.** That CloudFront still
+answers proves the allowlist did not lock it out; that a direct request no
+longer answers proves the rule does anything. Either alone is consistent
+with a broken configuration, which is why `--check` reports the direct half
+as SKIPPED rather than passing when `ORIGIN_HOST` is unset:
+
+```bash
+ORIGIN_HOST=<ip> node scripts/cloudfront-origin-allowlist.mjs --check
+```
+
+**Re-run it when AWS updates the ranges.** The list is not static, and a
+prefix added after the rules were written is a distribution that starts
+failing to reach the origin. Nothing currently watches for this.
 
 ### 2. Repository secrets
 
