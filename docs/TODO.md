@@ -1553,6 +1553,111 @@ configured the route passes keys through unchanged, so the unit test
 asserts the *seam is exercised* rather than that a signature verifies. The
 live check above is what establishes the rest.
 
+### 25. A bonus can be recorded as won and never paid
+
+**Open · Severity: high (money path) · Effort: low · Found by reviewing a
+finished, green module — the same way F30–F32 were found.**
+
+`startBonus` and `stepBonus` both write the session row and then credit the
+player in **two separate operations**, with no shared transaction:
+
+```
+apps/game-backend/src/bonus/session.ts
+  startBonus : insertOne({... status: "resolved", totalWin }) -> creditBonus(...)
+  stepBonus  : updateOne({$set: {status: "resolved", totalWin}}) -> creditBonus(...)
+```
+
+`creditBonus` opens its *own* `withLedgerTransaction`. So the row claiming
+the player won and the ledger entry paying them are not atomic. If the
+process dies, Mongo drops the connection, or the credit throws in the window
+between them, the session is durably `resolved` with a positive `totalWin`
+and **the money was never paid**.
+
+This is the exact invariant `spinRound` is careful to preserve one module
+over — there the debit, the credit and the round insert share one
+transaction, with a comment saying why ("money never leaves a balance for a
+round that doesn't exist"). The bonus path is the same money and does not
+do it.
+
+**Nothing repairs it afterwards.** `startBonus`'s reconnect branch returns
+the existing row and pays nothing — it returns `done: true` with
+`balanceAfter: undefined`. `stepBonus` refuses a resolved session with
+`invalid_bonus_action`. The sweep only touches `active` rows. There is no
+reconciliation pass over resolved-and-unpaid sessions, so the loss is
+permanent and silent.
+
+**Reproduced**, not reasoned about. Forcing the credit to throw once, after
+the row is written:
+
+```
+session status  : resolved
+session totalWin: 1200
+credits written : 0
+balance         : 100000     <- unchanged
+retry done      : true       <- and pays nothing
+```
+
+The player sees a bonus that landed, the database agrees they won 1200, and
+the ledger has no record of it. It is F30–F32's shape again: a **plausible
+wrong number** rather than an error, so nothing on screen or in a log
+suggests anything went wrong.
+
+**Why the suite is green.** `session.test.ts` asserts the two agree only on
+the happy path (line 145). Its strongest concurrency case asserts
+`credits.length <= 1` — which **zero satisfies**. A test written to catch
+double-paying cannot catch never-paying, and the same assertion passes under
+both.
+
+**The fix is structural and small.** `creditWithinSession` already takes a
+caller-owned `ClientSession` — that is how `spinRound` uses it. Both bonus
+call sites should open one `withLedgerTransaction` and do the session write
+and the credit inside it, so the row and the payment commit together or not
+at all. Verify by mutation: make the credit throw and assert the row is
+*not* left `resolved`.
+
+### 26. Three documents still say "no TLS", and the firewall they prescribe would break the stack
+
+**Open · Severity: medium (documentation vs deployed reality) · Effort: low
+· Found by reading the deployment config against the running box.**
+
+`6ea0288` put six CloudFront distributions in front of the six published
+ports and terminates HTTPS there. Verified live: all four public endpoints
+answer 200 over HTTPS today. But nothing that *describes* the deployment was
+updated with it:
+
+| Where | What it still claims |
+|---|---|
+| `docs/DEPLOY.md:200` | "**No TLS, and no reverse proxy.**" |
+| `docs/TODO.md:3027` (item E) | "Still deliberately absent: **TLS and a reverse proxy.**" |
+| `infra/docker-compose.staging.yml:81` | "The correct fix is a reverse proxy terminating TLS on 443" |
+
+Item E is still *correct in substance* — CloudFront is not the gateway, the
+app ports are still published and still reachable over plain HTTP, so E does
+not close. `6ea0288`'s message says exactly that. The defect is that a
+reader of any of these three files concludes the deployed stack serves
+cleartext, which is no longer what it does.
+
+**The concrete half, and the reason this is not just a stale comment.**
+`docs/DEPLOY.md:55` prescribes, as "a real step, not a precaution":
+
+```bash
+sudo ufw allow OpenSSH && sudo ufw allow 80 && sudo ufw allow 443 && sudo ufw --force enable
+```
+
+That denies 9102–9106 from the internet. **CloudFront reaches the origin
+over exactly those ports**, at `<ip>.nip.io:9102` and friends, from outside
+the box. Running the documented command would take the entire public stack
+down — every distribution would fail to reach its origin — while reading
+like the security hardening it was written as.
+
+So the stopgap the docs lean on to justify leaving the ports published is
+now mutually exclusive with the way the stack is actually served, and
+whichever a future reader applies, the other one is wrong. The honest
+statement is that the app ports are currently open to the internet with
+CloudFront in front rather than in the way, that a host firewall can no
+longer close them, and that restricting the origin to CloudFront's published
+prefix list is the replacement for `ufw` here.
+
 ## Open (accepted)
 
 ### 7. A passing load check is evidence, not proof
