@@ -47,8 +47,9 @@ Any Linux box with Docker and Docker Compose, reachable over SSH. It never
 compiles anything — it pulls images and runs them — so it needs no Node
 toolchain and no source checkout beyond `infra/`.
 
-**The app ports are open to the internet, and a plain host firewall can no
-longer close them.** This section prescribed one until item 26:
+**The app ports are closed to everyone except CloudFront** — by a security
+group, not by a host firewall, and a host firewall can no longer close them
+anyway. This section prescribed one until item 26:
 
 ```bash
 # DO NOT RUN THIS on the current box — it takes the public stack down.
@@ -66,25 +67,29 @@ command that did it looks like a precaution.
 
 So the honest statement of where this stands:
 
-- **9102–9108 are reachable from the internet over plain HTTP**, and that
-  is the current posture rather than an oversight. CloudFront sits *in front
-  of* them, not *in the way of* them.
-- **The backoffice login on 9105 is the exposure that matters.** It is
-  reachable directly over HTTP, bypassing the HTTPS distribution entirely.
-  Item 3 (account lockout) and the rate limiter are what stand in front of
-  it today; the port being open is not mitigated by them, only survivable.
-- **The replacement for `ufw` is an origin allowlist**, not a blanket deny:
-  narrow the fronted ports to the source that legitimately uses them
-  instead of closing them. `scripts/cloudfront-origin-allowlist.mjs`
-  generates the rules — see **1d** below, which also records the three ways
-  of writing this by hand that produce a working-looking rule and a dark
-  stack.
+- **9102–9108 accept traffic only from CloudFront**, enforced by security
+  group `sg-076d5586e14f1459e`, which allows `tcp/9102–9108` from AWS's
+  managed prefix list `pl-a3a144ca`
+  (`com.amazonaws.global.cloudfront.origin-facing`). Verified from off the
+  box: a direct `curl` to `63.187.144.212:9102` times out while the same
+  service answers 200 through its distribution.
+- **SSH on port 22 is open to `0.0.0.0/0`** in the other group,
+  `sg-0a8b8a22be7cf9909` — see **1e**. That is now the widest thing on this
+  box.
+- **`integration-api` on 9107 is reachable by nothing external.** It is
+  inside the allowlisted range, but no distribution fronts it, so CloudFront
+  never calls it and the prefix list denies everyone else. Internally
+  `operator-demo` reaches it over the compose network, which is why nothing
+  appears broken — see **1e**.
 - **The end state is still item E** — a gateway terminating TLS on the box
   itself, at which point the app ports stop being published at all and the
-  health check goes through the proxy.
+  health check goes through the proxy. The security group narrows *who* can
+  reach the published ports; it does not stop them being published, and the
+  traffic from CloudFront to the origin is still plain HTTP.
 
-Mongo is the one port that *is* closed, by the overlay below rather than by
-a firewall, because it has no authentication at all.
+Mongo, Redis and MinIO are closed outright — no published port at all on a
+deployed box, by the overlay below rather than by a firewall, because Mongo
+has no authentication.
 
 ### 1b. The staging overlay
 
@@ -161,17 +166,31 @@ is the IP spelled as a hostname. Recreating them is manual, and so is
 updating the six repository variables above. An Elastic IP is the obvious
 guard and is not currently attached.
 
-### 1d. Closing the app ports to everyone except CloudFront
+### 1d. The origin allowlist — already applied, by a route worth knowing
 
-**Not applied yet.** The ports are open as described in section 1. This is
-the task that closes them, written down and generated rather than left as a
-sentence, because every way of getting it wrong fails silently and fails
-minutes later.
+**This is done, and it was done before the script that generates it was
+written.** Security group `sg-076d5586e14f1459e` allows `tcp/9102–9108` from
+`pl-a3a144ca` and nothing else. Two documents claimed otherwise for a day
+(item 26 and the first version of this section), because both were written
+from reading the repository rather than from reading the box.
+
+**The applied rule uses AWS's own managed prefix list**, which is better
+than what the script below proposes building: `pl-a3a144ca` is
+`com.amazonaws.global.cloudfront.origin-facing`, maintained by AWS, 46
+entries matching the script's output exactly. **AWS updates it**, so the
+"nothing watches for the ranges changing" caveat does not apply to the rule
+that is actually in force — it applies only to a hand-built copy. Prefer the
+managed list; it is one rule, it never drifts, and it costs no maintenance.
+
+The script remains useful for the `ufw` form (a box outside AWS has no
+prefix lists), for `--check`, and for the traps below, which are exactly the
+mistakes a hand-built list invites.
 
 ```bash
 node scripts/cloudfront-origin-allowlist.mjs              # ufw rules
 node scripts/cloudfront-origin-allowlist.mjs --format=sg  # AWS security group
-node scripts/cloudfront-origin-allowlist.mjs --check      # verify a live box
+ORIGIN_HOST=63.187.144.212 \
+  node scripts/cloudfront-origin-allowlist.mjs --check    # verify the live box
 ```
 
 The script prints rules and never applies them, and has no `--apply` flag on
@@ -199,25 +218,59 @@ down:
    the box has a v6 address, a v4-only allowlist leaves v6 either wide open
    or fully closed depending on the default policy.
 
-**9107 is deliberately not in the list.** `integration-api` has no
-distribution in front of it because operators call it server-to-server with
-a signed request, never from a browser — allowlisting CloudFront to it would
-close it to its only real callers. Narrowing 9107 is a separate decision
-about operator source addresses.
+**The script omits 9107 and the applied rule does not**, which is a real
+difference rather than a rounding error. The rule is a single
+`9102–9108` range, so it includes `integration-api`; the script lists the
+six fronted ports individually and leaves 9107 out on the reasoning that
+operators call it server-to-server and allowlisting CloudFront to it would
+close it to its only callers. That reasoning is sound and the applied rule
+still has the effect the script was trying to avoid — see **1e**.
 
 **Verify from off the box, and verify both halves.** That CloudFront still
 answers proves the allowlist did not lock it out; that a direct request no
 longer answers proves the rule does anything. Either alone is consistent
 with a broken configuration, which is why `--check` reports the direct half
-as SKIPPED rather than passing when `ORIGIN_HOST` is unset:
+as SKIPPED rather than passing when `ORIGIN_HOST` is unset. Current result:
+all three distributions 200, all six ports refused directly.
 
-```bash
-ORIGIN_HOST=<ip> node scripts/cloudfront-origin-allowlist.mjs --check
-```
+**Re-running matters only for a hand-built list.** The applied rule
+references AWS's managed prefix list, which AWS keeps current. A copy made
+by the script is a snapshot and does go stale.
 
-**Re-run it when AWS updates the ranges.** The list is not static, and a
-prefix added after the rules were written is a distribution that starts
-failing to reach the origin. Nothing currently watches for this.
+### 1e. Two things the security groups say that nothing else does
+
+Both found by reading the live groups after `aws login`, having previously
+described this box's network posture from the repository alone.
+
+**SSH is open to the entire internet.** `sg-0a8b8a22be7cf9909` allows
+`tcp/22` from **both** `91.151.137.4/32` and `0.0.0.0/0`. The specific
+address is inert — the wildcard beside it already admits everyone — so the
+rule reads like it restricts SSH to one office while doing nothing of the
+kind. Confirmed reachable: a TCP connect to port 22 from an unrelated
+address succeeds.
+
+With the app ports now narrowed to CloudFront, **this is the widest opening
+on the box**, and it is the one an attacker would actually work on. The fix
+is to drop the `0.0.0.0/0` entry and keep the `/32`, which is a one-line
+change with a real hazard attached: doing it from an address not covered by
+the remaining rule ends the session applying it, and the deploy's own SSH
+would break if it runs from a GitHub-hosted runner whose address is not in
+the list. That makes it a decision about how the deploy reaches this box,
+not a quick tidy — recorded in `docs/TODO.md` item 29 rather than done
+casually.
+
+**No external operator can reach `integration-api`.** Port 9107 is inside
+the allowlisted range, so the security group permits CloudFront to it — but
+no distribution fronts 9107, so CloudFront never calls it, and the prefix
+list denies everyone else. The port is therefore reachable by nothing
+outside the box.
+
+Nothing looks broken, because the only current caller is `operator-demo`,
+which reaches it as `http://integration-api:9006` over the compose network
+and never touches the published port. So the integration surface — the
+signed wallet, launch and catalogue calls that item 10 built, and the whole
+point of `docs/INTEGRATION.md` — is currently unreachable by a real
+operator, and every internal test of it passes. `docs/TODO.md` item 30.
 
 ### 2. Repository secrets
 

@@ -62,12 +62,19 @@ const IP_RANGES_URL = "https://ip-ranges.amazonaws.com/ip-ranges.json";
 /**
  * The browser-facing published ports, and the reason each is here.
  *
- * 9107 (integration-api) is deliberately ABSENT. Operators call it
- * server-to-server with a signed request, never from a browser, so it has
- * no CloudFront distribution in front of it — allowlisting CloudFront to it
- * would close it to the operators who are its only real callers. Narrowing
- * 9107 is a separate decision about operator source addresses, recorded in
- * docs/TODO.md item 26 rather than silently bundled in here.
+ * 9107 (integration-api) is deliberately ABSENT from this list, and the
+ * rule actually applied to the box does NOT agree with that — it is a
+ * single 9102–9108 range, so it includes 9107. The reasoning here is that
+ * operators call integration-api server-to-server with a signed request and
+ * never from a browser, so allowlisting *CloudFront* to it closes it to its
+ * only real callers.
+ *
+ * That is exactly what has happened on the live box: 9107 is inside the
+ * allowlisted range, no distribution fronts it, so CloudFront never calls
+ * it and the prefix list denies everyone else — leaving the external
+ * integration surface reachable by nothing. docs/TODO.md item 30. Keeping
+ * this list at six ports rather than matching the applied rule is
+ * deliberate: the applied rule is the one that is wrong.
  */
 const FRONTED_PORTS = [
   { port: 9102, service: "game-backend" },

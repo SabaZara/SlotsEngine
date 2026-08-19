@@ -1683,8 +1683,9 @@ three and a `file:line` in a document nobody re-checks is the same kind of
 quietly-untrue thing this item is about.)
 
 Item E is still *correct in substance* — CloudFront is not the gateway, the
-app ports are still published and still reachable over plain HTTP, so E does
-not close. `6ea0288`'s message says exactly that. The defect is that a
+app ports are still published, and the CloudFront-to-origin hop is still
+plain HTTP, so E does not close. (They are *not* reachable by anyone except
+CloudFront — see item 27, which corrects what this item assumed.) `6ea0288`'s message says exactly that. The defect is that a
 reader of any of these three files concludes the deployed stack serves
 cleartext, which is no longer what it does.
 
@@ -1748,25 +1749,60 @@ cloudfront` with a 200, so the 200 is the origin answering and not a cached
 edge response.
 
 **What this does not close.** Item E stands: the app ports are still
-published, still reachable over plain HTTP, and the backoffice login on 9105
-is still gettable directly. Nothing here changed the deployment's security
-posture — it changed what the documents say about it, and stopped one of
-them recommending an outage.
+published, and the CloudFront-to-origin hop is still plain HTTP. Nothing
+here changed the deployment's security posture — it changed what the
+documents say about it, and stopped one of them recommending an outage.
 
-### 27. The origin allowlist is generated but not applied
+**One sentence above was wrong when written**, and is left in place struck
+rather than edited away, because how it was wrong is the useful part. This
+item said "the backoffice login on 9105 is still gettable directly" and
+that the ports were "reachable directly over plain HTTP". They were not: a
+security group had already restricted 9102–9108 to CloudFront's managed
+prefix list. The claim was inferred from compose files and workflow YAML —
+neither of which contains a security group — and asserted about a live box
+without ever querying it. See item 27, and items 29 and 30 for what the
+same read found once it actually happened.
 
-**Open · Severity: medium (the exposure item 26 documented) · Effort: low,
-but needs AWS/SSH access · The rules exist; nothing has run them.**
+The other half of the sentence held up: an origin firewall is still the
+wrong instrument, `ufw` would still have taken the stack down, and the
+prefix list is exactly the "origin allowlist, not a blanket deny" this item
+argued for — it simply already existed.
+
+### ~~27. The origin allowlist is generated but not applied~~ — it was already applied
+
+**Closed · Found to be a false premise once there was an AWS session to
+check it with.**
 
 Item 26 said the replacement for the `ufw` command was an origin allowlist
-and left it as a sentence. `scripts/cloudfront-origin-allowlist.mjs` now
-generates it — `ufw` or security-group form, `--check` to verify a live box
-— and `docs/DEPLOY.md` section 1d documents it. **The rules have not been
-applied**: this session had no AWS session (expired) and no SSH key for the
-box, so the ports are still open exactly as item 26 describes.
+and left it as a sentence; this item said the script existed but the rules
+had never been run. **Both were wrong about the box.** Security group
+`sg-076d5586e14f1459e` already allowed `tcp/9102–9108` from AWS's managed
+prefix list `pl-a3a144ca`
+(`com.amazonaws.global.cloudfront.origin-facing`) and nothing else, applied
+before any of this was written down.
 
-What remains is one person with access running the script, reading the
-output, applying it, and running `--check` with `ORIGIN_HOST` set.
+Verified from off the box rather than from the console: a direct request to
+`63.187.144.212:9102` times out while the same service answers 200 through
+its distribution, and `--check` with `ORIGIN_HOST` set now passes both
+halves — three distributions 200, six ports refused.
+
+**The applied rule is better than the one the script proposes building.**
+`pl-a3a144ca` is maintained by AWS, has 46 entries matching the script's
+output exactly, and updates itself — so this item's own warning that
+"nothing watches for AWS changing the ranges" does not apply to the rule
+actually in force. It applies only to a hand-built copy, which is now what
+the script is for (a box outside AWS, or the `ufw` form).
+
+**The lesson is the one this repo keeps re-learning, one layer out.** Items
+26 and 27 were both written by reading the repository — the compose files,
+the workflow, the docs — and describing the deployment from them. The
+repository does not contain the security groups, so the description was
+confident, detailed, internally consistent and false. It took `aws login`
+to find out, and the same read turned up items 29 and 30, neither of which
+any amount of further reading in this repo could have surfaced.
+
+What remains is nothing for the allowlist itself. Two findings from the same
+read are open as items 29 and 30.
 
 **The script exists rather than a documented command because all three ways
 of writing this by hand fail silently**, and each was measured against the
@@ -1824,6 +1860,66 @@ calling it differently than the tests did.
 
 Mutation-verified: reverting to `===` fails the new case. Confirmed against
 the rebuilt container, not only the test.
+
+### 29. SSH is open to the whole internet, behind a rule that looks restrictive
+
+**Open · Severity: high (it is now the widest opening on the box) · Effort:
+low, with a real hazard · Found by reading the live security groups after
+`aws login`.**
+
+`sg-0a8b8a22be7cf9909` allows `tcp/22` from **both** `91.151.137.4/32` and
+`0.0.0.0/0`. The `/32` is inert — the wildcard beside it already admits
+everyone — so the rule reads like SSH is pinned to one address while being
+open to all of them. Confirmed reachable: a TCP connect to port 22 from an
+unrelated address succeeds.
+
+This matters more now than it did last week. With 9102–9108 narrowed to
+CloudFront (item 27), **SSH is the widest thing left**, and it is the one an
+attacker would actually grind — the deploy key is the credential that can
+change what runs on the box.
+
+**Why this is not a one-line fix to make casually.** Dropping `0.0.0.0/0`
+disconnects anyone whose address is not the remaining `/32` — including the
+session applying it, and including `deploy.yml` if its runner's address is
+not covered. GitHub-hosted runners have no stable address, so the honest
+options are: keep SSH open and rely on key-only auth, move the deploy to a
+self-hosted runner or a VPN, or use SSM Session Manager and drop inbound SSH
+entirely. That is a decision about how the deploy reaches this box, which is
+why it is recorded rather than done.
+
+Worth noting the deploy already uses key-based auth with a pinned host key,
+so "open" here means an attacker can reach the daemon, not that a password
+is guessable.
+
+### 30. No external operator can reach the integration API
+
+**Open · Severity: high (the external surface is unreachable) · Effort: low
+· Found by reading the live security groups against what the distributions
+front.**
+
+Port 9107 is inside the allowlisted `9102–9108` range, so the security group
+permits **CloudFront** to it — but no distribution fronts 9107, so
+CloudFront never calls it, and the prefix list denies everyone else. The
+port is reachable by nothing outside the box. Verified: a direct request
+from off the box times out, and there is no distribution whose
+`/health/ready` answers `integration-api`.
+
+**Nothing appears broken**, which is the whole problem. The only current
+caller is `operator-demo`, which reaches it as
+`http://integration-api:9006` over the compose network and never touches the
+published port. So every internal check passes — `e2e:operator` included,
+since it runs against a local stack — while the surface those checks
+validate is unreachable by the operators it exists for.
+
+`docs/INTEGRATION.md` states a base URL of `https://<host>:9006` and hands
+that to integrators. On this deployment there is no host and port an
+operator could substitute into it that would answer.
+
+This is item 10's shape a second time: the module is complete, tested and
+correct, and **the path a real external caller takes was never checked**.
+The fix is a seventh distribution fronting 9107 (and a
+`PUBLIC_INTEGRATION_API_URL` to go with it), or a deliberate decision that
+operators reach it another way — but not silence.
 
 ## Open (accepted)
 
