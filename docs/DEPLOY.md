@@ -47,21 +47,45 @@ Any Linux box with Docker and Docker Compose, reachable over SSH. It never
 compiles anything — it pulls images and runs them — so it needs no Node
 toolchain and no source checkout beyond `infra/`.
 
-**Firewall it before the first deploy, not after.** The stack publishes
-9102–9106 on the box, and those ports must not be reachable from the
-internet. Allow SSH and 80/443; deny the rest:
+**The app ports are open to the internet, and a plain host firewall can no
+longer close them.** This section prescribed one until item 26:
 
 ```bash
+# DO NOT RUN THIS on the current box — it takes the public stack down.
 sudo ufw allow OpenSSH && sudo ufw allow 80 && sudo ufw allow 443 && sudo ufw --force enable
 ```
 
-This is a real step, not a precaution. The internal API is signed and the
-socket checks handshake origins, so neither is naked — but the backoffice API
-is on 9105 and its login is the thing an attacker would grind. The overlay
-below removes Mongo's published port entirely, because that one has no
-authentication at all; the app ports stay published because the deploy's own
-health check curls them from the box, and a firewall is the right layer to
-close them.
+It is kept here, struck, rather than deleted, because it reads exactly like
+the security hardening it was written as and someone will otherwise
+reintroduce it. `6ea0288` put six CloudFront distributions in front of the
+browser-facing ports (see **1c** below), and **CloudFront reaches the origin
+from outside the box, over those same ports** — `<ip>.nip.io:9102` and
+friends. Denying those ports denies CloudFront, every distribution starts
+failing to reach its origin, and the whole public stack goes dark while the
+command that did it looks like a precaution.
+
+So the honest statement of where this stands:
+
+- **9102–9108 are reachable from the internet over plain HTTP**, and that
+  is the current posture rather than an oversight. CloudFront sits *in front
+  of* them, not *in the way of* them.
+- **The backoffice login on 9105 is the exposure that matters.** It is
+  reachable directly over HTTP, bypassing the HTTPS distribution entirely.
+  Item 3 (account lockout) and the rate limiter are what stand in front of
+  it today; the port being open is not mitigated by them, only survivable.
+- **The replacement for `ufw` is an origin allowlist**, not a blanket deny:
+  restrict the fronted ports to CloudFront's published prefix list
+  (`AWS_REGION`/`CLOUDFRONT_ORIGIN_FACING` in the `ip-ranges.json` AWS
+  publishes), leaving SSH and denying everything else. That keeps the
+  distributions working while closing direct access. It is a security-group
+  or `ufw` rule per prefix and has to be re-applied when AWS updates the
+  list, which is why it is a real task rather than a one-liner here.
+- **The end state is still item E** — a gateway terminating TLS on the box
+  itself, at which point the app ports stop being published at all and the
+  health check goes through the proxy.
+
+Mongo is the one port that *is* closed, by the overlay below rather than by
+a firewall, because it has no authentication at all.
 
 ### 1b. The staging overlay
 
@@ -81,6 +105,62 @@ It is called `staging` rather than `production` on purpose. Nothing here has
 served a real player yet, and a deployment history claiming production makes
 the first genuine one indistinguishable from this. Rename it when that stops
 being true.
+
+### 1c. TLS, and where it actually lives
+
+**Nothing in this repository creates or configures the TLS layer.** That is
+the single most important thing to know about it: the six CloudFront
+distributions in front of this stack were created by hand in the AWS
+console, they are not in `deploy.yml`, not in any compose file, and not in
+Terraform. A clean clone plus the secrets below reproduces the *box*, not
+the HTTPS in front of it. Recorded here because it existed only in
+`6ea0288`'s commit message until item 26, which meant the only way to learn
+the deployment had a TLS layer was to read git log.
+
+Why CloudFront rather than the gateway item E describes: that gateway needs
+a hostname and a certificate, and this account has neither — Route 53
+Domains refuses Free Tier accounts, and Let's Encrypt will not issue for the
+`ec2-*.amazonaws.com` name AWS assigns. CloudFront hands out a trusted
+`*.cloudfront.net` certificate for free, so each distribution fronts one
+published port and terminates HTTPS there.
+
+Each row below was confirmed against what the distribution actually answers
+today — the two API rows by their `/health/ready` payload naming the
+service, the three page rows by their `<title>` — rather than inferred from
+the variable names, which is how the port column came out wrong the first
+time.
+
+| Distribution | Fronts | Host port | Repository variable |
+|---|---|---:|---|
+| `d39x0089nxs6ls` | game-frontend | 9104 | `PUBLIC_GAME_FRONTEND_URL` |
+| `dk0v1coh4j76p` | backoffice-frontend | 9106 | `BACKOFFICE_CORS_ORIGINS` |
+| `doznfrj38w1op` | operator-demo | 9108 | — |
+| `d3o61up86kzcn` | game-backend | 9102 | `PUBLIC_GAME_BACKEND_URL` |
+| `d377drvfmw1hda` | game-socket | 9103 | `PUBLIC_GAME_SOCKET_URL` |
+| `d3tecd275gihq4` | backoffice-api | 9105 | `PUBLIC_BACKOFFICE_API_URL` |
+
+Note the range is **9102–9106 plus 9108**, not the contiguous "9102–9106"
+this document said throughout. `integration-api` on 9107 is the one
+published port with no distribution in front of it, because operators call
+it server-to-server with a signed request and never from a browser.
+
+Two things follow from this that are easy to get wrong:
+
+- **The origin hostname is `<ip>.nip.io`, not the bare IP**, because a
+  CloudFront custom origin must be a DNS name. `nip.io` resolves
+  `1.2.3.4.nip.io` to `1.2.3.4`, so it is a way of spelling the address, not
+  a third party in the request path — but it *is* a public DNS service this
+  deployment now depends on for name resolution.
+- **The APIs had to be fronted too, not just the pages.** An HTTPS page
+  cannot call an `http://` endpoint, so serving the frontends over TLS while
+  leaving 9102/9103/9105 bare would produce pages that load and then
+  silently fail every request. That is why there are six distributions and
+  not two.
+
+**If the box's IP changes, every distribution breaks**, because the origin
+is the IP spelled as a hostname. Recreating them is manual, and so is
+updating the six repository variables above. An Elastic IP is the obvious
+guard and is not currently attached.
 
 ### 2. Repository secrets
 
@@ -197,13 +277,18 @@ was written about.
   what it runs — the name says the deploy does not claim to be production,
   not that a separate production tier exists behind it. Promoting a release
   between two tiers would need somewhere to put the second one.
-- **No TLS, and no reverse proxy.** Services are reached on their published
-  ports over plain HTTP, closed off by a host firewall rather than by not
-  being bound at all. The right shape is a gateway terminating TLS on 443 and
-  routing over the compose network, which then lets the app ports be
-  unpublished the way Mongo's already is — and lets the health check go
-  through the proxy instead of `localhost:9102`. That needs a hostname and a
-  certificate, so it follows the box.
+- **TLS at CloudFront, no reverse proxy on the box.** Browsers reach the
+  stack over HTTPS through six CloudFront distributions (see *TLS* above);
+  the services themselves still speak plain HTTP on their published ports,
+  and those ports are still reachable directly. So TLS is real for anyone
+  using the HTTPS URLs and absent for anyone who goes straight to the
+  origin — CloudFront is in front, not in the way.
+
+  The right shape remains a gateway terminating TLS on the box, routing over
+  the compose network, which then lets the app ports be unpublished the way
+  Mongo's already is and lets the health check go through the proxy instead
+  of `localhost:9102`. That needs a hostname and a certificate the account
+  cannot currently get (item E), which is why CloudFront is standing in.
 - **No zero-downtime deploy.** `docker compose up -d` recreates changed
   containers, so there is a short gap. Real zero-downtime needs a load
   balancer and two instances per service — which is also blocked on item 3b,

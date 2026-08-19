@@ -84,8 +84,18 @@ services:
   # `tls-gateway`, it needs a hostname and a certificate, and both follow the
   # box. Recorded in docs/TODO.md item E rather than half-built here.
   #
-  # Until then a host firewall is the stopgap: allow 80/443 and the SSH port,
-  # deny 9102-9106. Stated in docs/DEPLOY.md as a step, not left implied.
+  # What actually runs today is NOT that, and the difference matters when
+  # reading this file: six CloudFront distributions front these ports and
+  # terminate HTTPS there (docs/DEPLOY.md section 1c). They sit in front of
+  # the ports rather than in the way of them, so every mapping below is still
+  # reachable directly over plain HTTP and item E does not close.
+  #
+  # A host firewall was named here as the stopgap — allow 80/443 and SSH,
+  # deny the app ports — and that advice is now WRONG and load-bearing
+  # enough to correct rather than delete: CloudFront reaches these ports
+  # from outside the box, so denying them takes the whole public stack down.
+  # The replacement is an origin allowlist restricted to CloudFront's
+  # published prefix list. See docs/TODO.md item 26.
 
   # 3. integration-api and minio were missing from this file entirely.
   #

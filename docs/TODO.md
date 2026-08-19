@@ -431,11 +431,12 @@ was read first per the routine at the top of this file:
 | No rollback | Automatic on failed health check, plus a manual workflow | This item named "no rollback path" explicitly. |
 
 What the pipeline still does **not** do is listed at the end of
-`docs/DEPLOY.md` rather than implied away: no second tier, no TLS or reverse
-proxy (so the app ports are firewalled rather than unpublished), no
-zero-downtime deploy (blocked on item 3b — the limiters count per process),
-no database migrations, and secrets are still environment variables rather
-than a managed store (item 4).
+`docs/DEPLOY.md` rather than implied away: no second tier, no reverse proxy
+on the box (TLS is terminated at CloudFront in front of the published
+ports, which are still reachable directly — item 26), no zero-downtime
+deploy (blocked on item 3b — the limiters count per process), no database
+migrations, and secrets are still environment variables rather than a
+managed store (item 4).
 
 **The box-side configuration is now written**, which was the one part of item
 1 that did not actually need a box: `infra/docker-compose.staging.yml`
@@ -1661,21 +1662,25 @@ swallowed; they cannot prove the row is rolled back, because the stand-in
 models no rollback. That is stated in the test file itself, and the real-Mongo
 check above is what covers it.
 
-### 26. Three documents still say "no TLS", and the firewall they prescribe would break the stack
+### ~~26. Three documents still say "no TLS", and the firewall they prescribe would break the stack~~ — closed
 
-**Open · Severity: medium (documentation vs deployed reality) · Effort: low
-· Found by reading the deployment config against the running box.**
+**Fixed · Severity was: medium (documentation vs deployed reality) · Found
+by reading the deployment config against the running box.**
 
 `6ea0288` put six CloudFront distributions in front of the six published
 ports and terminates HTTPS there. Verified live: all four public endpoints
 answer 200 over HTTPS today. But nothing that *describes* the deployment was
 updated with it:
 
-| Where | What it still claims |
+| Where | What it claimed |
 |---|---|
-| `docs/DEPLOY.md:200` | "**No TLS, and no reverse proxy.**" |
-| `docs/TODO.md:3027` (item E) | "Still deliberately absent: **TLS and a reverse proxy.**" |
-| `infra/docker-compose.staging.yml:81` | "The correct fix is a reverse proxy terminating TLS on 443" |
+| `docs/DEPLOY.md`, "What this pipeline still does not do" | "**No TLS, and no reverse proxy.**" |
+| `docs/TODO.md` item E | "Still deliberately absent: **TLS and a reverse proxy.**" |
+| `infra/docker-compose.staging.yml`, the published-ports comment | "The correct fix is a reverse proxy terminating TLS on 443" |
+
+(Named by section rather than by line number, because the fix moved all
+three and a `file:line` in a document nobody re-checks is the same kind of
+quietly-untrue thing this item is about.)
 
 Item E is still *correct in substance* — CloudFront is not the gateway, the
 app ports are still published and still reachable over plain HTTP, so E does
@@ -1703,6 +1708,50 @@ statement is that the app ports are currently open to the internet with
 CloudFront in front rather than in the way, that a host firewall can no
 longer close them, and that restricting the origin to CloudFront's published
 prefix list is the replacement for `ufw` here.
+
+**Fixed in all three, and the `ufw` block was struck rather than deleted.**
+A command that reads like hardening and is actually an outage is exactly the
+thing a future reader reintroduces from memory, so `docs/DEPLOY.md` keeps it
+with a `DO NOT RUN THIS` line and the reason above it. The replacement is
+named rather than implied: an origin allowlist restricted to CloudFront's
+published prefix list, which keeps the distributions working while closing
+direct access.
+
+**Two things turned up while fixing it that were worse than the stale
+prose.**
+
+*The TLS layer is in no file anywhere.* The six distributions were created
+by hand in the console — not in `deploy.yml`, not in compose, not in
+Terraform — so a clean clone plus every secret reproduces the box and not
+the HTTPS in front of it, and the only way to learn the deployment had TLS
+at all was to read `6ea0288`'s message. That is now `docs/DEPLOY.md` section
+1c, including the consequence nobody had written down: **the origin is the
+box's IP spelled as `<ip>.nip.io`, so if the IP changes all six break**, and
+recreating them plus the six repository variables is manual. No Elastic IP
+is attached.
+
+*The port range in the docs was wrong, in the direction that matters.*
+Every document said "9102–9106". The real set is 9102–9106 **plus 9108**
+(operator-demo), and 9107 (integration-api) is published with no
+distribution in front of it. So the firewall rule everyone had been copying
+would have missed the demo lobby's port even on a box where it was safe to
+run.
+
+**Verified against the running deployment rather than inferred.** Each row
+of the new distribution table was confirmed by what the endpoint actually
+answers — the three APIs by a `/health/ready` payload naming the service,
+the three pages by their `<title>` — which is how the port column was caught
+being wrong the first time I wrote it from the variable names. That
+CloudFront genuinely reaches the origin over those ports right now was
+confirmed with a cache-busted request returning `x-cache: Miss from
+cloudfront` with a 200, so the 200 is the origin answering and not a cached
+edge response.
+
+**What this does not close.** Item E stands: the app ports are still
+published, still reachable over plain HTTP, and the backoffice login on 9105
+is still gettable directly. Nothing here changed the deployment's security
+posture — it changed what the documents say about it, and stopped one of
+them recommending an outage.
 
 ## Open (accepted)
 
@@ -3141,7 +3190,7 @@ What it does, and what it deliberately does not:
 | | Decision | Why |
 |---|---|---|
 | Mongo's port | **Unpublished** (`!reset []`) | No authentication anywhere in this stack. A public address would expose every collection. |
-| App ports 9102–9106 | **Still published**, firewall instead | `deploy.yml`'s health check curls `localhost:9102` *from the box*. Unpublishing them makes a healthy deploy fail its own verification and auto-roll-back — a worse failure, and a silent one about its cause. |
+| App ports 9102–9108 | **Still published**, and a host firewall is no longer available to close them (item 26) | `deploy.yml`'s health check curls `localhost:9102` *from the box*. Unpublishing them makes a healthy deploy fail its own verification and auto-roll-back — a worse failure, and a silent one about its cause. |
 | Restart policy | `restart: always` on all six | — |
 | Name | `staging` | See below. |
 
@@ -3175,10 +3224,20 @@ kind that reads correctly and behaves otherwise:
 - Local dev unchanged: without `COMPOSE_FILE` the overlay is inert, and
   27018 is open again after restoring `.env`.
 
-Still deliberately absent: **TLS and a reverse proxy.** Unpublishing the app
-ports properly (rather than firewalling them) needs a gateway terminating TLS
-and a health check that goes through it. That needs a hostname and a
-certificate, which genuinely do follow the box.
+Still deliberately absent: **a reverse proxy on the box.** Unpublishing the
+app ports properly needs a gateway terminating TLS and a health check that
+goes through it. That needs a hostname and a certificate, which genuinely do
+follow the box.
+
+**TLS itself is no longer absent, and this paragraph said so for a day
+longer than it was true** (item 26). `6ea0288` put six CloudFront
+distributions in front of the browser-facing ports; browsers reach the stack
+over HTTPS today. It is not the gateway above and does not close this item —
+CloudFront sits in front of the published ports rather than in the way of
+them, so every one is still reachable directly over plain HTTP. What changed
+is that "no TLS" is the wrong summary to hand a reader. The layout of the
+six distributions is in `docs/DEPLOY.md` section 1c, which is also the only
+place it is written down: nothing in this repository creates them.
 
 **The environment should probably be called `staging`, not `production`.**
 Both workflows name a GitHub environment `production`. For a project at this
