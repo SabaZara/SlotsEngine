@@ -92,6 +92,102 @@ describe("applySchemas", () => {
     assert.equal(new Set(names).size, names.length, "a re-run must not duplicate indexes");
   });
 
+  it("is safe to run CONCURRENTLY, which is how the services actually boot", async function () {
+    if (!client) return this.skip(skipReason);
+
+    // The test above runs it twice in sequence, which is not the situation
+    // the boot path creates. game-backend, backoffice-api and
+    // integration-api each call `applySchemas` at startup, and compose
+    // starts all three the moment Mongo reports healthy — so on a fresh
+    // database they run it at the same time, against the same empty
+    // namespaces.
+    //
+    // `applySchemas` reads `listCollections` once at the top and then
+    // creates what is missing, so between that read and the create another
+    // process can create the same collection. Mongo answers the loser with
+    // NamespaceExists (48) and, unhandled, that took down whichever service
+    // lost the race — CI failed exactly this way, with game-backend exiting
+    // (1) two seconds after starting.
+    //
+    // It only ever fails on the FIRST boot against an empty database, which
+    // is why no laptop ever saw it: a developer's Mongo already has the
+    // collections, so the create branch is never taken.
+    const db = await freshDb();
+
+    // The collection is made to exist FIRST, without the validator
+    // `applySchemas` would attach. That is what makes this deterministic
+    // rather than a timing coin-flip, and it is the real losing case:
+    // `createCollection` on a name that already exists is tolerated when
+    // the options match, and fails with NamespaceExists (48) when they do
+    // not — the error CI reported was literally "already exists, but with
+    // different options". Racing three identical `applySchemas` calls does
+    // NOT reproduce it, which was worth finding out: the first version of
+    // this test did exactly that and passed against the unfixed code.
+    //
+    // An insert is how the collection comes to exist without a validator,
+    // and it is not contrived — Mongo creates a namespace implicitly on
+    // first write, so any service that writes before another applies
+    // schemas produces this state.
+    await db.collection("games").insertOne({ gameId: "seeded-by-another-process", version: 1, status: "draft" });
+
+    const runs = await Promise.allSettled([applySchemas(db), applySchemas(db), applySchemas(db)]);
+    const rejected = runs.filter((r) => r.status === "rejected");
+    assert.deepEqual(
+      rejected.map((r) => (r as PromiseRejectedResult).reason?.message),
+      [],
+      "no concurrent run may fail — losing the race means someone else did the work",
+    );
+
+    // And the loser must still converge, not merely survive. A run that
+    // swallowed the conflict and returned early would leave the validator
+    // unapplied, which is a subtler version of the same bug.
+    const [collection] = await db.listCollections({ name: "games" }).toArray();
+    assert.ok(
+      collection?.options?.validator,
+      "the validator must be applied even for the run that lost the create race",
+    );
+
+    const indexes = await db.collection("transactions").indexes();
+    const names = indexes.map((i) => i.name);
+    assert.equal(new Set(names).size, names.length, "concurrent runs must not duplicate indexes");
+  });
+
+  it("survives a collection appearing after the listCollections snapshot", async function () {
+    if (!client) return this.skip(skipReason);
+
+    // The create branch specifically, which the test above does NOT reach:
+    // there the collection already exists when `listCollections` runs, so
+    // `applySchemas` takes the collMod path and `createCollection` is never
+    // called. This drives the other side — the snapshot says "absent", the
+    // namespace appears before the create, and Mongo answers
+    // NamespaceExists (48) because the options differ.
+    //
+    // Worth having as its own case rather than trusting the concurrent one:
+    // removing the code-48 handling leaves that test passing, because the
+    // retrying collMod converges anyway. Only this one fails, which is what
+    // makes the handling demonstrably load-bearing rather than defensive.
+    const db = await freshDb();
+
+    const realList = db.listCollections.bind(db);
+    // A snapshot taken before the namespace exists — exactly what another
+    // process racing this one produces, without depending on timing.
+    (db as unknown as { listCollections: typeof db.listCollections }).listCollections = ((...args: never[]) => {
+      (db as unknown as { listCollections: typeof db.listCollections }).listCollections = realList;
+      void args;
+      return { toArray: async () => [] } as unknown as ReturnType<typeof realList>;
+    }) as typeof db.listCollections;
+
+    await db.collection("games").insertOne({ gameId: "created-by-the-winner", version: 1, status: "draft" });
+
+    await assert.doesNotReject(
+      () => applySchemas(db),
+      "a collection created between the snapshot and the create must not fail the boot",
+    );
+
+    const [games] = await realList({ name: "games" }).toArray();
+    assert.ok(games?.options?.validator, "and the validator must still end up applied");
+  });
+
   it("builds the transactions idempotency index as unique on the PAIR", async function () {
     if (!client) return this.skip(skipReason);
 

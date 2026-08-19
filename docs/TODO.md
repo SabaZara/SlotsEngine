@@ -1921,6 +1921,61 @@ The fix is a seventh distribution fronting 9107 (and a
 `PUBLIC_INTEGRATION_API_URL` to go with it), or a deliberate decision that
 operators reach it another way — but not silence.
 
+### ~~31. `applySchemas` races itself when the services boot together~~ — fixed
+
+**Found by CI**, on the first push whose diff could not possibly have caused
+it — a docs-and-script commit. `game-backend` exited (1) two seconds after
+starting:
+
+```
+MongoServerError: namespace slots_engine.games already exists, but with
+different options ... code 48 NamespaceExists
+    at applySchemas (packages/mongo-schemas/dist/collections.js:556)
+```
+
+`applySchemas` reads `listCollections` **once** at the top and then creates
+what is missing — a read-then-write, in the exact shape this repo's own
+header comment warns about two files away ("an application-level
+read-then-write cannot survive two concurrent callers"). Three services call
+it at boot and compose starts them together the moment Mongo reports
+healthy, so on a fresh database they race.
+
+**It fails only on the first boot against an empty database**, which is why
+no laptop ever saw it: a developer's Mongo already has the collections, so
+the create branch is never taken. Intermittent in CI, invisible locally, and
+it takes down whichever service loses.
+
+**Two distinct races, and the second was found by fixing the first.**
+
+| | Failure | Fix |
+|---|---|---|
+| `createCollection` | `NamespaceExists` (48) when the namespace appeared after the snapshot *with different options* | Treat as "someone else did it" and fall through to `collMod` |
+| `collMod` / `createIndexes` | "cannot perform operation: an index build is currently running" — another process is building those very indexes | Bounded retry, narrow to that condition |
+
+The second only surfaced because the first fix let the test get far enough
+to hit it. A drop-and-rebuild racing another process doing the same is
+handled too (`IndexNotFound` 27 means the winner already rebuilt it).
+
+**The first version of the test passed against the unfixed code**, and that
+is the part worth keeping. Racing three identical `applySchemas` calls does
+not reproduce anything: `createCollection` on an existing name is *tolerated*
+when the options match. The failure needs the namespace to exist with
+**different** options — which is what a process that created it implicitly
+by writing first produces. Reproduced deterministically by seeding the
+collection without a validator, rather than by hoping for an interleaving.
+
+**Both fixes are separately mutation-verified**, which also took two passes.
+Removing the code-48 handling left the concurrent test *passing*, because
+the retrying `collMod` converges anyway — so a second test drives the create
+branch specifically by stubbing the `listCollections` snapshot to return
+empty. Only that one fails when the handling is removed, which is what makes
+it demonstrably load-bearing rather than defensive.
+
+**Verified beyond the suite**: a full `docker compose down -v` and cold boot
+from empty volumes — the exact CI scenario — now starts every service with
+zero occurrences of either error in the logs, and all three readiness
+endpoints answer.
+
 ## Open (accepted)
 
 ### 7. A passing load check is evidence, not proof

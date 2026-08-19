@@ -567,6 +567,13 @@ export const COLLECTIONS: CollectionDefinition[] = [
  * no-op, and `createIndexes` ignores an index that already exists with the
  * same spec.
  *
+ * **Safe to run CONCURRENTLY, too**, which is a stronger claim and the one
+ * that was untrue until CI met it. Three services call this at boot and
+ * compose starts them together, so on a fresh database they race. Both
+ * racing operations are handled below — `NamespaceExists` on the create,
+ * `IndexOptionsConflict` on the index — and in both cases losing the race
+ * means someone else did the work, not that anything is wrong.
+ *
  * An index whose *definition changed* is the case that needs care. Mongo
  * does not update one in place — `createIndexes` fails with
  * IndexOptionsConflict (85) when the name already exists with different
@@ -575,28 +582,106 @@ export const COLLECTIONS: CollectionDefinition[] = [
  * how a schema fix becomes an outage. So a conflict is resolved by
  * dropping the old index and rebuilding it to the current definition.
  */
+/**
+ * Retries an operation that a concurrent index build can transiently refuse.
+ *
+ * Deliberately narrow: it retries only `BackgroundOperationInProgressFor*`
+ * (codes 12586/12587) and the message Mongo uses for it, so a genuine
+ * failure — a bad validator, a permissions problem — still surfaces
+ * immediately rather than being retried five times and then thrown anyway.
+ *
+ * The ceiling is low on purpose. These builds are on collections that are
+ * empty or nearly so at boot; if this is still failing after ~1.5s the
+ * problem is not contention and waiting longer would only delay the report.
+ */
+async function withRetry<T>(op: () => Promise<T>, attempts = 6, delayMs = 250): Promise<T> {
+  for (let i = 1; ; i++) {
+    try {
+      return await op();
+    } catch (err) {
+      const e = err as { code?: number; message?: string };
+      const contended =
+        e.code === 12586 || e.code === 12587 || /index build is currently running/i.test(e.message ?? "");
+      if (!contended || i >= attempts) throw err;
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+}
+
 export async function applySchemas(db: Db): Promise<void> {
   const existing = new Set((await db.listCollections({}, { nameOnly: true }).toArray()).map((c) => c.name));
 
   for (const def of COLLECTIONS) {
-    if (!existing.has(def.name)) {
-      await db.createCollection(def.name, def.validator ? { validator: def.validator } : undefined);
-    } else if (def.validator) {
-      await db.command({ collMod: def.name, validator: def.validator, validationLevel: "moderate" });
+    let present = existing.has(def.name);
+
+    if (!present) {
+      try {
+        await db.createCollection(def.name, def.validator ? { validator: def.validator } : undefined);
+      } catch (err) {
+        // 48 NamespaceExists: another process created it between the
+        // `listCollections` above and this call. `existing` is a snapshot
+        // read once at the top, so this is a read-then-write race in
+        // exactly the shape this codebase keeps meeting — and it is real,
+        // not theoretical: game-backend, backoffice-api and integration-api
+        // all run `applySchemas` at boot, and compose starts them together
+        // the moment Mongo reports healthy. On a fresh database they race
+        // to create the same collections.
+        //
+        // It fails only on the FIRST boot against an empty database, which
+        // is why CI met it and no laptop did — a developer's Mongo already
+        // has the collections, so the branch is never taken. That also
+        // makes it the worst kind of intermittent: invisible locally,
+        // occasional in CI, and it takes down whichever service loses.
+        //
+        // Losing the race is not an error condition. The winner created the
+        // collection this process was going to create, so fall through to
+        // the `collMod` below and converge on the same validator.
+        if ((err as { code?: number }).code !== 48) throw err;
+        present = true;
+      }
+    }
+
+    if (present && def.validator) {
+      // Retried, because `collMod` is refused outright while an index build
+      // is running on the same collection — "cannot perform operation: an
+      // index build is currently running". Another process a few lines
+      // ahead in this same loop is building exactly those indexes, so under
+      // concurrent boots this is the *second* way this function fails, and
+      // it is not the one the NamespaceExists handling above covers.
+      //
+      // A short bounded retry rather than a lock: index builds on empty
+      // collections finish in milliseconds, the operation is idempotent, and
+      // giving up means booting with the validator unapplied — which is
+      // silent, and worse than the delay.
+      await withRetry(() =>
+        db.command({ collMod: def.name, validator: def.validator, validationLevel: "moderate" }),
+      );
     }
 
     for (const ix of def.indexes) {
       const spec = { key: ix.keys, ...ix.options };
       try {
-        await db.collection(def.name).createIndexes([spec]);
+        // Same contention as the `collMod` above: another process building
+        // this very index refuses this one until it finishes.
+        await withRetry(() => db.collection(def.name).createIndexes([spec]));
       } catch (err) {
         // 85 IndexOptionsConflict / 86 IndexKeySpecsConflict: same name,
         // different definition. Rebuilding is safe here because every index
         // in this file is derived from the documents themselves.
         const code = (err as { code?: number }).code;
         if ((code !== 85 && code !== 86) || !ix.options?.name) throw err;
-        await db.collection(def.name).dropIndex(ix.options.name);
-        await db.collection(def.name).createIndexes([spec]);
+
+        // The drop-and-rebuild is the one genuinely destructive step in this
+        // function, and under concurrent boots it can race another process
+        // doing the same thing: the loser's `dropIndex` finds the index
+        // already gone (27 IndexNotFound), which means the winner has
+        // rebuilt it and there is nothing to do but converge.
+        try {
+          await withRetry(() => db.collection(def.name).dropIndex(ix.options!.name!));
+        } catch (dropErr) {
+          if ((dropErr as { code?: number }).code !== 27) throw dropErr;
+        }
+        await withRetry(() => db.collection(def.name).createIndexes([spec]));
       }
     }
   }
