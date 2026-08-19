@@ -1553,10 +1553,10 @@ configured the route passes keys through unchanged, so the unit test
 asserts the *seam is exercised* rather than that a signature verifies. The
 live check above is what establishes the rest.
 
-### 25. A bonus can be recorded as won and never paid
+### ~~25. A bonus can be recorded as won and never paid~~ — closed
 
-**Open · Severity: high (money path) · Effort: low · Found by reviewing a
-finished, green module — the same way F30–F32 were found.**
+**Fixed · Severity was: high (money path) · Found by reviewing a finished,
+green module — the same way F30–F32 were found.**
 
 `startBonus` and `stepBonus` both write the session row and then credit the
 player in **two separate operations**, with no shared transaction:
@@ -1614,6 +1614,52 @@ call sites should open one `withLedgerTransaction` and do the session write
 and the credit inside it, so the row and the payment commit together or not
 at all. Verify by mutation: make the credit throw and assert the row is
 *not* left `resolved`.
+
+**The fix.** Both call sites now do the session write and the credit inside
+one `withLedgerTransaction`, so the row and the payment commit together or
+not at all — the invariant `spinRound` already held one module over.
+`creditBonus` is gone: it was a *correct* exactly-once credit, and that was
+the problem, because owning its own transaction is precisely what stopped it
+sharing the session write's. Its `${bonusSessionId}:bonus-credit` key is
+unchanged and still the ledger's backstop.
+
+Two details worth keeping:
+
+- **The module runs outside the transaction.** `module.start`/`step` are
+  pure, so keeping them out holds the transaction short and retry-safe —
+  the same argument `spinRound` makes for `evaluateSpin`.
+- **The step claim stays outside too.** It is an atomic `findOneAndUpdate`
+  on `stepIndex` and must hold even for a step that pays nothing; pulling it
+  in would change what a concurrent loser observes.
+
+**Mutation-verified, and the first attempt proved only half of it.** Reverting
+`startBonus` to two transactions failed the new test. Reverting `stepBonus`
+the same way **passed** — a surviving mutant, recorded here rather than
+quietly fixed, because it is the more useful half of the result: the fix had
+landed on both paths while the evidence covered one, and an untested half of
+a money fix is indistinguishable from an unfixed one. A second test closed
+it; both mutants now fail.
+
+**Verified against real MongoDB**, which is the half `fakeMongo` cannot
+reach — its `withTransaction` runs the callback and lets a throw propagate
+*without undoing writes*, so no unit test here can establish rollback. Failing
+the credit against the live replica set:
+
+| | before | after |
+|---|---|---|
+| session row | `resolved`, `totalWin=500` | absent — rolled back |
+| credits | 0 | 0 |
+| balance | untouched | untouched |
+
+and the happy path commits row and credit together (`totalWin=1200`, one
+credit, `balanceAfter` moved by exactly that). `npm run e2e:spin` passes in
+full against the same stack.
+
+**What the tests still cannot establish.** The unit tests prove the credit is
+*inside* the transaction and that a failure surfaces rather than being
+swallowed; they cannot prove the row is rolled back, because the stand-in
+models no rollback. That is stated in the test file itself, and the real-Mongo
+check above is what covers it.
 
 ### 26. Three documents still say "no TLS", and the firewall they prescribe would break the stack
 

@@ -55,6 +55,59 @@ describe("startBonus", () => {
     assert.equal(ctx.raw.collection("transactions").all().length, 0);
   });
 
+  // docs/TODO.md item 25. Both of these assert the invariant that actually
+  // matters and that nothing here asserted before: a session row recorded
+  // as `resolved` with a positive `totalWin` must have a ledger entry
+  // paying it. The old code wrote the row and then credited in a separate
+  // transaction, so a failure in between left the two disagreeing — a
+  // bonus recorded as won and never paid, which no test noticed because
+  // every one of them exercised only the path where both writes succeed.
+  //
+  // What these CANNOT establish is the real rollback: `fakeMongo`'s
+  // `withTransaction` runs the callback and lets a throw propagate without
+  // undoing writes (see its header). So these prove the credit is now
+  // *inside* the transaction and that the failure is surfaced rather than
+  // swallowed; that the row is actually rolled back needs the live
+  // database, and is verified by `npm run e2e:spin` against real Mongo.
+  it("never leaves a resolved bonus unpaid when the credit fails", async () => {
+    let boom = true;
+    const realStartSession = ctx.client.startSession.bind(ctx.client);
+    ctx.client.startSession = (...args: unknown[]) => {
+      if (boom) {
+        boom = false;
+        throw new Error("the credit failed");
+      }
+      return realStartSession(...args);
+    };
+
+    await assert.rejects(() => startBonus(ctx.db, ctx.client, GAME, startInput("wheel", "round-1")));
+
+    // The caller was told. The old code swallowed nothing either — but it
+    // had already committed the row by this point, so the player was left
+    // holding a recorded win with no money behind it.
+    const row = await ctx.raw.collection("bonusSessions").findOne({ roundId: "round-1" });
+    const credits = ctx.raw.collection("transactions").all().filter((t) => t.type === "credit");
+    assert.equal(credits.length, 0, "nothing was paid");
+    if (row?.status === "resolved") {
+      assert.fail("a session was committed as resolved with no credit behind it — item 25");
+    }
+  });
+
+  it("pays exactly what the resolved row records", async () => {
+    const result = await startBonus(ctx.db, ctx.client, GAME, startInput("wheel", "round-1"));
+
+    const row = await ctx.raw.collection("bonusSessions").findOne({ roundId: "round-1" });
+    const credits = ctx.raw.collection("transactions").all().filter((t) => t.type === "credit");
+
+    // Deliberately `=== 1` rather than `<= 1`. The concurrency test below
+    // used the looser form, which zero satisfies — so an assertion written
+    // to catch double-paying passed just as happily when nothing was paid
+    // at all. That is precisely how item 25 stayed invisible.
+    assert.equal(credits.length, 1, "a resolved win must be paid exactly once");
+    assert.equal(credits[0].amount, row?.totalWin, "the amount paid must equal the amount recorded");
+    assert.equal(result.balanceAfter, 100_000 + (row?.totalWin as number));
+  });
+
   it("opens only one session per triggering round, however often it is retried", async () => {
     // An auto-start replayed after a reconnect must not create a second
     // paying session for one spin.
@@ -109,6 +162,71 @@ describe("stepBonus", () => {
     assert.ok(credits.length <= 1, `expected at most one credit, got ${credits.length}`);
   });
 
+  // docs/TODO.md item 25, the `stepBonus` half. Written because mutating
+  // only `startBonus` back to two transactions was caught while mutating
+  // `stepBonus` back was NOT — the fix landed on both paths, but the
+  // evidence only covered one, and an untested half of a money fix is
+  // indistinguishable from an unfixed one.
+  //
+  // A resolving step is needed for this to mean anything, and `pick` can
+  // land on a blank and resolve with a win of 0, which pays nothing and so
+  // never reaches the credit at all. Retrying until the resolution pays
+  // makes the test deterministic about the case it is actually asserting
+  // rather than passing vacuously on a zero-win run.
+  it("never leaves a resolved step unpaid when the credit fails", async () => {
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const fresh = setup();
+      const started = await startBonus(fresh.db, fresh.client, GAME, startInput("pick", "round-1"));
+      const id = started.publicState.bonusSessionId;
+
+      // Fail only the credit's transaction, and only once. The step claim
+      // has already happened by then, so this is precisely the window
+      // between recording the win and paying it.
+      let armed = false;
+      const realStartSession = fresh.client.startSession.bind(fresh.client);
+      fresh.client.startSession = (...args: unknown[]) => {
+        if (armed) {
+          armed = false;
+          throw new Error("the credit failed");
+        }
+        return realStartSession(...args);
+      };
+
+      let done = false;
+      let threw = false;
+      for (let i = 0; i < 8 && !done; i++) {
+        // Arm on every step: whichever one resolves is the one that pays.
+        armed = true;
+        try {
+          done = (
+            await stepBonus(fresh.db, fresh.client, GAME, {
+              operatorId: OPERATOR,
+              playerId: PLAYER,
+              bonusSessionId: id,
+              action: "pick",
+              payload: { tileIndex: i },
+            })
+          ).done;
+        } catch {
+          threw = true;
+          break;
+        }
+      }
+      if (!threw) continue;
+
+      const row = await fresh.raw.collection("bonusSessions").findOne({ bonusSessionId: id });
+      const credits = fresh.raw.collection("transactions").all().filter((t) => t.type === "credit");
+      if (credits.length > 0) continue; // the failure landed on a non-paying step
+
+      if (row?.status === "resolved" && (row?.totalWin as number) > 0) {
+        assert.fail(
+          `a step committed as resolved with totalWin ${row.totalWin} and no credit behind it — item 25`,
+        );
+      }
+      return;
+    }
+  });
+
   it("lets only one of two concurrent steps through — the race the design exists to prevent", async () => {
     // The reference implementation read the status, ran the module, then
     // wrote back. Two concurrent steps could both observe "active", both
@@ -136,13 +254,27 @@ describe("stepBonus", () => {
     }
 
     const credits = ctx.raw.collection("transactions").all().filter((t) => t.type === "credit");
-    assert.ok(credits.length <= 1, `expected at most one credit, got ${credits.length}`);
-
-    // And the recorded win must equal what was actually paid — the exact
-    // invariant the original race could violate.
     const session = await ctx.raw.collection("bonusSessions").findOne({ bonusSessionId });
-    if (credits.length === 1) {
-      assert.equal(credits[0].amount, session?.totalWin, "the recorded win must equal the amount paid");
+
+    // The assertion here was `credits.length <= 1` until item 25, and the
+    // looser form is satisfied by zero — so a test written to catch
+    // double-paying passed just as happily when nothing was paid at all.
+    //
+    // The exact count still cannot be pinned: `pick` can legitimately land
+    // on a blank and resolve with a win of 0, which pays nothing. So the
+    // invariant is stated as the agreement between the two rather than as a
+    // number — a resolved session pays if and only if it recorded a win,
+    // and the amounts match. That fails in both directions, which is the
+    // property the old assertion lacked.
+    assert.equal(session?.status, "resolved", "the doubled-up steps must still finish the session");
+    const recorded = (session?.totalWin as number) ?? 0;
+    assert.equal(
+      credits.length,
+      recorded > 0 ? 1 : 0,
+      `a session recording ${recorded} must have ${recorded > 0 ? "exactly one credit" : "no credit"}, got ${credits.length}`,
+    );
+    if (recorded > 0) {
+      assert.equal(credits[0].amount, recorded, "the recorded win must equal the amount paid");
     }
   });
 

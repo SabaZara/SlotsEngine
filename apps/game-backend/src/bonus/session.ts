@@ -135,21 +135,68 @@ export async function startBonus(
     ...(started.done ? { resolvedAt: new Date().toISOString() } : {}),
   };
 
-  await db.collection("bonusSessions").insertOne({
-    ...session,
-    // Drives the TTL index. A Date rather than an ISO string, because Mongo
-    // only reaps a TTL field that is a genuine BSON date — a string here
-    // would be silently ignored and the row would live forever, which is a
-    // failure nobody would notice for two years.
-    archiveAfter: new Date(Date.now() + retentionMs()),
+  // The row and the payment commit together or not at all.
+  //
+  // These were two separate operations until item 25: the row was inserted,
+  // and a `creditBonus` helper then opened its OWN transaction to pay. That
+  // helper was a correct exactly-once credit, and owning its own
+  // transaction is exactly what stopped it sharing this one — so it is gone
+  // rather than fixed, while the idempotent
+  // `${bonusSessionId}:bonus-credit` key it established is unchanged and
+  // still the ledger's backstop against a double payment.
+  //
+  // A crash in that window left a session durably `resolved` with a
+  // positive `totalWin` and no ledger entry — a bonus recorded as won and
+  // never paid. Nothing repaired it either: the reconnect branch above
+  // returns the existing row and pays nothing, and the sweep only moves
+  // `active` rows, so the loss was permanent and silent.
+  //
+  // `spinRound` holds exactly this invariant one module over, and the
+  // reasoning transfers unchanged: money must never be owed by a row that
+  // committed without it.
+  //
+  // The module ran ABOVE this block, not inside it, and that is deliberate
+  // — `module.start` is pure, so keeping it outside keeps the transaction
+  // short and makes it safe to retry, the same argument `spinRound` makes
+  // for `evaluateSpin` being pure inside its own.
+  //
+  // The result is wrapped in an object rather than returned as a bare
+  // number: `withLedgerTransaction` throws on an `undefined` result, so
+  // returning nothing for the common "nothing to pay yet" case — a
+  // multi-step bonus that has only just opened — would turn every one of
+  // those into an error.
+  const { balanceAfter } = await withLedgerTransaction(client, async (mongoSession) => {
+    await db.collection("bonusSessions").insertOne(
+      {
+        ...session,
+        // Drives the TTL index. A Date rather than an ISO string, because
+        // Mongo only reaps a TTL field that is a genuine BSON date — a
+        // string here would be silently ignored and the row would live
+        // forever, which is a failure nobody would notice for two years.
+        archiveAfter: new Date(Date.now() + retentionMs()),
+      },
+      { session: mongoSession },
+    );
+
+    if (!(started.done && started.totalWin > 0)) return {};
+
+    const credit = await creditWithinSession(db, mongoSession, {
+      operatorId: session.operatorId,
+      playerId: session.playerId,
+      roundId: session.roundId,
+      transactionId: `${session.bonusSessionId}:bonus-credit`,
+      amount: started.totalWin,
+    });
+    return { balanceAfter: credit.balanceAfter };
   });
 
-  if (started.done && started.totalWin > 0) {
-    const balanceAfter = await creditBonus(db, client, session, started.totalWin);
-    return { publicState: publicState(session, started.view), done: true, balanceAfter };
-  }
-
-  return { publicState: publicState(session, started.view), done: started.done };
+  return {
+    publicState: publicState(session, started.view),
+    done: started.done,
+    // Only present when money actually moved, which is what it has always
+    // meant to a caller.
+    ...(balanceAfter !== undefined ? { balanceAfter } : {}),
+  };
 }
 
 export interface StepBonusInput {
@@ -257,15 +304,40 @@ export async function stepBonus(
   });
 
   const resolvedAt = new Date().toISOString();
-  await db.collection("bonusSessions").updateOne(
-    { bonusSessionId: input.bonusSessionId },
-    {
-      $set: {
-        moduleState: { ...result.state, view: result.view },
-        ...(result.done ? { status: "resolved", totalWin: result.totalWin, resolvedAt } : {}),
+
+  // One transaction over the state write and the payment, for the reason
+  // spelled out in `startBonus` — this is the second half of item 25 and
+  // the same defect: a resolving step wrote `status: "resolved"` with a
+  // `totalWin`, then paid in a separate transaction, so a crash between
+  // them left the final step of a bonus recorded as won and unpaid.
+  //
+  // The step claim above stays OUTSIDE this transaction deliberately. It is
+  // an atomic `findOneAndUpdate` on `stepIndex` and is what makes a step
+  // exclusive; pulling it inside would change what a concurrent loser
+  // observes, and the claim must hold even for a step that pays nothing.
+  const { balanceAfter } = await withLedgerTransaction(client, async (mongoSession) => {
+    await db.collection("bonusSessions").updateOne(
+      { bonusSessionId: input.bonusSessionId },
+      {
+        $set: {
+          moduleState: { ...result.state, view: result.view },
+          ...(result.done ? { status: "resolved", totalWin: result.totalWin, resolvedAt } : {}),
+        },
       },
-    },
-  );
+      { session: mongoSession },
+    );
+
+    if (!(result.done && result.totalWin > 0)) return {};
+
+    const credit = await creditWithinSession(db, mongoSession, {
+      operatorId: session.operatorId,
+      playerId: session.playerId,
+      roundId: session.roundId,
+      transactionId: `${session.bonusSessionId}:bonus-credit`,
+      amount: result.totalWin,
+    });
+    return { balanceAfter: credit.balanceAfter };
+  });
 
   const updated: BonusSession = {
     ...session,
@@ -274,35 +346,11 @@ export async function stepBonus(
     moduleState: result.state,
   };
 
-  if (result.done && result.totalWin > 0) {
-    const balanceAfter = await creditBonus(db, client, session, result.totalWin);
-    return { publicState: publicState(updated, result.view), done: true, balanceAfter };
-  }
-
-  return { publicState: publicState(updated, result.view), done: result.done };
-}
-
-/**
- * Credits a resolved bonus exactly once. The transaction id is derived from
- * the session id, so even if this were somehow reached twice the ledger's
- * unique index would collapse the second call into a no-op.
- */
-async function creditBonus(
-  db: Db,
-  client: MongoClient,
-  session: BonusSession,
-  amount: number,
-): Promise<number> {
-  return withLedgerTransaction(client, async (mongoSession) => {
-    const credit = await creditWithinSession(db, mongoSession, {
-      operatorId: session.operatorId,
-      playerId: session.playerId,
-      roundId: session.roundId,
-      transactionId: `${session.bonusSessionId}:bonus-credit`,
-      amount,
-    });
-    return credit.balanceAfter;
-  });
+  return {
+    publicState: publicState(updated, result.view),
+    done: result.done,
+    ...(balanceAfter !== undefined ? { balanceAfter } : {}),
+  };
 }
 
 export async function getPlayerBalance(db: Db, operatorId: string, playerId: string): Promise<number> {
